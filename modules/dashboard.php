@@ -10,6 +10,10 @@
 date_default_timezone_set('America/Sao_Paulo');
 
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
+if (function_exists('sgl_integracao_garantir_financeiro')) {
+    sgl_integracao_garantir_financeiro($conn);
+}
 $hoje = date('Y-m-d');
 $inicioMes = date('Y-m-01');
 $fimMes = date('Y-m-t');
@@ -91,36 +95,46 @@ function badgeStatus(string $status): string
 // Indicadores financeiros
 // ========================
 $recebidoContasMes = totalScalar($conn, "
-    SELECT COALESCE(SUM(valor_pago), 0) AS total
+    SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END), 0) AS total
     FROM contas_receber
     WHERE deletado = 0
       AND status IN ('Recebido','Pago','Quitada')
-      AND COALESCE(data_recebimento, atualizado_em) BETWEEN '{$inicioMes}' AND '{$fimMes} 23:59:59'
+      AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
 ");
 
-$recebidoHonorariosMes = totalScalar($conn, "
-    SELECT COALESCE(SUM(valor_pago), 0) AS total
-    FROM honorarios_parcelas
-    WHERE status_pagamento IN ('Pago','Quitada')
-      AND COALESCE(data_pagamento, data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
+$recebidoHonorariosSemContaMes = totalScalar($conn, "
+    SELECT COALESCE(SUM(hp.valor_pago), 0) AS total
+    FROM honorarios_parcelas hp
+    WHERE hp.status_pagamento IN ('Pago','Quitada','Recebido')
+      AND COALESCE(hp.data_pagamento, hp.data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
+      AND NOT EXISTS (
+          SELECT 1 FROM contas_receber cr
+          WHERE cr.parcela_id = hp.id
+            AND cr.deletado = 0
+      )
 ");
 
-$recebidoMes = $recebidoContasMes + $recebidoHonorariosMes;
+$recebidoMes = $recebidoContasMes + $recebidoHonorariosSemContaMes;
 
 $previsaoContas = totalScalar($conn, "
     SELECT COALESCE(SUM(CASE WHEN valor_pendente > 0 THEN valor_pendente ELSE valor END), 0) AS total
     FROM contas_receber
     WHERE deletado = 0
-      AND status IN ('Pendente','Parcial')
+      AND status IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido')
 ");
 
-$previsaoHonorarios = totalScalar($conn, "
-    SELECT COALESCE(SUM(CASE WHEN saldo_devedor > 0 THEN saldo_devedor ELSE valor_parcela END), 0) AS total
-    FROM honorarios_parcelas
-    WHERE status_pagamento IN ('Pendente','Parcial')
+$previsaoHonorariosSemConta = totalScalar($conn, "
+    SELECT COALESCE(SUM(CASE WHEN hp.saldo_devedor > 0 THEN hp.saldo_devedor ELSE hp.valor_parcela END), 0) AS total
+    FROM honorarios_parcelas hp
+    WHERE hp.status_pagamento IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido','Devedor')
+      AND NOT EXISTS (
+          SELECT 1 FROM contas_receber cr
+          WHERE cr.parcela_id = hp.id
+            AND cr.deletado = 0
+      )
 ");
 
-$totalAReceber = $previsaoContas + $previsaoHonorarios;
+$totalAReceber = $previsaoContas + $previsaoHonorariosSemConta;
 
 $despesasAbertas = totalScalar($conn, "
     SELECT COALESCE(SUM(CASE WHEN valor_pendente > 0 THEN valor_pendente ELSE valor END), 0) AS total
@@ -151,15 +165,23 @@ $audienciasHoje = (int)totalScalar($conn, "SELECT COUNT(*) AS total FROM agenda 
 
 $contasPagarHoje = (int)totalScalar($conn, "SELECT COUNT(*) AS total FROM contas_pagar WHERE deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento = '{$hoje}'");
 $contasPagarVencidas = (int)totalScalar($conn, "SELECT COUNT(*) AS total FROM contas_pagar WHERE deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '{$hoje}'");
-$honorariosVencidos = (int)totalScalar($conn, "SELECT COUNT(*) AS total FROM honorarios_parcelas WHERE status_pagamento IN ('Pendente','Parcial') AND data_vencimento < '{$hoje}'");
+$honorariosVencidos = (int)totalScalar($conn, "
+    SELECT COUNT(*) AS total
+    FROM honorarios_parcelas hp
+    LEFT JOIN honorarios h ON h.id = hp.honorario_id
+    WHERE COALESCE(h.deletado,0) = 0
+      AND hp.data_vencimento < '{$hoje}'
+      AND COALESCE(hp.saldo_devedor, hp.valor_parcela, 0) > 0
+      AND COALESCE(hp.status_pagamento,'Pendente') NOT IN ('Pago','Quitada','Recebido','Cancelado')
+");
 $prazos7Dias = (int)totalScalar($conn, "SELECT COUNT(*) AS total FROM processos WHERE status = 'Em Andamento' AND proximo_prazo BETWEEN '{$hoje}' AND DATE_ADD('{$hoje}', INTERVAL 7 DAY)");
 
 $recebimentosSemana = totalScalar($conn, "
-    SELECT COALESCE(SUM(valor_pago), 0) AS total
+    SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END), 0) AS total
     FROM contas_receber
     WHERE deletado = 0
       AND status IN ('Recebido','Pago','Quitada')
-      AND COALESCE(data_recebimento, atualizado_em) BETWEEN '{$inicioSemana}' AND '{$fimSemana} 23:59:59'
+      AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) BETWEEN '{$inicioSemana}' AND '{$fimSemana}'
 ");
 
 $despesasSemana = totalScalar($conn, "
@@ -194,13 +216,22 @@ $prazosProximos = queryRows($conn, "
 ");
 
 $honorariosPendentes = queryRows($conn, "
-    SELECT hp.id, hp.nome_cliente, hp.numero_processo, hp.parcela_numero, hp.valor_parcela, hp.saldo_devedor, hp.data_vencimento, hp.status_pagamento
+    SELECT hp.id,
+           COALESCE(NULLIF(hp.nome_cliente,''), NULLIF(h.nome_cliente,''), 'Cliente não informado') AS nome_cliente,
+           COALESCE(NULLIF(hp.numero_processo,''), NULLIF(h.numero_processo,''), NULLIF(h.processo_numero,'')) AS numero_processo,
+           hp.parcela_numero,
+           hp.valor_parcela,
+           CASE WHEN COALESCE(hp.saldo_devedor,0) > 0 THEN hp.saldo_devedor ELSE hp.valor_parcela END AS saldo_devedor,
+           hp.data_vencimento,
+           hp.status_pagamento
     FROM honorarios_parcelas hp
-    INNER JOIN honorarios h ON hp.honorario_id = h.id
-    WHERE h.deletado = 0
-      AND hp.status_pagamento IN ('Pendente','Parcial')
-    ORDER BY hp.data_vencimento ASC
-    LIMIT 6
+    LEFT JOIN honorarios h ON hp.honorario_id = h.id
+    WHERE COALESCE(h.deletado,0) = 0
+      AND hp.data_vencimento IS NOT NULL
+      AND COALESCE(hp.status_pagamento,'Pendente') NOT IN ('Pago','Quitada','Recebido','Cancelado')
+      AND COALESCE(hp.saldo_devedor, hp.valor_parcela, 0) > 0
+    ORDER BY (hp.data_vencimento < '{$hoje}') DESC, hp.data_vencimento ASC
+    LIMIT 8
 ");
 
 $contasVencendo = queryRows($conn, "
@@ -498,7 +529,7 @@ if ($compromissosHoje > 0) {
     <div class="row g-4">
         <div class="col-lg-6">
             <div class="card shadow-sm h-100">
-                <div class="card-header bg-dark text-white"><i class="bi bi-wallet2 me-2"></i>Contas a Pagar Próximas</div>
+                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center"><span><i class="bi bi-wallet2 me-2"></i>Contas a Pagar Próximas</span><a href="?mod=financeiro&tab=pagar" class="btn btn-sm btn-outline-light">Ver contas</a></div>
                 <div class="card-body p-0">
                     <div class="table-responsive">
                         <table class="table table-hover align-middle mb-0">
@@ -528,7 +559,7 @@ if ($compromissosHoje > 0) {
 
         <div class="col-lg-6">
             <div class="card shadow-sm h-100">
-                <div class="card-header bg-dark text-white"><i class="bi bi-bar-chart-line me-2"></i>Resumo de Processos</div>
+                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center"><span><i class="bi bi-bar-chart-line me-2"></i>Resumo de Processos</span><button type="button" class="btn btn-sm btn-outline-light" onclick="window.print()"><i class="bi bi-file-earmark-pdf me-1"></i>Relatório PDF</button></div>
                 <div class="card-body">
                     <h6 class="text-muted text-uppercase small">Por status</h6>
                     <div class="mb-3">

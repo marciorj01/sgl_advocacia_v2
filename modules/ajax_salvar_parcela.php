@@ -12,6 +12,7 @@ header('Content-Type: application/json; charset=utf-8');
 try {
     // Ajuste o caminho do banco conforme a estrutura real do seu sistema
     require_once __DIR__ . '/../config/database.php'; 
+    require_once __DIR__ . '/../config/integracoes.php';
     $conn = conectar();
     if (!$conn) {
         throw new Exception('Falha ao conectar ao banco de dados');
@@ -121,6 +122,10 @@ $conn->query("
         status = '$status_hon'
     WHERE id = '$h_id_sql'
 ");
+
+if (function_exists('sgl_sincronizar_honorario_financeiro')) {
+    sgl_sincronizar_honorario_financeiro($conn, $honorario_id);
+}
 
 // 5. Retorna o JSON mapeado para atualizar a tela sem dar F5
 $labels = ['Pendente' => 'Devedor', 'Parcial' => 'Parcial', 'Pago' => 'Quitada'];

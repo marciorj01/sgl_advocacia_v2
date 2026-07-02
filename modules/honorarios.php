@@ -1,5 +1,7 @@
 <?php
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
+sgl_integracao_garantir_financeiro($conn);
 $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
 
@@ -202,6 +204,10 @@ function recalcHonorario(mysqli $conn, string $honorario_id)
             status = '$status_hon'
         WHERE id = '$honorario_id'
     ");
+
+    if (function_exists('sgl_sincronizar_honorario_financeiro')) {
+        sgl_sincronizar_honorario_financeiro($conn, $honorario_id);
+    }
 }
 
 $tiposHonorario = ['Contrato', 'Êxito', 'Consultoria', 'Acordo', 'Outro'];
@@ -285,8 +291,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_honorario'])) 
                 'observacoes' => $observacoes,
                 'valor_pago' => $valor_pago
             ], $gerar30dias);
+            sgl_sincronizar_honorario_financeiro($conn, $id);
 
-            $msg = "<div class='alert alert-success'>✅ Honorário <strong>$id</strong> cadastrado com sucesso!</div>";
+            $msg = "<div class='alert alert-success'>✅ Honorário <strong>$id</strong> cadastrado com sucesso! Financeiro sincronizado automaticamente.</div>";
             $acao = 'listar';
         } else {
             $msg = "<div class='alert alert-danger'>❌ Erro: " . htmlspecialchars($conn->error) . "</div>";

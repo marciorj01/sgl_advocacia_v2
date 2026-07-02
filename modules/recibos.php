@@ -1,5 +1,7 @@
 <?php
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
+if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
 $acao = $_GET['acao'] ?? 'listar';
 $msg = '';
 
@@ -84,6 +86,7 @@ if (isset($_GET['cancelar'])) {
         $stmt = $conn->prepare("UPDATE recibos SET status='Cancelado' WHERE id=?");
         $stmt->bind_param('s', $id); $stmt->execute();
         $msg = '<div class="alert alert-warning">Recibo cancelado com sucesso.</div>';
+        if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Cancelou recibo', 'recibos', $id); }
     }
     $acao = 'listar';
 }
@@ -95,6 +98,7 @@ if (isset($_GET['excluir'])) {
         $stmt = $conn->prepare("UPDATE recibos SET deletado=1 WHERE id=?");
         $stmt->bind_param('s', $id); $stmt->execute();
         $msg = '<div class="alert alert-warning">Recibo movido para a lixeira.</div>';
+        if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Moveu recibo para lixeira', 'recibos', $id); }
     }
     $acao = 'listar';
 }
@@ -137,11 +141,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $stmt->bind_param('ssssssssssssdss', $id, $numero, $cliente_id, $nome_cliente, $cpf_cnpj, $processo_numero, $honorario_id, $parcela_id, $data_emissao, $data_pagamento, $referente, $forma_pagamento, $valor, $observacoes, $chave);
                 $stmt->execute();
                 $msg = '<div class="alert alert-success">Recibo emitido com sucesso.</div>';
+                if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Emitiu recibo', 'recibos', $id, $numero); }
             } else {
                 $stmt = $conn->prepare("UPDATE recibos SET cliente_id=?, nome_cliente=?, cpf_cnpj=?, processo_numero=?, honorario_id=?, parcela_id=?, data_emissao=?, data_pagamento=?, referente=?, forma_pagamento=?, valor=?, observacoes=? WHERE id=?");
                 $stmt->bind_param('ssssssssssdss', $cliente_id, $nome_cliente, $cpf_cnpj, $processo_numero, $honorario_id, $parcela_id, $data_emissao, $data_pagamento, $referente, $forma_pagamento, $valor, $observacoes, $id);
                 $stmt->execute();
                 $msg = '<div class="alert alert-success">Recibo atualizado com sucesso.</div>';
+                if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Atualizou recibo', 'recibos', $id); }
             }
             $acao = 'listar';
         }

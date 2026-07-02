@@ -2,6 +2,19 @@
 // C:\xampp\htdocs\sistema_sgl\modules\financeiro.php
 
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
+sgl_integracao_garantir_financeiro($conn);
+sgl_integracao_garantir_recibos($conn);
+if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
+$csrf_token_fin = function_exists('gerarTokenCsrf') ? gerarTokenCsrf() : '';
+
+if (!function_exists('buscarReciboPorContaReceber') && function_exists('sgl_buscar_recibo_por_conta_receber')) {
+    function buscarReciboPorContaReceber(mysqli $conn, string $conta_receber_id): ?array
+    {
+        return sgl_buscar_recibo_por_conta_receber($conn, $conta_receber_id);
+    }
+}
+
 
 $aba  = $_GET['aba'] ?? 'cp';     // cp = contas a pagar, cr = receber
 $acao = $_GET['acao'] ?? 'listar'; // listar | novo_cp | editar_cp | novo_cr | editar_cr | lixeira
@@ -33,6 +46,7 @@ function financeiroGarantirEstrutura(mysqli $conn): void
     financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_parcela', "valor_parcela DECIMAL(12,2) DEFAULT 0");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_pago', "valor_pago DECIMAL(12,2) DEFAULT 0");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_pendente', "valor_pendente DECIMAL(12,2) DEFAULT 0");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'data_pagamento', "data_pagamento DATE NULL");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'forma_pagamento', "forma_pagamento VARCHAR(80) NULL");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'mes_referencia', "mes_referencia VARCHAR(7) NULL");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'observacoes', "observacoes TEXT NULL");
@@ -43,6 +57,7 @@ function financeiroGarantirEstrutura(mysqli $conn): void
     financeiroAdicionarColuna($conn, 'contas_receber', 'valor_parcela', "valor_parcela DECIMAL(12,2) DEFAULT 0");
     financeiroAdicionarColuna($conn, 'contas_receber', 'valor_pago', "valor_pago DECIMAL(12,2) DEFAULT 0");
     financeiroAdicionarColuna($conn, 'contas_receber', 'valor_pendente', "valor_pendente DECIMAL(12,2) DEFAULT 0");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'data_recebimento', "data_recebimento DATE NULL");
     financeiroAdicionarColuna($conn, 'contas_receber', 'forma_recebimento', "forma_recebimento VARCHAR(80) NULL");
     financeiroAdicionarColuna($conn, 'contas_receber', 'mes_referencia', "mes_referencia VARCHAR(7) NULL");
     financeiroAdicionarColuna($conn, 'contas_receber', 'observacoes', "observacoes TEXT NULL");
@@ -321,6 +336,72 @@ function recalcContaPagar(mysqli $conn, string $conta_id): void
     ");
 }
 
+
+/* ======================================================
+   INTEGRAÇÃO FINANCEIRA — RECEBER CONTA E GERAR RECIBO
+   ====================================================== */
+if (isset($_GET['receber_cr'])) {
+    if (function_exists('validarTokenCsrf') && !validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        $msg = '<div class="alert alert-danger">Token de segurança inválido. Atualize a página e tente novamente.</div>';
+    } else {
+        $id = $conn->real_escape_string((string)$_GET['receber_cr']);
+        $res = $conn->query("SELECT valor, forma_recebimento FROM contas_receber WHERE id = '$id' LIMIT 1");
+        if ($res && $res->num_rows) {
+            $cr = $res->fetch_assoc();
+            $valor = (float)($cr['valor'] ?? 0);
+            $hojeSql = date('Y-m-d');
+            $conn->query("UPDATE contas_receber SET valor_pago = {$valor}, valor_pendente = 0, status = 'Recebido', data_recebimento = '{$hojeSql}' WHERE id = '$id'");
+            $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
+            if ($reciboId) {
+                $msg = '<div class="alert alert-success">✅ Recebimento confirmado e recibo gerado automaticamente.</div>';
+                if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Confirmou recebimento', 'contas_receber', $id, 'Recibo automático: ' . $reciboId); }
+            } else {
+                $msg = '<div class="alert alert-warning">Recebimento confirmado, mas o recibo automático não pôde ser gerado.</div>';
+            }
+        } else {
+            $msg = '<div class="alert alert-danger">Conta a receber não encontrada.</div>';
+        }
+    }
+    $aba = 'cr';
+    $acao = 'listar';
+}
+
+if (isset($_GET['gerar_recibo_cr'])) {
+    if (function_exists('validarTokenCsrf') && !validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        $msg = '<div class="alert alert-danger">Token de segurança inválido. Atualize a página e tente novamente.</div>';
+    } else {
+        $id = $conn->real_escape_string((string)$_GET['gerar_recibo_cr']);
+        $res = $conn->query("SELECT valor, valor_pago, status, data_recebimento FROM contas_receber WHERE id = '$id' LIMIT 1");
+        if ($res && $res->num_rows) {
+            $cr = $res->fetch_assoc();
+            $valor = (float)($cr['valor_pago'] ?? 0);
+            if ($valor <= 0) $valor = (float)($cr['valor'] ?? 0);
+            $dataReceb = $cr['data_recebimento'] ?: date('Y-m-d');
+            $conn->query("UPDATE contas_receber SET valor_pago = " . sqlMoney($valor) . ", valor_pendente = 0, status = 'Recebido', data_recebimento = '" . $conn->real_escape_string($dataReceb) . "' WHERE id = '$id'");
+            $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
+            $msg = $reciboId
+                ? '<div class="alert alert-success">✅ Recibo gerado com sucesso para a conta a receber.</div>'
+                : '<div class="alert alert-warning">A conta foi marcada como recebida, mas o recibo não pôde ser gerado.</div>';
+        } else {
+            $msg = '<div class="alert alert-danger">Conta a receber não encontrada.</div>';
+        }
+    }
+    $aba = 'cr';
+    $acao = 'listar';
+}
+
+if (isset($_GET['pagar_cp'])) {
+    if (function_exists('validarTokenCsrf') && !validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        $msg = '<div class="alert alert-danger">Token de segurança inválido. Atualize a página e tente novamente.</div>';
+    } else {
+        $id = (string)$_GET['pagar_cp'];
+        marcarContaPagarPaga($conn, $id, date('Y-m-d'));
+        $msg = '<div class="alert alert-success">✅ Conta a pagar marcada como paga.</div>';
+    }
+    $aba = 'cp';
+    $acao = 'listar';
+}
+
 /* ======================================================
    AJUSTE SGL: LIXEIRA SEGURA — CONTAS A PAGAR / RECEBER
    (mesmo padrão usado em honorarios.php)
@@ -461,8 +542,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
         ];
         gerarParcelasCP($conn, $contaData, $gerar30dias);
 
-        // recalcula conta com base nas parcelas (tudo pendente inicialmente)
-        recalcContaPagar($conn, $id);
+        // recalcula conta com base nas parcelas e respeita o status informado.
+        if ($status_input === 'Pago') {
+            marcarContaPagarPaga($conn, $id, $data_pagamento ?: date('Y-m-d'));
+        } else {
+            recalcContaPagar($conn, $id);
+            if ($status_input === 'Cancelado') {
+                $conn->query("UPDATE contas_pagar SET status = 'Cancelado' WHERE id = " . sqlText($conn, $id));
+            }
+        }
 
         $msg  = "<div class='alert alert-success'>✅ Conta a Pagar <strong>{$id}</strong> salva com parcelas.</div>";
         $acao = 'listar';
@@ -532,34 +620,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
     $data_vencimento   = trim($_POST['data_vencimento'] ?? '');
     $data_recebimento  = trim($_POST['data_recebimento'] ?? '');
     $status            = trim($_POST['status'] ?? 'Pendente');
+    $forma_recebimento = trim($_POST['forma_recebimento'] ?? '');
     $observacoes       = trim($_POST['observacoes'] ?? '');
+
+    $valor_pago = 0.00;
+    $valor_pendente = $valor;
+
+    if (in_array($status, ['Recebido','Pago','Quitada'], true)) {
+        $status = 'Recebido';
+        if ($data_recebimento === '') $data_recebimento = date('Y-m-d');
+        $valor_pago = $valor;
+        $valor_pendente = 0.00;
+    } elseif ($status === 'Parcial') {
+        // Nesta tela simples ainda não há campo de pagamento parcial.
+        // Mantemos o saldo total pendente até implantarmos parcelas de CR.
+        $valor_pago = 0.00;
+        $valor_pendente = $valor;
+    } elseif ($status === 'Cancelado') {
+        $valor_pago = 0.00;
+        $valor_pendente = 0.00;
+    }
 
     if ($novo) {
         $sql = "INSERT INTO contas_receber
-            (id, descricao, valor, data_vencimento, data_recebimento, status, observacoes, deletado)
+            (id, descricao, valor, valor_parcela, valor_pago, valor_pendente, data_vencimento, data_recebimento, forma_recebimento, status, observacoes, deletado)
             VALUES (
                 " . sqlText($conn, $id) . ",
                 " . sqlNullableText($conn, $descricao) . ",
                 " . sqlMoney($valor) . ",
+                " . sqlMoney($valor) . ",
+                " . sqlMoney($valor_pago) . ",
+                " . sqlMoney($valor_pendente) . ",
                 " . sqlNullableDate($conn, $data_vencimento) . ",
                 " . sqlNullableDate($conn, $data_recebimento) . ",
+                " . sqlNullableText($conn, $forma_recebimento) . ",
                 " . sqlText($conn, $status) . ",
                 " . sqlNullableText($conn, $observacoes) . ",
                 0
             )";
     } else {
         $sql = "UPDATE contas_receber SET
-                descricao        = " . sqlNullableText($conn, $descricao) . ",
-                valor            = " . sqlMoney($valor) . ",
-                data_vencimento  = " . sqlNullableDate($conn, $data_vencimento) . ",
-                data_recebimento = " . sqlNullableDate($conn, $data_recebimento) . ",
-                status           = " . sqlText($conn, $status) . ",
-                observacoes      = " . sqlNullableText($conn, $observacoes) . "
+                descricao          = " . sqlNullableText($conn, $descricao) . ",
+                valor              = " . sqlMoney($valor) . ",
+                valor_parcela      = " . sqlMoney($valor) . ",
+                valor_pago         = " . sqlMoney($valor_pago) . ",
+                valor_pendente     = " . sqlMoney($valor_pendente) . ",
+                data_vencimento    = " . sqlNullableDate($conn, $data_vencimento) . ",
+                data_recebimento   = " . sqlNullableDate($conn, $data_recebimento) . ",
+                forma_recebimento  = " . sqlNullableText($conn, $forma_recebimento) . ",
+                status             = " . sqlText($conn, $status) . ",
+                observacoes        = " . sqlNullableText($conn, $observacoes) . "
             WHERE id = " . sqlText($conn, $id);
     }
 
     if ($conn->query($sql)) {
-        $msg  = "<div class='alert alert-success'>✅ Conta a Receber <strong>{$id}</strong> salva.</div>";
+        if ($status === 'Recebido') {
+            $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
+            if ($reciboId) {
+                $msg = "<div class='alert alert-success'>✅ Conta a Receber <strong>{$id}</strong> salva, marcada como recebida e recibo gerado automaticamente.</div>";
+            } else {
+                $msg = "<div class='alert alert-warning'>Conta a Receber <strong>{$id}</strong> foi salva como recebida, mas o recibo automático não pôde ser gerado.</div>";
+            }
+        } else {
+            $msg = "<div class='alert alert-success'>✅ Conta a Receber <strong>{$id}</strong> salva.</div>";
+        }
         $acao = 'listar';
         $aba  = 'cr';
     } else {
@@ -577,7 +701,7 @@ $filtro_deletado_cp = ($aba === 'cp' && $acao === 'lixeira') ? 1 : 0;
 $filtro_deletado_cr = ($aba === 'cr' && $acao === 'lixeira') ? 1 : 0;
 
 $lista_cp = $conn->query("SELECT * FROM contas_pagar WHERE deletado = $filtro_deletado_cp ORDER BY data_vencimento DESC, id DESC");
-$lista_cr = $conn->query("SELECT * FROM contas_receber WHERE deletado = $filtro_deletado_cr ORDER BY data_vencimento DESC, id DESC");
+$lista_cr = $conn->query("SELECT cr.*, c.nome AS cliente_nome FROM contas_receber cr LEFT JOIN clientes c ON c.id = cr.cliente_id WHERE cr.deletado = $filtro_deletado_cr ORDER BY cr.data_vencimento DESC, cr.id DESC");
 
 $hoje = date('Y-m-d');
 $inicioMes = date('Y-m-01');
@@ -598,7 +722,7 @@ $q = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pendente > 0 THEN valor_p
 if ($q) $resumoFinanceiro['receber_aberto'] = (float)($q->fetch_assoc()['total'] ?? 0);
 $q = $conn->query("SELECT COALESCE(SUM(valor_pago),0) AS total FROM contas_pagar WHERE deletado = 0 AND data_pagamento BETWEEN '$inicioMes' AND '$fimMes'");
 if ($q) $resumoFinanceiro['pago_mes'] = (float)($q->fetch_assoc()['total'] ?? 0);
-$q = $conn->query("SELECT COALESCE(SUM(valor),0) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Recebido','Pago','Quitada') AND data_recebimento BETWEEN '$inicioMes' AND '$fimMes'");
+$q = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Recebido','Pago','Quitada') AND data_recebimento BETWEEN '$inicioMes' AND '$fimMes'");
 if ($q) $resumoFinanceiro['recebido_mes'] = (float)($q->fetch_assoc()['total'] ?? 0);
 $q = $conn->query("SELECT COUNT(*) AS total FROM contas_pagar WHERE deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '$hoje'");
 if ($q) $resumoFinanceiro['vencidas_pagar'] = (int)($q->fetch_assoc()['total'] ?? 0);
@@ -730,6 +854,12 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                                         <i class="bi bi-fire"></i>
                                                     </a>
                                                 <?php else: ?>
+                                                    <?php if (in_array(($row['status'] ?? ''), ['Pendente','Parcial'], true)): ?>
+                                                        <a href="?mod=financeiro&aba=cp&pagar_cp=<?= urlencode($row['id']) ?>&csrf_token=<?= urlencode($csrf_token_fin) ?>"
+                                                           class="btn btn-sm btn-success"
+                                                           onclick="return confirm('Confirmar pagamento da conta <?= htmlspecialchars($row['id']) ?>?')"
+                                                           title="Marcar como pago">💸</a>
+                                                    <?php endif; ?>
                                                     <a href="?mod=financeiro&aba=cp&acao=editar_cp&id=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-warning" title="Editar">✏️</a>
                                                     <a href="?mod=financeiro&aba=cp&excluir=<?= urlencode($row['id']) ?>&tipo=cp"
                                                        class="btn btn-sm btn-outline-danger"
@@ -997,6 +1127,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                     <tr>
                                         <th>ID</th>
                                         <th>Descrição</th>
+                                        <th>Cliente</th>
                                         <th>Valor</th>
                                         <th>Vencimento</th>
                                         <th>Status</th>
@@ -1010,6 +1141,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                         <tr>
                                             <td><?= htmlspecialchars($row['id']) ?></td>
                                             <td><?= htmlspecialchars($row['descricao'] ?? '-') ?></td>
+                                            <td><?= htmlspecialchars($row['cliente_nome'] ?? '-') ?></td>
                                             <td><?= fmtBrlFin($row['valor'] ?? 0) ?></td>
                                             <td><?= !empty($row['data_vencimento']) ? date('d/m/Y', strtotime($row['data_vencimento'])) : '-' ?></td>
                                             <td><span class="badge bg-<?= $badge ?>"><?= htmlspecialchars($row['status'] ?? '-') ?></span></td>
@@ -1026,6 +1158,24 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                                         <i class="bi bi-fire"></i>
                                                     </a>
                                                 <?php else: ?>
+                                                    <?php if (in_array(($row['status'] ?? ''), ['Pendente','Parcial'], true)): ?>
+                                                        <a href="?mod=financeiro&aba=cr&receber_cr=<?= urlencode($row['id']) ?>&csrf_token=<?= urlencode($csrf_token_fin) ?>"
+                                                           class="btn btn-sm btn-success"
+                                                           onclick="return confirm('Confirmar recebimento e gerar recibo da conta <?= htmlspecialchars($row['id']) ?>?')"
+                                                           title="Receber e gerar recibo">💵</a>
+                                                    <?php else: ?>
+                                                        <?php $reciboVinculado = buscarReciboPorContaReceber($conn, (string)$row['id']); ?>
+                                                        <?php if ($reciboVinculado): ?>
+                                                            <a href="?mod=recibos&acao=imprimir&id=<?= urlencode($reciboVinculado['id']) ?>"
+                                                               class="btn btn-sm btn-outline-primary"
+                                                               title="Ver recibo <?= htmlspecialchars($reciboVinculado['numero']) ?>">🧾</a>
+                                                        <?php else: ?>
+                                                            <a href="?mod=financeiro&aba=cr&gerar_recibo_cr=<?= urlencode($row['id']) ?>&csrf_token=<?= urlencode($csrf_token_fin) ?>"
+                                                               class="btn btn-sm btn-outline-success"
+                                                               onclick="return confirm('Gerar recibo para a conta <?= htmlspecialchars($row['id']) ?>?')"
+                                                               title="Gerar recibo">🧾+</a>
+                                                        <?php endif; ?>
+                                                    <?php endif; ?>
                                                     <a href="?mod=financeiro&aba=cr&acao=editar_cr&id=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-warning" title="Editar">✏️</a>
                                                     <a href="?mod=financeiro&aba=cr&excluir=<?= urlencode($row['id']) ?>&tipo=cr"
                                                        class="btn btn-sm btn-outline-danger"
@@ -1037,7 +1187,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                     <?php endwhile; ?>
                                 <?php else: ?>
                                     <tr>
-                                        <td colspan="6" class="text-center text-muted py-4">
+                                        <td colspan="7" class="text-center text-muted py-4">
                                             <?= $acao === 'lixeira' ? 'Nenhuma conta a receber na lixeira.' : 'Nenhuma conta a receber cadastrada.' ?>
                                         </td>
                                     </tr>
@@ -1058,6 +1208,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                     'data_vencimento'  => '',
                     'data_recebimento' => '',
                     'status'           => 'Pendente',
+                    'forma_recebimento'=> '',
                     'observacoes'      => '',
                 ];
 
@@ -1112,6 +1263,16 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                 <label class="form-label">Data Recebimento</label>
                                 <input type="date" name="data_recebimento" class="form-control"
                                        value="<?= htmlspecialchars($conta_cr['data_recebimento'] ?? '') ?>">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Forma de Recebimento</label>
+                                <select name="forma_recebimento" class="form-select">
+                                    <?php foreach (['','PIX','Dinheiro','Cartão','Transferência','Boleto','Cheque','Outro'] as $forma): ?>
+                                        <option value="<?= htmlspecialchars($forma) ?>" <?= ($conta_cr['forma_recebimento'] ?? '') === $forma ? 'selected' : '' ?>>
+                                            <?= $forma === '' ? 'Selecione' : htmlspecialchars($forma) ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
                             </div>
 
                             <div class="col-12">

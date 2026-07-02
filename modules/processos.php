@@ -1,5 +1,7 @@
 <?php
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
+if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
 $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
 
@@ -19,11 +21,9 @@ function brlParaFloat(string $valor): float {
 function brl($valor): string { return 'R$ ' . number_format((float)$valor, 2, ',', '.'); }
 function dataBr($data): string { return $data ? date('d/m/Y', strtotime($data)) : '-'; }
 function registrarLog(mysqli $conn, string $acao, string $registroId, string $detalhes=''): void {
-    if (!$conn->query("SHOW TABLES LIKE 'logs_sistema'")->num_rows) return;
-    $uid = $_SESSION['user_id'] ?? null; $ip = $_SERVER['REMOTE_ADDR'] ?? null; $tabela = 'processos';
-    $stmt = $conn->prepare("INSERT INTO logs_sistema (usuario_id, acao, tabela, registro_id, detalhes, ip) VALUES (?, ?, ?, ?, ?, ?)");
-    $stmt->bind_param('isssss', $uid, $acao, $tabela, $registroId, $detalhes, $ip);
-    $stmt->execute();
+    if (function_exists('sgl_registrar_log')) {
+        sgl_registrar_log($conn, $acao, 'processos', $registroId, $detalhes);
+    }
 }
 function processoExiste(mysqli $conn, string $numero, string $ignorarId=''): bool {
     $sql = "SELECT id FROM processos WHERE numero_processo = ? AND status != 'Excluído'" . ($ignorarId ? " AND id <> ?" : "") . " LIMIT 1";
@@ -44,6 +44,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
         $vara              = trim($_POST['vara'] ?? '');
         $comarca           = trim($_POST['comarca'] ?? '');
         $advogado_id       = trim($_POST['advogado_id'] ?? '');
+        if ($advogado_id === '') { $advogado_id = null; } else {
+            $advSql = $conn->real_escape_string($advogado_id);
+            $advExiste = $conn->query("SELECT id FROM advogados WHERE id = '{$advSql}' LIMIT 1");
+            if (!$advExiste || $advExiste->num_rows === 0) { $advogado_id = null; }
+        }
         $data_distribuicao = trim($_POST['data_distribuicao'] ?? '') ?: null;
         $fase_atual        = trim($_POST['fase_atual'] ?? '');
         $valor_causa       = brlParaFloat($_POST['valor_causa'] ?? '0');

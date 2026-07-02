@@ -103,9 +103,13 @@ function sgl_tabela_existe(mysqli $conn, string $tabela): bool {
 function sgl_log(mysqli $conn, string $acao, ?string $tabela = null, ?string $registro = null, ?string $detalhes = null): void {
     try {
         $usuario_id = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
+        $nomeSessao = $_SESSION['nome'] ?? $_SESSION['username'] ?? 'Sistema';
+        $perfilSessao = $_SESSION['perfil'] ?? 'Perfil não informado';
         $ip = $_SERVER['REMOTE_ADDR'] ?? null;
+        $navegador = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 180);
+        $detalhesCompletos = trim(($detalhes ?: '') . ' | Responsável: ' . $nomeSessao . ' (' . $perfilSessao . ') | Navegador: ' . $navegador);
         $stmt = $conn->prepare("INSERT INTO logs_sistema (usuario_id, acao, tabela, registro_id, detalhes, ip) VALUES (?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param('isssss', $usuario_id, $acao, $tabela, $registro, $detalhes, $ip);
+        $stmt->bind_param('isssss', $usuario_id, $acao, $tabela, $registro, $detalhesCompletos, $ip);
         $stmt->execute();
         $stmt->close();
     } catch (Throwable $e) {
@@ -430,7 +434,7 @@ if (sgl_tabela_existe($conn, 'usuarios')) {
 $logs = [];
 if (sgl_tabela_existe($conn, 'logs_sistema')) {
     try {
-        $resLogs = $conn->query("SELECT l.*, u.nome AS usuario_nome FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id ORDER BY l.id DESC LIMIT 20");
+        $resLogs = $conn->query("SELECT l.*, u.nome AS usuario_nome, u.usuario AS usuario_login, u.perfil AS usuario_perfil FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id ORDER BY l.id DESC LIMIT 50");
         if ($resLogs) {
             while ($l = $resLogs->fetch_assoc()) { $logs[] = $l; }
         }
@@ -440,6 +444,13 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
 $totalUsuarios = count($usuarios);
 $totalAtivos = count(array_filter($usuarios, fn($u) => (int)$u['ativo'] === 1));
 $totalLogs = sgl_select_count($conn, "SELECT COUNT(*) AS total FROM logs_sistema");
+$inventarioLogs = [];
+if (sgl_tabela_existe($conn, 'logs_sistema')) {
+    try {
+        $resInv = $conn->query("SELECT COALESCE(u.nome, 'Sistema') AS usuario_nome, COALESCE(u.perfil, '-') AS perfil, COALESCE(l.tabela, '-') AS modulo, COUNT(*) AS total, MAX(l.criado_em) AS ultimo_registro FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id GROUP BY usuario_nome, perfil, modulo ORDER BY total DESC, ultimo_registro DESC LIMIT 30");
+        if ($resInv) { while ($i = $resInv->fetch_assoc()) { $inventarioLogs[] = $i; } }
+    } catch (Throwable $e) {}
+}
 $totalLixeira = count($lixeira_itens);
 
 $tabs_validas = ['escritorio','marca','tema','usuarios','sistema','lixeira','logs'];
@@ -706,12 +717,46 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'logs'): ?>
-<div class="card shadow-sm border-0">
-    <div class="card-header bg-dark text-white"><i class="bi bi-clock-history me-1"></i> Últimos Logs do Sistema</div>
-    <div class="table-responsive"><table class="table table-hover align-middle mb-0"><thead class="table-light"><tr><th>Data</th><th>Usuário</th><th>Ação</th><th>Módulo</th><th>Detalhes</th></tr></thead><tbody>
-    <?php if(empty($logs)): ?><tr><td colspan="5" class="text-center py-4 text-muted">Nenhum log registrado ainda.</td></tr><?php endif; ?>
-    <?php foreach($logs as $log): ?><tr><td><?=date('d/m/Y H:i', strtotime($log['criado_em']))?></td><td><?=htmlspecialchars($log['usuario_nome'] ?? 'Sistema')?></td><td><strong><?=htmlspecialchars($log['acao'])?></strong></td><td><?=htmlspecialchars($log['tabela'] ?? '-')?></td><td><?=htmlspecialchars($log['detalhes'] ?? '-')?></td></tr><?php endforeach; ?>
-    </tbody></table></div>
+<div class="row g-4">
+    <div class="col-lg-8">
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-clock-history me-1"></i> Últimos Logs do Sistema</span>
+                <span class="badge bg-light text-dark"><?= (int)$totalLogs ?> registro(s)</span>
+            </div>
+            <div class="table-responsive"><table class="table table-hover align-middle mb-0">
+                <thead class="table-light"><tr><th>Data</th><th>Quem fez</th><th>Perfil</th><th>Ação</th><th>Módulo</th><th>IP</th><th>Detalhes</th></tr></thead><tbody>
+                <?php if(empty($logs)): ?><tr><td colspan="7" class="text-center py-4 text-muted">Nenhum log registrado ainda.</td></tr><?php endif; ?>
+                <?php foreach($logs as $log): ?>
+                    <?php $quem = $log['usuario_nome'] ?: ($log['usuario_login'] ?: 'Sistema'); ?>
+                    <tr>
+                        <td><?=date('d/m/Y H:i', strtotime($log['criado_em']))?></td>
+                        <td><strong><?=htmlspecialchars($quem)?></strong></td>
+                        <td><?=htmlspecialchars($log['usuario_perfil'] ?? '-')?></td>
+                        <td><strong><?=htmlspecialchars($log['acao'])?></strong></td>
+                        <td><?=htmlspecialchars($log['tabela'] ?? '-')?></td>
+                        <td><small><?=htmlspecialchars($log['ip'] ?? '-')?></small></td>
+                        <td><small><?=htmlspecialchars($log['detalhes'] ?? '-')?></small></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody></table></div>
+        </div>
+    </div>
+    <div class="col-lg-4">
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-dark text-white"><i class="bi bi-clipboard-data me-1"></i> Inventário de Atualizações</div>
+            <div class="table-responsive"><table class="table table-sm align-middle mb-0">
+                <thead class="table-light"><tr><th>Responsável</th><th>Módulo</th><th>Total</th><th>Último</th></tr></thead><tbody>
+                <?php if(empty($inventarioLogs)): ?><tr><td colspan="4" class="text-center py-4 text-muted">Sem inventário de logs.</td></tr><?php endif; ?>
+                <?php foreach($inventarioLogs as $inv): ?><tr>
+                    <td><strong><?=htmlspecialchars($inv['usuario_nome'])?></strong><br><small class="text-muted"><?=htmlspecialchars($inv['perfil'])?></small></td>
+                    <td><?=htmlspecialchars($inv['modulo'])?></td>
+                    <td><span class="badge bg-primary"><?=(int)$inv['total']?></span></td>
+                    <td><small><?= $inv['ultimo_registro'] ? date('d/m/Y H:i', strtotime($inv['ultimo_registro'])) : '-' ?></small></td>
+                </tr><?php endforeach; ?>
+                </tbody></table></div>
+        </div>
+    </div>
 </div>
 <?php endif; ?>
 </div>

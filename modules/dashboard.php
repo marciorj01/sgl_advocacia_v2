@@ -172,7 +172,7 @@ $entradasMes = $recebidoMes;
 $saidasMes = $despesasPagasMes;
 $saldoCaixaMes = $entradasMes - $saidasMes;
 
-$saldoEstimado = $recebidoMes + $totalAReceber - $despesasAbertas;
+$saldoEstimado = $recebidoMes + $totalAReceber - $despesasAbertas - $despesasPagasMes;
 
 // ========================
 // Indicadores operacionais
@@ -404,7 +404,7 @@ if ($compromissosHoje > 0) {
                 <div class="card-body">
                     <h6 class="text-uppercase text-white-50 small mb-2">Saldo estimado</h6>
                     <h3 class="fw-bold mb-0"><?= moeda($saldoEstimado) ?></h3>
-                    <small class="text-white-50">Recebido + previsto - despesas</small>
+                    <small class="text-white-50">Recebido + previsto - despesas abertas e pagas</small>
                     <i class="bi bi-calculator fs-1 position-absolute end-0 bottom-0 m-3 opacity-25"></i>
                 </div>
             </div>

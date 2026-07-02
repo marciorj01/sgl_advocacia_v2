@@ -355,7 +355,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_honorario']
 
             recalcHonorario($conn, $id);
 
-            $msg = "<div class='alert alert-success'>✅ Honorário <strong>$id</strong> updated.</div>";
+            $msg = "<div class='alert alert-success'>✅ Honorário <strong>$id</strong> atualizado com sucesso!</div>";
             $acao = 'listar';
         } else {
             $msg = "<div class='alert alert-danger'>❌ Erro: " . htmlspecialchars($conn->error) . "</div>";
@@ -383,9 +383,29 @@ if ($acao === 'editar' && isset($_GET['id'])) {
    LISTA DINÂMICA (ATIVOS VS LIXEIRA)
 ----------------------------------------------------------- */
 $busca = $conn->real_escape_string(trim($_GET['busca'] ?? ''));
+$filtro_status = $conn->real_escape_string(trim($_GET['status'] ?? ''));
+$filtro_tipo = $conn->real_escape_string(trim($_GET['tipo'] ?? ''));
+$filtro_vencimento = $conn->real_escape_string(trim($_GET['vencimento'] ?? ''));
 $filtro_deletado = ($acao === 'lixeira') ? 1 : 0;
 
 $where = "WHERE h.deletado = $filtro_deletado";
+
+if ($filtro_status !== '') {
+    $where .= " AND h.status = '$filtro_status'";
+}
+
+if ($filtro_tipo !== '') {
+    $where .= " AND h.tipo_honorario = '$filtro_tipo'";
+}
+
+if ($filtro_vencimento === 'vencidos') {
+    $where .= " AND h.data_vencimento < CURDATE() AND h.status NOT IN ('Pago','Quitada','Cancelado')";
+} elseif ($filtro_vencimento === 'hoje') {
+    $where .= " AND h.data_vencimento = CURDATE()";
+} elseif ($filtro_vencimento === '7dias') {
+    $where .= " AND h.data_vencimento BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)";
+}
+
 if ($busca !== '') {
     $where .= " AND (
         h.id LIKE '%$busca%' OR
@@ -443,6 +463,29 @@ if ($coluna_processos !== '') {
             }
         }
     }
+}
+
+
+$statsHonorarios = [
+    'total' => 0,
+    'pendentes' => 0,
+    'recebido_mes' => 0,
+    'saldo_aberto' => 0,
+    'vencidos' => 0,
+];
+
+$resStats = $conn->query("
+    SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN status IN ('Pendente','Parcial') THEN 1 ELSE 0 END),0) AS pendentes,
+        COALESCE(SUM(valor_pago),0) AS recebido_mes,
+        COALESCE(SUM(valor_pendente),0) AS saldo_aberto,
+        COALESCE(SUM(CASE WHEN data_vencimento < CURDATE() AND status NOT IN ('Pago','Quitada','Cancelado') THEN 1 ELSE 0 END),0) AS vencidos
+    FROM honorarios
+    WHERE deletado = 0
+");
+if ($resStats) {
+    $statsHonorarios = array_merge($statsHonorarios, $resStats->fetch_assoc());
 }
 
 $f = [
@@ -692,7 +735,7 @@ document.addEventListener('DOMContentLoaded', function () {
             params.append('parcela_id', parcelaId);
             params.append('valor_pago', valorPago);
 
-            fetch('/sistema_sgl/modules/ajax_salvar_parcela.php', {
+            fetch('modules/ajax_salvar_parcela.php', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: params.toString()
@@ -934,19 +977,84 @@ document.addEventListener('DOMContentLoaded', function () {
 
 <?php else: ?>
 
-<form class="d-flex gap-2 mb-3" method="GET">
-    <input type="hidden" name="mod" value="honorarios">
-    <input type="hidden" name="acao" value="<?= htmlspecialchars($acao) ?>">
-    <div class="input-group">
-        <input type="text" name="busca" class="form-control" 
-               placeholder="Buscar por ID, Cliente, Processo, Tipo ou Status..." 
-               value="<?= htmlspecialchars($_GET['busca'] ?? '') ?>">
-        <button class="btn btn-outline-primary" type="submit">
-            <i class="bi bi-search"></i>
-        </button>
-        <?php if (!empty($_GET['busca'])): ?>
-            <a href="?mod=honorarios&acao=<?= htmlspecialchars($acao) ?>" class="btn btn-outline-secondary">Limpar</a>
-        <?php endif; ?>
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <div class="text-muted small text-uppercase">Total de honorários</div>
+                <div class="fs-3 fw-bold"><?= (int)$statsHonorarios['total'] ?></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <div class="text-muted small text-uppercase">Pendentes / parciais</div>
+                <div class="fs-3 fw-bold text-warning"><?= (int)$statsHonorarios['pendentes'] ?></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <div class="text-muted small text-uppercase">Saldo em aberto</div>
+                <div class="fs-3 fw-bold text-danger"><?= fmtBrlHon($statsHonorarios['saldo_aberto']) ?></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <div class="text-muted small text-uppercase">Vencidos</div>
+                <div class="fs-3 fw-bold text-danger"><?= (int)$statsHonorarios['vencidos'] ?></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<form class="card shadow-sm border-0 mb-3" method="GET">
+    <div class="card-body">
+        <input type="hidden" name="mod" value="honorarios">
+        <input type="hidden" name="acao" value="<?= htmlspecialchars($acao) ?>">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-4">
+                <label class="form-label small">Pesquisa inteligente</label>
+                <input type="text" name="busca" class="form-control" placeholder="ID, cliente, processo, tipo ou status" value="<?= htmlspecialchars($_GET['busca'] ?? '') ?>">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small">Status</label>
+                <select name="status" class="form-select">
+                    <option value="">Todos</option>
+                    <?php foreach ($statusOptions as $opt): ?>
+                        <option value="<?= htmlspecialchars($opt) ?>" <?= $filtro_status === $opt ? 'selected' : '' ?>><?= htmlspecialchars($opt) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small">Tipo</label>
+                <select name="tipo" class="form-select">
+                    <option value="">Todos</option>
+                    <?php foreach ($tiposHonorario as $opt): ?>
+                        <option value="<?= htmlspecialchars($opt) ?>" <?= $filtro_tipo === $opt ? 'selected' : '' ?>><?= htmlspecialchars($opt) ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small">Vencimento</label>
+                <select name="vencimento" class="form-select">
+                    <option value="">Todos</option>
+                    <option value="vencidos" <?= $filtro_vencimento === 'vencidos' ? 'selected' : '' ?>>Vencidos</option>
+                    <option value="hoje" <?= $filtro_vencimento === 'hoje' ? 'selected' : '' ?>>Hoje</option>
+                    <option value="7dias" <?= $filtro_vencimento === '7dias' ? 'selected' : '' ?>>Próximos 7 dias</option>
+                </select>
+            </div>
+            <div class="col-md-1 d-grid">
+                <button class="btn btn-outline-primary" type="submit"><i class="bi bi-search"></i></button>
+            </div>
+            <div class="col-md-1 d-grid">
+                <a href="?mod=honorarios&acao=<?= htmlspecialchars($acao) ?>" class="btn btn-outline-secondary"><i class="bi bi-x-lg"></i></a>
+            </div>
+        </div>
     </div>
 </form>
 

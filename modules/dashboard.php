@@ -287,6 +287,63 @@ foreach ($processosPorTipo as $item) {
     $maxTipo = max($maxTipo, (int)$item['total']);
 }
 
+
+
+if (($_GET['acao'] ?? '') === 'resumo_processos_pdf') {
+    $totalResumoProcessos = (int)totalScalar($conn, "SELECT COUNT(*) AS total FROM processos WHERE status <> 'Excluído'");
+    $ativosResumoProcessos = (int)totalScalar($conn, "SELECT COUNT(*) AS total FROM processos WHERE status = 'Em Andamento'");
+    $prazosResumoProcessos = (int)totalScalar($conn, "SELECT COUNT(*) AS total FROM processos WHERE status = 'Em Andamento' AND proximo_prazo BETWEEN '{$hoje}' AND DATE_ADD('{$hoje}', INTERVAL 15 DAY)");
+    ?>
+    <div class="container-fluid resumo-processos-relatorio">
+        <style>
+            @media print {
+                .sidebar, .no-print, nav, header { display:none!important; }
+                main { padding:0!important; margin:0!important; }
+                body { background:#fff!important; }
+                .resumo-processos-relatorio { font-size:12px; }
+                .card { box-shadow:none!important; }
+            }
+            @page { size: A4 portrait; margin: 12mm; }
+        </style>
+        <div class="d-flex justify-content-between align-items-start mb-3 no-print">
+            <div>
+                <h2 class="fw-bold text-primary"><i class="bi bi-bar-chart-line"></i> Relatório — Resumo de Processos</h2>
+                <p class="text-muted mb-0">Análise rápida para equipe em <?= date('d/m/Y H:i') ?>.</p>
+            </div>
+            <div class="d-flex gap-2">
+                <button class="btn btn-primary" onclick="window.print()"><i class="bi bi-printer"></i> Imprimir / Salvar PDF</button>
+                <a href="?mod=dashboard" class="btn btn-outline-secondary">Voltar</a>
+            </div>
+        </div>
+        <div class="text-center mb-4 d-none d-print-block">
+            <h2>Resumo de Processos</h2>
+            <p>Emitido em <?= date('d/m/Y H:i') ?></p>
+        </div>
+        <div class="row g-3 mb-3">
+            <div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Total</div><div class="fs-3 fw-bold"><?= $totalResumoProcessos ?></div></div></div></div>
+            <div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Em andamento</div><div class="fs-3 fw-bold text-primary"><?= $ativosResumoProcessos ?></div></div></div></div>
+            <div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Prazos 15 dias</div><div class="fs-3 fw-bold text-warning"><?= $prazosResumoProcessos ?></div></div></div></div>
+        </div>
+        <div class="card shadow-sm border-0 mb-3">
+            <div class="card-header bg-dark text-white fw-bold">Processos por status</div>
+            <div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Status</th><th class="text-end">Quantidade</th></tr></thead><tbody>
+            <?php if (empty($processosPorStatus)): ?><tr><td colspan="2" class="text-center text-muted py-3">Nenhum processo cadastrado.</td></tr><?php endif; ?>
+            <?php foreach ($processosPorStatus as $status): ?><tr><td><?= badgeStatus((string)$status['status']) ?></td><td class="text-end fw-bold"><?= (int)$status['total'] ?></td></tr><?php endforeach; ?>
+            </tbody></table></div>
+        </div>
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-dark text-white fw-bold">Processos por tipo</div>
+            <div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Tipo</th><th class="text-end">Quantidade</th></tr></thead><tbody>
+            <?php if (empty($processosPorTipo)): ?><tr><td colspan="2" class="text-center text-muted py-3">Sem dados para exibir.</td></tr><?php endif; ?>
+            <?php foreach ($processosPorTipo as $tipo): ?><tr><td><?= h($tipo['tipo']) ?></td><td class="text-end fw-bold"><?= (int)$tipo['total'] ?></td></tr><?php endforeach; ?>
+            </tbody></table></div>
+        </div>
+    </div>
+    <?php
+    $conn->close();
+    return;
+}
+
 $alertas = [];
 if ($contasPagarVencidas > 0) {
     $alertas[] = ['classe' => 'danger', 'icone' => 'bi-exclamation-triangle-fill', 'texto' => $contasPagarVencidas . ' conta(s) a pagar vencida(s).'];
@@ -616,7 +673,7 @@ if ($compromissosHoje > 0) {
 
         <div class="col-lg-6">
             <div class="card shadow-sm h-100">
-                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center"><span><i class="bi bi-bar-chart-line me-2"></i>Resumo de Processos</span><button type="button" class="btn btn-sm btn-outline-light" onclick="window.print()"><i class="bi bi-file-earmark-pdf me-1"></i>Relatório PDF</button></div>
+                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center"><span><i class="bi bi-bar-chart-line me-2"></i>Resumo de Processos</span><a href="?mod=dashboard&acao=resumo_processos_pdf" class="btn btn-sm btn-outline-light"><i class="bi bi-file-earmark-pdf me-1"></i>Relatório PDF</a></div>
                 <div class="card-body">
                     <h6 class="text-muted text-uppercase small">Por status</h6>
                     <div class="mb-3">

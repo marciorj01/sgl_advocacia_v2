@@ -66,6 +66,22 @@ function getClientesRec(mysqli $conn): array {
     if ($res) while($r=$res->fetch_assoc()) $dados[]=$r;
     return $dados;
 }
+
+function urlValidacaoRecibo(array $rec): string {
+    $chave = (string)($rec['chave_validacao'] ?? '');
+    if (function_exists('getBaseUrl')) {
+        return rtrim(getBaseUrl(), '/') . '/validar_recibo.php?chave=' . urlencode($chave);
+    }
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') === '443');
+    $scheme = $https ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $dir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+    return $scheme . '://' . $host . ($dir && $dir !== '/' ? $dir : '') . '/validar_recibo.php?chave=' . urlencode($chave);
+}
+function qrUrlRecibo(string $url): string {
+    return 'https://api.qrserver.com/v1/create-qr-code/?size=110x110&margin=1&data=' . urlencode($url);
+}
+
 function getRecibo(mysqli $conn, string $id): ?array {
     $stmt = $conn->prepare("SELECT * FROM recibos WHERE id=? LIMIT 1");
     $stmt->bind_param('s', $id);
@@ -158,44 +174,71 @@ if ($acao === 'imprimir'):
     $id = (string)($_GET['id'] ?? '');
     $rec = getRecibo($conn, $id);
     if (!$rec) { echo '<div class="alert alert-danger">Recibo não encontrado.</div>'; return; }
+    $urlValidacao = urlValidacaoRecibo($rec);
+    $qrValidacao = qrUrlRecibo($urlValidacao);
 ?>
 <style>
+/* RECIBO EM A5 REAL (14,8cm x 21cm) - layout compacto para impressão/PDF */
 @page { size: A5 portrait; margin: 8mm; }
 @media print {
-    .sidebar, .btn, .no-print, nav, header { display:none!important; }
-    body, main { background:#fff!important; padding:0!important; margin:0!important; }
-    .recibo-print { box-shadow:none!important; border:1px solid #222!important; margin:0 auto!important; width:132mm!important; min-height:190mm!important; page-break-after:auto!important; }
+    .sidebar, .btn, .no-print, nav, header, .navbar { display:none!important; }
+    html, body { margin:0!important; padding:0!important; background:#fff!important; }
+    main, .content, .container-fluid { margin:0!important; padding:0!important; width:auto!important; background:#fff!important; }
+    .recibo-a5-page { width:132mm!important; min-height:auto!important; margin:0 auto!important; padding:0!important; box-shadow:none!important; border:none!important; }
+    .recibo-print { width:132mm!important; max-width:132mm!important; min-height:auto!important; margin:0!important; padding:0!important; border:none!important; box-shadow:none!important; }
 }
-.recibo-print{width:132mm;max-width:132mm;min-height:190mm;margin:0 auto;background:white;border:1px solid #d1d5db;border-radius:6px;padding:10mm;font-size:12px;line-height:1.35;}
-.recibo-title{letter-spacing:1px;font-size:22px;font-weight:800;color:#0d3b66;}
-.recibo-box{border:1px solid #e5e7eb;border-radius:6px;padding:10px;background:#fafafa;}
-.recibo-print img{max-height:48px!important;}
-.assinatura-recibo{border-top:1px solid #333; display:inline-block; min-width:230px; padding-top:6px; text-align:center;}
+.recibo-a5-page{width:148mm;max-width:148mm;margin:0 auto;background:#fff;padding:8mm;box-sizing:border-box;border:1px solid #e5e7eb;}
+.recibo-print{width:132mm;max-width:132mm;margin:0 auto;background:#fff;color:#111;font-family:Arial, Helvetica, sans-serif;font-size:10.8pt;line-height:1.28;box-sizing:border-box;}
+.recibo-header{display:grid;grid-template-columns:24mm 1fr 24mm;align-items:center;margin-bottom:4mm;}
+.recibo-qr{width:20mm;height:20mm;object-fit:contain;float:right;}
+.recibo-qr-label{font-size:6.8pt;color:#555;text-align:center;margin-top:1mm;}
+.recibo-logo{max-width:18mm!important;max-height:18mm!important;object-fit:contain;}
+.recibo-title{letter-spacing:1px;font-size:18pt;font-weight:800;color:#0d3b66;text-align:center;line-height:1.1;margin:0;}
+.recibo-subtitle{text-align:center;color:#555;font-size:9.5pt;margin-top:1.5mm;}
+.recibo-box{border:1px solid #e2e8f0;border-radius:4px;padding:3mm 4mm;background:#fbfbfb;margin-bottom:3mm;}
+.recibo-info{display:grid;grid-template-columns:1fr 1fr;gap:2.5mm 5mm;border:1px solid #e2e8f0;border-radius:4px;padding:3mm 4mm;margin-bottom:3mm;}
+.recibo-info div{min-height:10mm;}
+.recibo-obs{border:1px solid #e2e8f0;border-radius:4px;padding:3mm 4mm;margin-bottom:4mm;}
+.recibo-validacao{color:#666;font-size:8.5pt;margin-top:2mm;border-top:1px dashed #cbd5e1;padding-top:2mm;}
+.assinatura-wrap{text-align:center;margin-top:13mm;}
+.assinatura-recibo{border-top:1px solid #333;display:inline-block;width:72mm;padding-top:2mm;text-align:center;font-size:9pt;}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3 no-print">
     <h3 class="fw-bold"><i class="bi bi-receipt"></i> Recibo <?= hRec($rec['numero']) ?></h3>
-    <div><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir em A5 / Salvar PDF</button> <a href="?mod=recibos" class="btn btn-outline-secondary">Voltar</a></div>
+    <div><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir em A5 (14,8 × 21 cm)</button> <a href="?mod=recibos" class="btn btn-outline-secondary">Voltar</a></div>
 </div>
-<div class="recibo-print shadow-sm">
-    <div class="text-center mb-3">
-        <img src="<?= hRec($logo_src ?? 'assets/img/logo_custom.png') ?>" style="max-height:90px" class="mb-2">
-        <div class="recibo-title">RECIBO</div>
-        <div class="text-muted">Nº <?= hRec($rec['numero']) ?> · Emitido em <?= dataRec($rec['data_emissao']) ?></div>
+<div class="recibo-a5-page shadow-sm">
+    <div class="recibo-print">
+        <div class="recibo-header">
+            <div><img src="<?= hRec($logo_src ?? 'assets/img/logo_custom.png') ?>" class="recibo-logo"></div>
+            <div>
+                <div class="recibo-title">RECIBO</div>
+                <div class="recibo-subtitle">Nº <?= hRec($rec['numero']) ?> · Emitido em <?= dataRec($rec['data_emissao']) ?></div>
+            </div>
+            <div class="text-end"><img src="<?= hRec($qrValidacao) ?>" class="recibo-qr" alt="QR Code de validação"><div class="recibo-qr-label">Validar</div></div>
+        </div>
+
+        <div class="recibo-box">
+            Recebemos de <strong><?= hRec($rec['nome_cliente']) ?></strong><?= $rec['cpf_cnpj'] ? ', inscrito(a) no CPF/CNPJ nº <strong>'.hRec($rec['cpf_cnpj']).'</strong>' : '' ?>, a importância de <strong><?= brlRec($rec['valor']) ?></strong>, referente a <strong><?= hRec($rec['referente']) ?></strong>.
+        </div>
+
+        <div class="recibo-info">
+            <div><strong>Forma de pagamento:</strong><br><?= hRec($rec['forma_pagamento'] ?: '-') ?></div>
+            <div><strong>Processo:</strong><br><?= hRec($rec['processo_numero'] ?: '-') ?></div>
+            <div><strong>Data do pagamento:</strong><br><?= dataRec($rec['data_pagamento']) ?></div>
+            <div><strong>Status:</strong><br><?= hRec($rec['status']) ?></div>
+        </div>
+
+        <?php if(!empty($rec['observacoes'])): ?>
+        <div class="recibo-obs"><strong>Observações:</strong> <?= nl2br(hRec($rec['observacoes'])) ?></div>
+        <?php endif; ?>
+
+        <div class="recibo-validacao">Chave de validação: <?= hRec(substr((string)$rec['chave_validacao'],0,32)) ?><br>Validação online: <?= hRec($urlValidacao) ?></div>
+
+        <div class="assinatura-wrap">
+            <div class="assinatura-recibo">Assinatura</div>
+        </div>
     </div>
-    <div class="recibo-box mb-3">
-        <p class="mb-0">Recebemos de <strong><?= hRec($rec['nome_cliente']) ?></strong><?= $rec['cpf_cnpj'] ? ', inscrito(a) no CPF/CNPJ nº <strong>'.hRec($rec['cpf_cnpj']).'</strong>' : '' ?>, a importância de <strong><?= brlRec($rec['valor']) ?></strong>, referente a <strong><?= hRec($rec['referente']) ?></strong>.</p>
-    </div>
-    <div class="row mb-3">
-        <div class="col-md-6"><strong>Forma de pagamento:</strong><br><?= hRec($rec['forma_pagamento'] ?: '-') ?></div>
-        <div class="col-md-6"><strong>Data do pagamento:</strong><br><?= dataRec($rec['data_pagamento']) ?></div>
-        <div class="col-md-6 mt-3"><strong>Processo:</strong><br><?= hRec($rec['processo_numero'] ?: '-') ?></div>
-        <div class="col-md-6 mt-3"><strong>Status:</strong><br><?= hRec($rec['status']) ?></div>
-    </div>
-    <?php if(!empty($rec['observacoes'])): ?><div class="mb-4"><strong>Observações:</strong><br><?= nl2br(hRec($rec['observacoes'])) ?></div><?php endif; ?>
-    <div class="text-end mt-4 pt-4">
-        <div class="assinatura-recibo">Assinatura</div>
-    </div>
-    <div class="text-muted small mt-4">Chave de validação: <?= hRec(substr((string)$rec['chave_validacao'],0,32)) ?></div>
 </div>
 <?php return; endif; ?>
 <?php

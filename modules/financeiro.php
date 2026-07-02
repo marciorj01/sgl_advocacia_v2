@@ -106,6 +106,21 @@ function financeiroGarantirEstrutura(mysqli $conn): void
         INDEX idx_bancos_ativo (ativo)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+    $conn->query("CREATE TABLE IF NOT EXISTS bancos_movimentacoes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        data_movimento DATE NOT NULL,
+        tipo VARCHAR(30) NOT NULL DEFAULT 'Transferência',
+        banco_origem_id INT NULL,
+        banco_destino_id INT NULL,
+        valor DECIMAL(12,2) NOT NULL DEFAULT 0,
+        descricao VARCHAR(255) NULL,
+        usuario_nome VARCHAR(150) NULL,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_bm_data (data_movimento),
+        INDEX idx_bm_origem (banco_origem_id),
+        INDEX idx_bm_destino (banco_destino_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
     financeiroAdicionarColuna($conn, 'contas_pagar', 'banco_id', "banco_id INT NULL");
     financeiroAdicionarColuna($conn, 'contas_receber', 'banco_id', "banco_id INT NULL");
 }
@@ -214,6 +229,24 @@ function financeiroSelectBanco(mysqli $conn, $selecionado = null): string
     }
     $html .= '</select><div class="form-text">Use para identificar em qual caixa/banco entrou ou saiu o dinheiro.</div>';
     return $html;
+}
+
+
+function financeiroSaldoBanco(mysqli $conn, int $bancoId): float
+{
+    if ($bancoId <= 0) return 0.0;
+    $saldo = 0.0;
+    $res = $conn->query("SELECT COALESCE(saldo_inicial,0) AS total FROM bancos_caixa WHERE id={$bancoId}");
+    if ($res && $row = $res->fetch_assoc()) $saldo += (float)$row['total'];
+    $res = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE deletado=0 AND banco_id={$bancoId} AND status IN ('Recebido','Pago','Quitada')");
+    if ($res && $row = $res->fetch_assoc()) $saldo += (float)$row['total'];
+    $res = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_pagar WHERE deletado=0 AND banco_id={$bancoId} AND status IN ('Pago','Quitada')");
+    if ($res && $row = $res->fetch_assoc()) $saldo -= (float)$row['total'];
+    $res = $conn->query("SELECT COALESCE(SUM(valor),0) AS total FROM bancos_movimentacoes WHERE banco_destino_id={$bancoId}");
+    if ($res && $row = $res->fetch_assoc()) $saldo += (float)$row['total'];
+    $res = $conn->query("SELECT COALESCE(SUM(valor),0) AS total FROM bancos_movimentacoes WHERE banco_origem_id={$bancoId}");
+    if ($res && $row = $res->fetch_assoc()) $saldo -= (float)$row['total'];
+    return $saldo;
 }
 
 function badgeClasseFin(string $status, string $tipo): string
@@ -483,6 +516,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_banco'])) {
         if ($ok && function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'Cadastrou banco/caixa', 'bancos_caixa', (string)$novoBancoId, $nome);
     }
     $acao = 'bancos';
+}
+
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['transferir_banco'])) {
+    $origem = (int)($_POST['banco_origem_id'] ?? 0);
+    $destino = (int)($_POST['banco_destino_id'] ?? 0);
+    $valor = brlParaFloatFin((string)($_POST['valor_transferencia'] ?? '0'));
+    $dataMov = $_POST['data_movimento'] ?: date('Y-m-d');
+    $descricao = trim($_POST['descricao_transferencia'] ?? 'Transferência entre contas');
+    $usuarioNome = $_SESSION['usuario_nome'] ?? $_SESSION['usuario'] ?? 'Sistema';
+    if ($origem <= 0 || $destino <= 0 || $origem === $destino || $valor <= 0) {
+        $msg = '<div class="alert alert-danger">Informe origem, destino diferentes e valor válido para transferir.</div>';
+    } else {
+        $stmt = $conn->prepare("INSERT INTO bancos_movimentacoes (data_movimento, tipo, banco_origem_id, banco_destino_id, valor, descricao, usuario_nome) VALUES (?, 'Transferência', ?, ?, ?, ?, ?)");
+        $stmt->bind_param('siidss', $dataMov, $origem, $destino, $valor, $descricao, $usuarioNome);
+        $ok = $stmt->execute();
+        $movId = $stmt->insert_id;
+        $stmt->close();
+        $msg = $ok ? '<div class="alert alert-success">Transferência registrada entre bancos/caixa.</div>' : '<div class="alert alert-danger">Erro ao registrar transferência.</div>';
+        if ($ok && function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Transferiu valor entre bancos/caixa', 'bancos_movimentacoes', (string)$movId, $descricao . ' - ' . fmtBrlFin($valor)); }
+    }
+    $acao = 'movimentacao_bancos';
 }
 
 /* ======================================================
@@ -862,11 +917,35 @@ if ($acao === 'caixa') {
     </div>
     <?php return; }
 
+
+if ($acao === 'movimentacao_bancos') {
+    $bancos = financeiroListaBancos($conn, false);
+    $movs = [];
+    $resMov = $conn->query("SELECT m.*, bo.nome AS origem_nome, bd.nome AS destino_nome FROM bancos_movimentacoes m LEFT JOIN bancos_caixa bo ON bo.id=m.banco_origem_id LEFT JOIN bancos_caixa bd ON bd.id=m.banco_destino_id ORDER BY m.data_movimento DESC, m.id DESC LIMIT 80");
+    if ($resMov) while($r=$resMov->fetch_assoc()) $movs[]=$r;
+    ?>
+    <div class="container-fluid">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+            <div><h2 class="fw-bold text-primary"><i class="bi bi-arrow-left-right"></i> Movimentação Bancária e Caixa</h2><p class="text-muted mb-0">Controle o que ficou em caixa físico, PIX e bancos da empresa.</p></div>
+            <div class="d-flex gap-2"><a href="?mod=financeiro&acao=bancos" class="btn btn-outline-dark"><i class="bi bi-bank"></i> Cadastrar bancos</a><a href="?mod=financeiro" class="btn btn-outline-secondary">Voltar</a></div>
+        </div>
+        <?= $msg ?>
+        <div class="row g-3 mb-3">
+            <?php if(empty($bancos)): ?><div class="col-12"><div class="alert alert-warning">Cadastre pelo menos uma conta em Bancos/Caixa.</div></div><?php endif; ?>
+            <?php foreach($bancos as $b): $saldoBanco = financeiroSaldoBanco($conn, (int)$b['id']); ?>
+                <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><div class="d-flex justify-content-between"><div><div class="text-muted small text-uppercase"><?= htmlspecialchars($b['tipo']) ?></div><h5 class="fw-bold mb-1"><?= htmlspecialchars($b['nome']) ?></h5><small class="text-muted"><?= htmlspecialchars(trim(($b['banco']??'') . ' ' . ($b['conta']??'')) ?: '-') ?></small></div><i class="bi bi-bank fs-2 text-primary opacity-50"></i></div><div class="fs-4 fw-bold mt-3 <?= $saldoBanco>=0?'text-success':'text-danger' ?>"><?= fmtBrlFin($saldoBanco) ?></div><small class="text-muted">Saldo atual estimado</small></div></div></div>
+            <?php endforeach; ?>
+        </div>
+        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-dark text-white fw-bold">Transferir entre Caixa/Bancos</div><div class="card-body"><form method="post" class="row g-3"><input type="hidden" name="transferir_banco" value="1"><div class="col-md-3"><label class="form-label">Data</label><input type="date" name="data_movimento" class="form-control" value="<?= date('Y-m-d') ?>" required></div><div class="col-md-3"><label class="form-label">Origem</label><select name="banco_origem_id" class="form-select" required><option value="">Selecione...</option><?php foreach($bancos as $b): ?><option value="<?= (int)$b['id'] ?>"><?= htmlspecialchars($b['nome']) ?></option><?php endforeach; ?></select></div><div class="col-md-3"><label class="form-label">Destino</label><select name="banco_destino_id" class="form-select" required><option value="">Selecione...</option><?php foreach($bancos as $b): ?><option value="<?= (int)$b['id'] ?>"><?= htmlspecialchars($b['nome']) ?></option><?php endforeach; ?></select></div><div class="col-md-3"><label class="form-label">Valor</label><input name="valor_transferencia" class="form-control" placeholder="R$ 0,00" required></div><div class="col-md-9"><label class="form-label">Descrição</label><input name="descricao_transferencia" class="form-control" placeholder="Ex.: depósito do caixa físico na conta corrente"></div><div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100"><i class="bi bi-check-circle"></i> Registrar transferência</button></div></form></div></div>
+        <div class="card shadow-sm border-0"><div class="card-header bg-dark text-white fw-bold">Histórico de transferências</div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Data</th><th>Origem</th><th>Destino</th><th>Descrição</th><th>Responsável</th><th class="text-end">Valor</th></tr></thead><tbody><?php if(empty($movs)): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma transferência registrada.</td></tr><?php endif; foreach($movs as $m): ?><tr><td><?= date('d/m/Y', strtotime($m['data_movimento'])) ?></td><td><?= htmlspecialchars($m['origem_nome'] ?: '-') ?></td><td><?= htmlspecialchars($m['destino_nome'] ?: '-') ?></td><td><?= htmlspecialchars($m['descricao'] ?: '-') ?></td><td><?= htmlspecialchars($m['usuario_nome'] ?: '-') ?></td><td class="text-end fw-bold"><?= fmtBrlFin($m['valor']) ?></td></tr><?php endforeach; ?></tbody></table></div></div>
+    </div>
+    <?php return; }
+
 if ($acao === 'bancos') {
     $bancos = financeiroListaBancos($conn, false);
     ?>
     <div class="container-fluid">
-        <div class="d-flex justify-content-between align-items-start mb-3"><div><h2 class="fw-bold text-primary"><i class="bi bi-bank"></i> Bancos / Caixa</h2><p class="text-muted mb-0">Cadastre onde o dinheiro entra ou sai: caixa, PIX, banco, conta corrente ou poupança.</p></div><a href="?mod=financeiro" class="btn btn-outline-secondary">Voltar</a></div>
+        <div class="d-flex justify-content-between align-items-start mb-3"><div><h2 class="fw-bold text-primary"><i class="bi bi-bank"></i> Bancos / Caixa</h2><p class="text-muted mb-0">Cadastre onde o dinheiro entra ou sai: caixa, PIX, banco, conta corrente ou poupança.</p></div><div class="d-flex gap-2"><a href="?mod=financeiro&acao=movimentacao_bancos" class="btn btn-outline-success"><i class="bi bi-arrow-left-right"></i> Movimentação</a><a href="?mod=financeiro" class="btn btn-outline-secondary">Voltar</a></div></div>
         <?= $msg ?>
         <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-dark text-white fw-bold">Novo Banco/Caixa</div><div class="card-body"><form method="post" class="row g-3"><input type="hidden" name="salvar_banco" value="1"><div class="col-md-4"><label class="form-label">Nome *</label><input name="nome" class="form-control" placeholder="Ex.: Caixa Escritório, PIX Itaú, Banco do Brasil" required></div><div class="col-md-2"><label class="form-label">Tipo</label><select name="tipo" class="form-select"><option>Caixa</option><option>PIX</option><option>Conta Corrente</option><option>Poupança</option><option>Cartão</option></select></div><div class="col-md-2"><label class="form-label">Banco</label><input name="banco" class="form-control"></div><div class="col-md-1"><label class="form-label">Agência</label><input name="agencia" class="form-control"></div><div class="col-md-2"><label class="form-label">Conta</label><input name="conta" class="form-control"></div><div class="col-md-1"><label class="form-label">Ativo</label><div class="form-check mt-2"><input type="checkbox" class="form-check-input" name="ativo" checked></div></div><div class="col-md-3"><label class="form-label">Saldo inicial</label><input name="saldo_inicial" class="form-control" placeholder="0,00"></div><div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100"><i class="bi bi-save"></i> Salvar</button></div></form></div></div>
         <div class="card shadow-sm border-0"><div class="card-header bg-dark text-white fw-bold">Contas cadastradas</div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Banco</th><th>Agência</th><th>Conta</th><th>Saldo inicial</th><th>Status</th></tr></thead><tbody><?php if(empty($bancos)): ?><tr><td colspan="7" class="text-center text-muted py-3">Nenhum banco/caixa cadastrado.</td></tr><?php endif; foreach($bancos as $b): ?><tr><td class="fw-semibold"><?= htmlspecialchars($b['nome']) ?></td><td><?= htmlspecialchars($b['tipo']) ?></td><td><?= htmlspecialchars($b['banco'] ?: '-') ?></td><td><?= htmlspecialchars($b['agencia'] ?: '-') ?></td><td><?= htmlspecialchars($b['conta'] ?: '-') ?></td><td><?= fmtBrlFin($b['saldo_inicial']) ?></td><td><span class="badge bg-<?= $b['ativo']?'success':'secondary' ?>"><?= $b['ativo']?'Ativo':'Inativo' ?></span></td></tr><?php endforeach; ?></tbody></table></div></div>
@@ -882,7 +961,7 @@ if ($acao === 'bancos') {
         </div>
         <div class="d-flex gap-2 no-print">
             <a href="?mod=financeiro&aba=cp&acao=novo_cp" class="btn btn-outline-danger"><i class="bi bi-plus-circle"></i> Nova despesa</a>
-            <a href="?mod=financeiro&acao=bancos" class="btn btn-outline-dark"><i class="bi bi-bank"></i> Bancos/Caixa</a>
+            <a href="?mod=financeiro&acao=movimentacao_bancos" class="btn btn-outline-success"><i class="bi bi-arrow-left-right"></i> Movimentação</a><a href="?mod=financeiro&acao=bancos" class="btn btn-outline-dark"><i class="bi bi-bank"></i> Bancos/Caixa</a>
             <a href="?mod=financeiro&aba=cr&acao=novo_cr" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo recebimento</a>
         </div>
     </div>

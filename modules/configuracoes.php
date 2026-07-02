@@ -6,6 +6,9 @@
  */
 
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
+if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
+if (function_exists('sgl_completar_logs_sem_responsavel')) { sgl_completar_logs_sem_responsavel($conn); }
 $upload_dir = __DIR__ . '/../assets/img/';
 if (!is_dir($upload_dir)) {
     @mkdir($upload_dir, 0755, true);

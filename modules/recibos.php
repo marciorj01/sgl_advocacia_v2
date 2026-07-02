@@ -174,7 +174,7 @@ if ($acao === 'imprimir'):
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3 no-print">
     <h3 class="fw-bold"><i class="bi bi-receipt"></i> Recibo <?= hRec($rec['numero']) ?></h3>
-    <div><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir A5 / Salvar PDF</button> <a href="?mod=recibos" class="btn btn-outline-secondary">Voltar</a></div>
+    <div><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir em A5 / Salvar PDF</button> <a href="?mod=recibos" class="btn btn-outline-secondary">Voltar</a></div>
 </div>
 <div class="recibo-print shadow-sm">
     <div class="text-center mb-3">

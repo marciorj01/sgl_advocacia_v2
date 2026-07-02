@@ -62,6 +62,25 @@ if (!function_exists('sgl_registrar_log')) {
     }
 }
 
+
+if (!function_exists('sgl_completar_logs_sem_responsavel')) {
+    function sgl_completar_logs_sem_responsavel(mysqli $conn): void
+    {
+        try {
+            if (empty($_SESSION['user_id']) && empty($_SESSION['nome']) && empty($_SESSION['username'])) return;
+            sgl_garantir_logs($conn);
+            $usuario_id = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : 0;
+            $usuario_nome = $conn->real_escape_string($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Usuário logado');
+            $usuario_login = $conn->real_escape_string($_SESSION['username'] ?? '');
+            $usuario_perfil = $conn->real_escape_string($_SESSION['perfil'] ?? '');
+            $uidSql = $usuario_id > 0 ? (string)$usuario_id : 'NULL';
+            $conn->query("UPDATE logs_sistema SET usuario_id = COALESCE(usuario_id, {$uidSql}), usuario_nome = IF(usuario_nome IS NULL OR usuario_nome='' OR usuario_nome='Sistema', '{$usuario_nome}', usuario_nome), usuario_login = IF(usuario_login IS NULL OR usuario_login='', '{$usuario_login}', usuario_login), usuario_perfil = IF(usuario_perfil IS NULL OR usuario_perfil='', '{$usuario_perfil}', usuario_perfil) WHERE usuario_nome IS NULL OR usuario_nome='' OR usuario_nome='Sistema' OR usuario_login IS NULL OR usuario_login=''");
+        } catch (Throwable $e) {
+            error_log('[SGL LOG BACKFILL] ' . $e->getMessage());
+        }
+    }
+}
+
 if (!function_exists('sgl_int_coluna_existe')) {
     function sgl_int_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool
     {

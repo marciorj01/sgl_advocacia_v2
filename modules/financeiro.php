@@ -92,6 +92,22 @@ function financeiroGarantirEstrutura(mysqli $conn): void
         INDEX idx_crp_conta (conta_id),
         INDEX idx_crp_status (status_pagamento)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    $conn->query("CREATE TABLE IF NOT EXISTS bancos_caixa (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        nome VARCHAR(120) NOT NULL,
+        tipo VARCHAR(40) DEFAULT 'Conta Corrente',
+        banco VARCHAR(120) NULL,
+        agencia VARCHAR(40) NULL,
+        conta VARCHAR(60) NULL,
+        saldo_inicial DECIMAL(12,2) DEFAULT 0,
+        ativo TINYINT(1) NOT NULL DEFAULT 1,
+        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_bancos_ativo (ativo)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'banco_id', "banco_id INT NULL");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'banco_id', "banco_id INT NULL");
 }
 
 financeiroGarantirEstrutura($conn);
@@ -166,6 +182,38 @@ function sqlNullableDate(mysqli $conn, string $valor): string
 function sqlMoney(float $valor): string
 {
     return number_format($valor, 2, '.', '');
+}
+
+function financeiroListaBancos(mysqli $conn, bool $somenteAtivos = true): array
+{
+    $where = $somenteAtivos ? 'WHERE ativo = 1' : '';
+    $lista = [];
+    $res = $conn->query("SELECT * FROM bancos_caixa {$where} ORDER BY ativo DESC, nome ASC");
+    if ($res) while ($row = $res->fetch_assoc()) $lista[] = $row;
+    return $lista;
+}
+
+function financeiroNomeBanco(mysqli $conn, $id): string
+{
+    $id = (int)$id;
+    if ($id <= 0) return '-';
+    $res = $conn->query("SELECT nome FROM bancos_caixa WHERE id = {$id} LIMIT 1");
+    if ($res && $res->num_rows) return (string)$res->fetch_assoc()['nome'];
+    return '-';
+}
+
+function financeiroSelectBanco(mysqli $conn, $selecionado = null): string
+{
+    $selecionado = (int)($selecionado ?? 0);
+    $html = '<select name="banco_id" class="form-select"><option value="">Selecione...</option>';
+    foreach (financeiroListaBancos($conn, true) as $b) {
+        $id = (int)$b['id'];
+        $sel = $id === $selecionado ? ' selected' : '';
+        $nome = htmlspecialchars($b['nome'] . ' - ' . ($b['tipo'] ?? ''), ENT_QUOTES, 'UTF-8');
+        $html .= "<option value=\"{$id}\"{$sel}>{$nome}</option>";
+    }
+    $html .= '</select><div class="form-text">Use para identificar em qual caixa/banco entrou ou saiu o dinheiro.</div>';
+    return $html;
 }
 
 function badgeClasseFin(string $status, string $tipo): string
@@ -402,6 +450,41 @@ if (isset($_GET['pagar_cp'])) {
     $acao = 'listar';
 }
 
+
+/* ======================================================
+   CADASTRO DE BANCOS / CAIXAS
+   ====================================================== */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_banco'])) {
+    $id = (int)($_POST['id'] ?? 0);
+    $nome = trim($_POST['nome'] ?? '');
+    $tipo = trim($_POST['tipo'] ?? 'Conta Corrente');
+    $banco = trim($_POST['banco'] ?? '');
+    $agencia = trim($_POST['agencia'] ?? '');
+    $conta = trim($_POST['conta'] ?? '');
+    $saldo_inicial = brlParaFloatFin($_POST['saldo_inicial'] ?? '0');
+    $ativo = isset($_POST['ativo']) ? 1 : 0;
+
+    if ($nome === '') {
+        $msg = '<div class="alert alert-danger">Informe o nome da conta/banco/caixa.</div>';
+    } elseif ($id > 0) {
+        $stmt = $conn->prepare("UPDATE bancos_caixa SET nome=?, tipo=?, banco=?, agencia=?, conta=?, saldo_inicial=?, ativo=? WHERE id=?");
+        $stmt->bind_param('sssssdis', $nome, $tipo, $banco, $agencia, $conta, $saldo_inicial, $ativo, $id);
+        $ok = $stmt->execute();
+        $stmt->close();
+        $msg = $ok ? '<div class="alert alert-success">Banco/Caixa atualizado.</div>' : '<div class="alert alert-danger">Erro ao atualizar banco/caixa.</div>';
+        if ($ok && function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'Atualizou banco/caixa', 'bancos_caixa', (string)$id, $nome);
+    } else {
+        $stmt = $conn->prepare("INSERT INTO bancos_caixa (nome, tipo, banco, agencia, conta, saldo_inicial, ativo) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param('sssssdi', $nome, $tipo, $banco, $agencia, $conta, $saldo_inicial, $ativo);
+        $ok = $stmt->execute();
+        $novoBancoId = $stmt->insert_id;
+        $stmt->close();
+        $msg = $ok ? '<div class="alert alert-success">Banco/Caixa cadastrado.</div>' : '<div class="alert alert-danger">Erro ao cadastrar banco/caixa.</div>';
+        if ($ok && function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'Cadastrou banco/caixa', 'bancos_caixa', (string)$novoBancoId, $nome);
+    }
+    $acao = 'bancos';
+}
+
 /* ======================================================
    AJUSTE SGL: LIXEIRA SEGURA — CONTAS A PAGAR / RECEBER
    (mesmo padrão usado em honorarios.php)
@@ -482,6 +565,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
     $forma_pagamento = trim($_POST['forma_pagamento'] ?? '');
     $mes_referencia  = trim($_POST['mes_referencia'] ?? '');
     $observacoes     = trim($_POST['observacoes'] ?? '');
+    $banco_id        = (int)($_POST['banco_id'] ?? 0);
+    $banco_sql       = $banco_id > 0 ? (string)$banco_id : 'NULL';
     $gerar30dias     = isset($_POST['gerar_30dias']);
 
     // A conta principal é "espelho" das parcelas:
@@ -497,7 +582,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
     if ($novo) {
         $sql = "INSERT INTO contas_pagar
             (id, descricao, categoria, fornecedor, valor, data_vencimento, data_pagamento,
-             forma_pagamento, status, mes_referencia, observacoes, valor_pago, valor_pendente, deletado)
+             forma_pagamento, status, mes_referencia, observacoes, valor_pago, valor_pendente, banco_id, deletado)
             VALUES (
                 " . sqlText($conn, $id) . ",
                 " . sqlNullableText($conn, $descricao) . ",
@@ -512,6 +597,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
                 " . sqlNullableText($conn, $observacoes) . ",
                 " . sqlMoney($valor_pago) . ",
                 " . sqlMoney($valor_pend) . ",
+                {$banco_sql},
                 0
             )";
     } else {
@@ -525,7 +611,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
                 forma_pagamento = " . sqlNullableText($conn, $forma_pagamento) . ",
                 status          = " . sqlText($conn, $status_final) . ",
                 mes_referencia  = " . sqlNullableText($conn, $mes_referencia) . ",
-                observacoes     = " . sqlNullableText($conn, $observacoes) . "
+                observacoes     = " . sqlNullableText($conn, $observacoes) . ",
+                banco_id        = {$banco_sql}
             WHERE id = " . sqlText($conn, $id);
     }
 
@@ -552,6 +639,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
             }
         }
 
+        if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, $novo ? 'Cadastrou conta a pagar' : 'Atualizou conta a pagar', 'contas_pagar', $id, $descricao); }
         $msg  = "<div class='alert alert-success'>✅ Conta a Pagar <strong>{$id}</strong> salva com parcelas.</div>";
         $acao = 'listar';
         $aba  = 'cp';
@@ -622,6 +710,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
     $status            = trim($_POST['status'] ?? 'Pendente');
     $forma_recebimento = trim($_POST['forma_recebimento'] ?? '');
     $observacoes       = trim($_POST['observacoes'] ?? '');
+    $banco_id          = (int)($_POST['banco_id'] ?? 0);
+    $banco_sql         = $banco_id > 0 ? (string)$banco_id : 'NULL';
 
     $valor_pago = 0.00;
     $valor_pendente = $valor;
@@ -643,7 +733,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
 
     if ($novo) {
         $sql = "INSERT INTO contas_receber
-            (id, descricao, valor, valor_parcela, valor_pago, valor_pendente, data_vencimento, data_recebimento, forma_recebimento, status, observacoes, deletado)
+            (id, descricao, valor, valor_parcela, valor_pago, valor_pendente, data_vencimento, data_recebimento, forma_recebimento, status, observacoes, banco_id, deletado)
             VALUES (
                 " . sqlText($conn, $id) . ",
                 " . sqlNullableText($conn, $descricao) . ",
@@ -656,6 +746,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
                 " . sqlNullableText($conn, $forma_recebimento) . ",
                 " . sqlText($conn, $status) . ",
                 " . sqlNullableText($conn, $observacoes) . ",
+                {$banco_sql},
                 0
             )";
     } else {
@@ -669,7 +760,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
                 data_recebimento   = " . sqlNullableDate($conn, $data_recebimento) . ",
                 forma_recebimento  = " . sqlNullableText($conn, $forma_recebimento) . ",
                 status             = " . sqlText($conn, $status) . ",
-                observacoes        = " . sqlNullableText($conn, $observacoes) . "
+                observacoes        = " . sqlNullableText($conn, $observacoes) . ",
+                banco_id           = {$banco_sql}
             WHERE id = " . sqlText($conn, $id);
     }
 
@@ -684,6 +776,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
         } else {
             $msg = "<div class='alert alert-success'>✅ Conta a Receber <strong>{$id}</strong> salva.</div>";
         }
+        if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, $novo ? 'Cadastrou conta a receber' : 'Atualizou conta a receber', 'contas_receber', $id, $descricao); }
         $acao = 'listar';
         $aba  = 'cr';
     } else {
@@ -700,8 +793,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
 $filtro_deletado_cp = ($aba === 'cp' && $acao === 'lixeira') ? 1 : 0;
 $filtro_deletado_cr = ($aba === 'cr' && $acao === 'lixeira') ? 1 : 0;
 
-$lista_cp = $conn->query("SELECT * FROM contas_pagar WHERE deletado = $filtro_deletado_cp ORDER BY data_vencimento DESC, id DESC");
-$lista_cr = $conn->query("SELECT cr.*, c.nome AS cliente_nome FROM contas_receber cr LEFT JOIN clientes c ON c.id = cr.cliente_id WHERE cr.deletado = $filtro_deletado_cr ORDER BY cr.data_vencimento DESC, cr.id DESC");
+$lista_cp = $conn->query("SELECT cp.*, b.nome AS banco_nome FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id = cp.banco_id WHERE cp.deletado = $filtro_deletado_cp ORDER BY cp.data_vencimento DESC, cp.id DESC");
+$lista_cr = $conn->query("SELECT cr.*, c.nome AS cliente_nome, b.nome AS banco_nome FROM contas_receber cr LEFT JOIN clientes c ON c.id = cr.cliente_id LEFT JOIN bancos_caixa b ON b.id = cr.banco_id WHERE cr.deletado = $filtro_deletado_cr ORDER BY cr.data_vencimento DESC, cr.id DESC");
 
 $hoje = date('Y-m-d');
 $inicioMes = date('Y-m-01');
@@ -729,6 +822,57 @@ if ($q) $resumoFinanceiro['vencidas_pagar'] = (int)($q->fetch_assoc()['total'] ?
 $q = $conn->query("SELECT COUNT(*) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '$hoje'");
 if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total'] ?? 0);
 
+if ($acao === 'caixa') {
+    $periodo = $_GET['periodo'] ?? 'dia';
+    $dataBase = $_GET['data'] ?? date('Y-m-d');
+    $mesBase = $_GET['mes'] ?? date('Y-m');
+    if ($periodo === 'mes') {
+        $inicioCaixa = $mesBase . '-01';
+        $fimCaixa = date('Y-m-t', strtotime($inicioCaixa));
+        $tituloCaixa = 'Fechamento de Caixa Mensal';
+        $subtituloCaixa = date('m/Y', strtotime($inicioCaixa));
+    } else {
+        $inicioCaixa = $fimCaixa = $dataBase;
+        $tituloCaixa = 'Fechamento de Caixa do Dia';
+        $subtituloCaixa = date('d/m/Y', strtotime($dataBase));
+    }
+    $entradas = [];
+    $saidas = [];
+    $sqlEntradas = "SELECT cr.id, cr.descricao, cr.valor_pago, cr.valor, cr.data_recebimento, cr.forma_recebimento, cr.status, c.nome AS cliente_nome, b.nome AS banco_nome FROM contas_receber cr LEFT JOIN clientes c ON c.id=cr.cliente_id LEFT JOIN bancos_caixa b ON b.id=cr.banco_id WHERE cr.deletado=0 AND cr.status IN ('Recebido','Pago','Quitada') AND cr.data_recebimento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cr.data_recebimento ASC, cr.id ASC";
+    $res = $conn->query($sqlEntradas); if ($res) while($r=$res->fetch_assoc()) $entradas[]=$r;
+    $sqlSaidas = "SELECT cp.id, cp.descricao, cp.categoria, cp.fornecedor, cp.valor_pago, cp.valor, cp.data_pagamento, cp.forma_pagamento, cp.status, b.nome AS banco_nome FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id=cp.banco_id WHERE cp.deletado=0 AND cp.status IN ('Pago','Quitada') AND cp.data_pagamento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cp.data_pagamento ASC, cp.id ASC";
+    $res = $conn->query($sqlSaidas); if ($res) while($r=$res->fetch_assoc()) $saidas[]=$r;
+    $totalEntradas = array_sum(array_map(fn($r)=>(float)($r['valor_pago'] ?: $r['valor']), $entradas));
+    $totalSaidas = array_sum(array_map(fn($r)=>(float)($r['valor_pago'] ?: $r['valor']), $saidas));
+    $saldoCaixa = $totalEntradas - $totalSaidas;
+    ?>
+    <div class="container-fluid caixa-relatorio">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3 no-print">
+            <div><h2 class="fw-bold text-primary"><i class="bi bi-cash-register"></i> <?= $tituloCaixa ?></h2><p class="text-muted mb-0">Relatório de entradas, saídas e saldo do período: <strong><?= $subtituloCaixa ?></strong></p></div>
+            <div class="d-flex gap-2"><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir / Salvar PDF</button><a href="?mod=dashboard" class="btn btn-outline-secondary">Voltar</a></div>
+        </div>
+        <form class="card card-body shadow-sm border-0 mb-3 no-print" method="get">
+            <input type="hidden" name="mod" value="financeiro"><input type="hidden" name="acao" value="caixa"><input type="hidden" name="periodo" value="<?= htmlspecialchars($periodo) ?>">
+            <div class="row g-2 align-items-end"><div class="col-md-3"><label class="form-label">Data</label><input type="date" name="data" class="form-control" value="<?= htmlspecialchars($dataBase) ?>" <?= $periodo==='mes'?'disabled':'' ?>></div><div class="col-md-3"><label class="form-label">Mês</label><input type="month" name="mes" class="form-control" value="<?= htmlspecialchars($mesBase) ?>" <?= $periodo==='dia'?'disabled':'' ?>></div><div class="col-md-3"><button class="btn btn-outline-primary w-100">Filtrar</button></div></div>
+        </form>
+        <style>@media print{.sidebar,.no-print{display:none!important} main{padding:0!important}.caixa-relatorio{font-size:12px}.card{box-shadow:none!important}.table{font-size:11px}}</style>
+        <div class="row g-3 mb-3"><div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Entradas</div><div class="fs-3 fw-bold text-success"><?= fmtBrlFin($totalEntradas) ?></div></div></div></div><div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Saídas</div><div class="fs-3 fw-bold text-danger"><?= fmtBrlFin($totalSaidas) ?></div></div></div></div><div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Saldo do período</div><div class="fs-3 fw-bold <?= $saldoCaixa>=0?'text-primary':'text-danger' ?>"><?= fmtBrlFin($saldoCaixa) ?></div></div></div></div></div>
+        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-success text-white fw-bold">Entradas do período</div><div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead><tr><th>Data</th><th>Descrição</th><th>Cliente</th><th>Forma</th><th>Banco/Caixa</th><th class="text-end">Valor</th></tr></thead><tbody><?php if(empty($entradas)): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma entrada no período.</td></tr><?php endif; foreach($entradas as $r): ?><tr><td><?= date('d/m/Y', strtotime($r['data_recebimento'])) ?></td><td><?= htmlspecialchars($r['descricao'] ?: $r['id']) ?></td><td><?= htmlspecialchars($r['cliente_nome'] ?: '-') ?></td><td><?= htmlspecialchars($r['forma_recebimento'] ?: '-') ?></td><td><?= htmlspecialchars($r['banco_nome'] ?: '-') ?></td><td class="text-end fw-bold text-success"><?= fmtBrlFin($r['valor_pago'] ?: $r['valor']) ?></td></tr><?php endforeach; ?></tbody></table></div></div>
+        <div class="card shadow-sm border-0"><div class="card-header bg-danger text-white fw-bold">Saídas do período</div><div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead><tr><th>Data</th><th>Descrição</th><th>Fornecedor</th><th>Categoria</th><th>Forma</th><th>Banco/Caixa</th><th class="text-end">Valor</th></tr></thead><tbody><?php if(empty($saidas)): ?><tr><td colspan="7" class="text-center text-muted py-3">Nenhuma saída no período.</td></tr><?php endif; foreach($saidas as $r): ?><tr><td><?= date('d/m/Y', strtotime($r['data_pagamento'])) ?></td><td><?= htmlspecialchars($r['descricao'] ?: $r['id']) ?></td><td><?= htmlspecialchars($r['fornecedor'] ?: '-') ?></td><td><?= htmlspecialchars($r['categoria'] ?: '-') ?></td><td><?= htmlspecialchars($r['forma_pagamento'] ?: '-') ?></td><td><?= htmlspecialchars($r['banco_nome'] ?: '-') ?></td><td class="text-end fw-bold text-danger"><?= fmtBrlFin($r['valor_pago'] ?: $r['valor']) ?></td></tr><?php endforeach; ?></tbody></table></div></div>
+    </div>
+    <?php return; }
+
+if ($acao === 'bancos') {
+    $bancos = financeiroListaBancos($conn, false);
+    ?>
+    <div class="container-fluid">
+        <div class="d-flex justify-content-between align-items-start mb-3"><div><h2 class="fw-bold text-primary"><i class="bi bi-bank"></i> Bancos / Caixa</h2><p class="text-muted mb-0">Cadastre onde o dinheiro entra ou sai: caixa, PIX, banco, conta corrente ou poupança.</p></div><a href="?mod=financeiro" class="btn btn-outline-secondary">Voltar</a></div>
+        <?= $msg ?>
+        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-dark text-white fw-bold">Novo Banco/Caixa</div><div class="card-body"><form method="post" class="row g-3"><input type="hidden" name="salvar_banco" value="1"><div class="col-md-4"><label class="form-label">Nome *</label><input name="nome" class="form-control" placeholder="Ex.: Caixa Escritório, PIX Itaú, Banco do Brasil" required></div><div class="col-md-2"><label class="form-label">Tipo</label><select name="tipo" class="form-select"><option>Caixa</option><option>PIX</option><option>Conta Corrente</option><option>Poupança</option><option>Cartão</option></select></div><div class="col-md-2"><label class="form-label">Banco</label><input name="banco" class="form-control"></div><div class="col-md-1"><label class="form-label">Agência</label><input name="agencia" class="form-control"></div><div class="col-md-2"><label class="form-label">Conta</label><input name="conta" class="form-control"></div><div class="col-md-1"><label class="form-label">Ativo</label><div class="form-check mt-2"><input type="checkbox" class="form-check-input" name="ativo" checked></div></div><div class="col-md-3"><label class="form-label">Saldo inicial</label><input name="saldo_inicial" class="form-control" placeholder="0,00"></div><div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100"><i class="bi bi-save"></i> Salvar</button></div></form></div></div>
+        <div class="card shadow-sm border-0"><div class="card-header bg-dark text-white fw-bold">Contas cadastradas</div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Nome</th><th>Tipo</th><th>Banco</th><th>Agência</th><th>Conta</th><th>Saldo inicial</th><th>Status</th></tr></thead><tbody><?php if(empty($bancos)): ?><tr><td colspan="7" class="text-center text-muted py-3">Nenhum banco/caixa cadastrado.</td></tr><?php endif; foreach($bancos as $b): ?><tr><td class="fw-semibold"><?= htmlspecialchars($b['nome']) ?></td><td><?= htmlspecialchars($b['tipo']) ?></td><td><?= htmlspecialchars($b['banco'] ?: '-') ?></td><td><?= htmlspecialchars($b['agencia'] ?: '-') ?></td><td><?= htmlspecialchars($b['conta'] ?: '-') ?></td><td><?= fmtBrlFin($b['saldo_inicial']) ?></td><td><span class="badge bg-<?= $b['ativo']?'success':'secondary' ?>"><?= $b['ativo']?'Ativo':'Inativo' ?></span></td></tr><?php endforeach; ?></tbody></table></div></div>
+    </div>
+    <?php return; }
+
 ?>
 <div class="container-fluid">
     <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
@@ -738,6 +882,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
         </div>
         <div class="d-flex gap-2 no-print">
             <a href="?mod=financeiro&aba=cp&acao=novo_cp" class="btn btn-outline-danger"><i class="bi bi-plus-circle"></i> Nova despesa</a>
+            <a href="?mod=financeiro&acao=bancos" class="btn btn-outline-dark"><i class="bi bi-bank"></i> Bancos/Caixa</a>
             <a href="?mod=financeiro&aba=cr&acao=novo_cr" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo recebimento</a>
         </div>
     </div>
@@ -819,6 +964,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                         <th>Descrição</th>
                                         <th>Categoria</th>
                                         <th>Fornecedor</th>
+                                        <th>Banco/Caixa</th>
                                         <th>Valor</th>
                                         <th>Vencimento</th>
                                         <th>Pago</th>
@@ -836,6 +982,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                             <td><?= htmlspecialchars($row['descricao'] ?? '-') ?></td>
                                             <td><?= htmlspecialchars($row['categoria'] ?? '-') ?></td>
                                             <td><?= htmlspecialchars($row['fornecedor'] ?? '-') ?></td>
+                                            <td><?= htmlspecialchars($row['banco_nome'] ?? '-') ?></td>
                                             <td><?= fmtBrlFin($row['valor'] ?? 0) ?></td>
                                             <td><?= !empty($row['data_vencimento']) ? date('d/m/Y', strtotime($row['data_vencimento'])) : '-' ?></td>
                                             <td><?= fmtBrlFin($row['valor_pago'] ?? 0) ?></td>
@@ -897,6 +1044,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                     'status'          => 'Pendente',
                     'mes_referencia'  => '',
                     'observacoes'     => '',
+                    'banco_id'        => '',
                 ];
                 $qtd_parcelas = 1;
 
@@ -961,6 +1109,10 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                 <label class="form-label">Forma Pagamento</label>
                                 <input type="text" name="forma_pagamento" class="form-control"
                                        value="<?= htmlspecialchars($conta_cp['forma_pagamento'] ?? '') ?>">
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label">Banco/Caixa</label>
+                                <?= financeiroSelectBanco($conn, $conta_cp['banco_id'] ?? null) ?>
                             </div>
                             <div class="col-md-2">
                                 <label class="form-label">Status</label>
@@ -1130,6 +1282,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                         <th>Cliente</th>
                                         <th>Valor</th>
                                         <th>Vencimento</th>
+                                        <th>Banco/Caixa</th>
                                         <th>Status</th>
                                         <th>Ações</th>
                                     </tr>
@@ -1144,6 +1297,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                             <td><?= htmlspecialchars($row['cliente_nome'] ?? '-') ?></td>
                                             <td><?= fmtBrlFin($row['valor'] ?? 0) ?></td>
                                             <td><?= !empty($row['data_vencimento']) ? date('d/m/Y', strtotime($row['data_vencimento'])) : '-' ?></td>
+                                            <td><?= htmlspecialchars($row['banco_nome'] ?? '-') ?></td>
                                             <td><span class="badge bg-<?= $badge ?>"><?= htmlspecialchars($row['status'] ?? '-') ?></span></td>
                                             <td class="text-nowrap">
                                                 <?php if ($acao === 'lixeira'): ?>
@@ -1210,6 +1364,7 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                     'status'           => 'Pendente',
                     'forma_recebimento'=> '',
                     'observacoes'      => '',
+                    'banco_id'          => '',
                 ];
 
                 if ($acao === 'editar_cr' && isset($_GET['id'])) {
@@ -1273,6 +1428,10 @@ if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total']
                                         </option>
                                     <?php endforeach; ?>
                                 </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">Banco/Caixa</label>
+                                <?= financeiroSelectBanco($conn, $conta_cr['banco_id'] ?? null) ?>
                             </div>
 
                             <div class="col-12">

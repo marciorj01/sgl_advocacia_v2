@@ -360,7 +360,7 @@ if ($compromissosHoje > 0) {
             <div class="card border-0 shadow-sm h-100">
                 <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
                     <span><i class="bi bi-cash-register me-2"></i>Fechamento de Caixa do Dia</span>
-                    <a href="?mod=financeiro" class="btn btn-sm btn-outline-light">Abrir financeiro</a>
+                    <a href="?mod=financeiro&acao=caixa&periodo=dia" class="btn btn-sm btn-outline-light">Abrir fechamento</a>
                 </div>
                 <div class="card-body">
                     <div class="row text-center g-3">
@@ -376,7 +376,7 @@ if ($compromissosHoje > 0) {
             <div class="card border-0 shadow-sm h-100">
                 <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
                     <span><i class="bi bi-calendar3 me-2"></i>Fechamento de Caixa Mensal</span>
-                    <button type="button" class="btn btn-sm btn-outline-light" onclick="window.print()"><i class="bi bi-file-earmark-pdf me-1"></i>PDF</button>
+                    <a href="?mod=financeiro&acao=caixa&periodo=mes" class="btn btn-sm btn-outline-light"><i class="bi bi-file-earmark-pdf me-1"></i>Abrir fechamento</a>
                 </div>
                 <div class="card-body">
                     <div class="row text-center g-3">

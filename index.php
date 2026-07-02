@@ -3,6 +3,7 @@ date_default_timezone_set('America/Sao_Paulo');
 // C:\xampp\htdocs\sistema_sgl\index.php
 require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/config/auth.php';
+require_once __DIR__ . '/config/integracoes.php';
 iniciarSessaoSegura();
 exigirLogin('auth/login.php');
 

@@ -60,12 +60,12 @@ $tituloPagina = $titulos[$modulo] ?? 'SGL';
          style="min-height:100vh; width:220px; min-width:220px; position:sticky; top:0; height:100vh; overflow-y:auto;">
 
         <div class="text-center mb-4">
-            <img src="assets/img/logo_custom.png" alt="Struzik, Guimarães & Lecz" class="img-fluid rounded" style="max-width: 100%; height: auto; border: 1px solid rgba(255,255,255,0.08);">
+            <img src="<?= htmlspecialchars($logo_src ?? 'assets/img/logo_custom.png') ?>?v=<?= time() ?>" alt="<?= htmlspecialchars($nome_escritorio ?? 'SGL Advocacia') ?>" class="img-fluid rounded" style="max-width: 100%; height: auto; border: 1px solid rgba(255,255,255,0.08);">
         </div>
 
         <!-- Informações do Usuário Logado -->
         <div class="text-center mb-3">
-            <div class="fw-bold text-warning mb-1">SGL Advocacia</div>
+            <div class="fw-bold text-warning mb-1"><?= htmlspecialchars($nome_escritorio ?? 'SGL Advocacia') ?></div>
             <p class="mb-0">Olá, <strong><?= htmlspecialchars($_SESSION['nome'] ?? $_SESSION['username']) ?></strong>!</p>
             <small class="d-block text-light opacity-75"><?= htmlspecialchars($_SESSION['perfil'] ?? 'Usuário') ?></small>
             <small class="d-block text-success mt-1"><i class="bi bi-circle-fill" style="font-size:0.45rem;"></i> Online</small>

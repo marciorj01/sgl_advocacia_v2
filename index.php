@@ -18,6 +18,7 @@ $modulos_validos = [
     'agenda',
     'financeiro',
     'recibos',
+    'documentos',
     'configuracoes',
     // Adicione aqui outros módulos que você criar, como um para gerenciar usuários ou advogadas
 ];
@@ -36,6 +37,7 @@ $titulos = [
     'agenda'     => 'Agenda',
     'financeiro' => 'Financeiro',
     'recibos' => 'Recibos',
+    'documentos' => 'Documentos',
     'configuracoes' => 'Configurações',
 ];
 
@@ -134,6 +136,13 @@ $tituloPagina = $titulos[$modulo] ?? 'SGL';
             </li>
 
             <!-- Links de Configuração e Logout -->
+            <li>
+                <a href="?mod=documentos"
+                   class="nav-link text-white <?= $modulo === 'documentos' ? 'active bg-secondary rounded' : '' ?>">
+                    <i class="bi bi-file-earmark-arrow-up me-2"></i>Documentos
+                </a>
+            </li>
+
             <li>
                 <a href="?mod=configuracoes"
                    class="nav-link text-white <?= $modulo === 'configuracoes' ? 'active bg-secondary rounded' : '' ?>">

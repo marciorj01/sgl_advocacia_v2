@@ -64,21 +64,40 @@ function sgl_validar_hex(string $cor, string $padrao): string {
 }
 
 function sgl_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool {
-    $stmt = $conn->prepare("SHOW COLUMNS FROM `$tabela` LIKE ?");
-    $stmt->bind_param('s', $coluna);
+    if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela) || !preg_match('/^[a-zA-Z0-9_]+$/', $coluna)) {
+        return false;
+    }
+
+    $sql = "SELECT COUNT(*) AS total
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = ?
+              AND COLUMN_NAME = ?";
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param('ss', $tabela, $coluna);
     $stmt->execute();
-    $existe = $stmt->get_result()->num_rows > 0;
+    $resultado = $stmt->get_result()->fetch_assoc();
     $stmt->close();
-    return $existe;
+
+    return ((int)($resultado['total'] ?? 0)) > 0;
 }
 
 function sgl_tabela_existe(mysqli $conn, string $tabela): bool {
-    $stmt = $conn->prepare("SHOW TABLES LIKE ?");
+    if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela)) {
+        return false;
+    }
+
+    $sql = "SELECT COUNT(*) AS total
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = ?";
+    $stmt = $conn->prepare($sql);
     $stmt->bind_param('s', $tabela);
     $stmt->execute();
-    $existe = $stmt->get_result()->num_rows > 0;
+    $resultado = $stmt->get_result()->fetch_assoc();
     $stmt->close();
-    return $existe;
+
+    return ((int)($resultado['total'] ?? 0)) > 0;
 }
 
 function sgl_log(mysqli $conn, string $acao, ?string $tabela = null, ?string $registro = null, ?string $detalhes = null): void {

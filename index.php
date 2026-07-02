@@ -16,6 +16,7 @@ $modulos_validos = [
     'honorarios',
     'agenda',
     'financeiro',
+    'recibos',
     'configuracoes',
     // Adicione aqui outros módulos que você criar, como um para gerenciar usuários ou advogadas
 ];
@@ -33,6 +34,7 @@ $titulos = [
     'honorarios' => 'Honorários',
     'agenda'     => 'Agenda',
     'financeiro' => 'Financeiro',
+    'recibos' => 'Recibos',
     'configuracoes' => 'Configurações',
 ];
 
@@ -120,6 +122,13 @@ $tituloPagina = $titulos[$modulo] ?? 'SGL';
                 <a href="?mod=financeiro"
                    class="nav-link text-white <?= $modulo === 'financeiro' ? 'active bg-secondary rounded' : '' ?>">
                     <i class="bi bi-bar-chart me-2"></i>Financeiro
+                </a>
+            </li>
+
+            <li>
+                <a href="?mod=recibos"
+                   class="nav-link text-white <?= $modulo === 'recibos' ? 'active bg-secondary rounded' : '' ?>">
+                    <i class="bi bi-receipt me-2"></i>Recibos
                 </a>
             </li>
 

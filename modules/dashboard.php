@@ -151,6 +151,27 @@ $despesasPagasMes = totalScalar($conn, "
       AND COALESCE(data_pagamento, atualizado_em) BETWEEN '{$inicioMes}' AND '{$fimMes} 23:59:59'
 ");
 
+$entradasHoje = totalScalar($conn, "
+    SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END), 0) AS total
+    FROM contas_receber
+    WHERE deletado = 0
+      AND status IN ('Recebido','Pago','Quitada')
+      AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) = '{$hoje}'
+");
+
+$saidasHoje = totalScalar($conn, "
+    SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END), 0) AS total
+    FROM contas_pagar
+    WHERE deletado = 0
+      AND status IN ('Pago','Quitada')
+      AND COALESCE(data_pagamento, DATE(atualizado_em), data_vencimento) = '{$hoje}'
+");
+
+$saldoCaixaHoje = $entradasHoje - $saidasHoje;
+$entradasMes = $recebidoMes;
+$saidasMes = $despesasPagasMes;
+$saldoCaixaMes = $entradasMes - $saidasMes;
+
 $saldoEstimado = $recebidoMes + $totalAReceber - $despesasAbertas;
 
 // ========================
@@ -328,6 +349,42 @@ if ($compromissosHoje > 0) {
                     <h3 class="fw-bold mb-0"><?= moeda($saldoEstimado) ?></h3>
                     <small class="text-white-50">Recebido + previsto - despesas</small>
                     <i class="bi bi-calculator fs-1 position-absolute end-0 bottom-0 m-3 opacity-25"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="row g-3 mb-4">
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-cash-register me-2"></i>Fechamento de Caixa do Dia</span>
+                    <a href="?mod=financeiro" class="btn btn-sm btn-outline-light">Abrir financeiro</a>
+                </div>
+                <div class="card-body">
+                    <div class="row text-center g-3">
+                        <div class="col-4"><small class="text-muted text-uppercase">Entradas</small><div class="fw-bold text-success fs-5"><?= moeda($entradasHoje) ?></div></div>
+                        <div class="col-4"><small class="text-muted text-uppercase">Saídas</small><div class="fw-bold text-danger fs-5"><?= moeda($saidasHoje) ?></div></div>
+                        <div class="col-4"><small class="text-muted text-uppercase">Saldo</small><div class="fw-bold <?= $saldoCaixaHoje >= 0 ? 'text-primary' : 'text-danger' ?> fs-5"><?= moeda($saldoCaixaHoje) ?></div></div>
+                    </div>
+                    <div class="small text-muted mt-3">Baseado em recebimentos e pagamentos confirmados em <?= date('d/m/Y') ?>.</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-calendar3 me-2"></i>Fechamento de Caixa Mensal</span>
+                    <button type="button" class="btn btn-sm btn-outline-light" onclick="window.print()"><i class="bi bi-file-earmark-pdf me-1"></i>PDF</button>
+                </div>
+                <div class="card-body">
+                    <div class="row text-center g-3">
+                        <div class="col-4"><small class="text-muted text-uppercase">Entradas</small><div class="fw-bold text-success fs-5"><?= moeda($entradasMes) ?></div></div>
+                        <div class="col-4"><small class="text-muted text-uppercase">Saídas</small><div class="fw-bold text-danger fs-5"><?= moeda($saidasMes) ?></div></div>
+                        <div class="col-4"><small class="text-muted text-uppercase">Resultado</small><div class="fw-bold <?= $saldoCaixaMes >= 0 ? 'text-primary' : 'text-danger' ?> fs-5"><?= moeda($saldoCaixaMes) ?></div></div>
+                    </div>
+                    <div class="small text-muted mt-3">Fechamento consolidado do mês <?= date('m/Y') ?>.</div>
                 </div>
             </div>
         </div>

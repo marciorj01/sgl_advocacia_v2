@@ -15,6 +15,9 @@ if (!function_exists('sgl_garantir_logs')) {
         $conn->query("CREATE TABLE IF NOT EXISTS logs_sistema (
             id INT AUTO_INCREMENT PRIMARY KEY,
             usuario_id INT NULL,
+            usuario_nome VARCHAR(150) NULL,
+            usuario_login VARCHAR(80) NULL,
+            usuario_perfil VARCHAR(80) NULL,
             acao VARCHAR(100) NOT NULL,
             tabela VARCHAR(80) NULL,
             registro_id VARCHAR(40) NULL,
@@ -25,6 +28,13 @@ if (!function_exists('sgl_garantir_logs')) {
             INDEX idx_logs_tabela (tabela),
             INDEX idx_logs_data (criado_em)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+        // Compatibilidade com instalações que já possuíam logs_sistema sem dados do responsável.
+        if (function_exists('sgl_int_add_coluna')) {
+            sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_nome', "usuario_nome VARCHAR(150) NULL");
+            sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_login', "usuario_login VARCHAR(80) NULL");
+            sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_perfil', "usuario_perfil VARCHAR(80) NULL");
+        }
     }
 }
 
@@ -34,10 +44,15 @@ if (!function_exists('sgl_registrar_log')) {
         try {
             sgl_garantir_logs($conn);
             $usuario_id = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
+            $usuario_nome = $_SESSION['nome'] ?? 'Sistema';
+            $usuario_login = $_SESSION['username'] ?? null;
+            $usuario_perfil = $_SESSION['perfil'] ?? null;
             $ip = $_SERVER['REMOTE_ADDR'] ?? null;
-            $stmt = $conn->prepare("INSERT INTO logs_sistema (usuario_id, acao, tabela, registro_id, detalhes, ip) VALUES (?, ?, ?, ?, ?, ?)");
+            $detalhes = trim((string)($detalhes ?? '') . ' | Responsável: ' . $usuario_nome . ($usuario_perfil ? ' (' . $usuario_perfil . ')' : ''));
+
+            $stmt = $conn->prepare("INSERT INTO logs_sistema (usuario_id, usuario_nome, usuario_login, usuario_perfil, acao, tabela, registro_id, detalhes, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
             if ($stmt) {
-                $stmt->bind_param('isssss', $usuario_id, $acao, $tabela, $registro_id, $detalhes, $ip);
+                $stmt->bind_param('issssssss', $usuario_id, $usuario_nome, $usuario_login, $usuario_perfil, $acao, $tabela, $registro_id, $detalhes, $ip);
                 @$stmt->execute();
                 @$stmt->close();
             }

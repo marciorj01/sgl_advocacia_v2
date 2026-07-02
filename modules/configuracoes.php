@@ -108,8 +108,9 @@ function sgl_log(mysqli $conn, string $acao, ?string $tabela = null, ?string $re
         $ip = $_SERVER['REMOTE_ADDR'] ?? null;
         $navegador = substr($_SERVER['HTTP_USER_AGENT'] ?? '', 0, 180);
         $detalhesCompletos = trim(($detalhes ?: '') . ' | Responsável: ' . $nomeSessao . ' (' . $perfilSessao . ') | Navegador: ' . $navegador);
-        $stmt = $conn->prepare("INSERT INTO logs_sistema (usuario_id, acao, tabela, registro_id, detalhes, ip) VALUES (?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param('isssss', $usuario_id, $acao, $tabela, $registro, $detalhesCompletos, $ip);
+        $usuarioLogin = $_SESSION['username'] ?? null;
+        $stmt = $conn->prepare("INSERT INTO logs_sistema (usuario_id, usuario_nome, usuario_login, usuario_perfil, acao, tabela, registro_id, detalhes, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param('issssssss', $usuario_id, $nomeSessao, $usuarioLogin, $perfilSessao, $acao, $tabela, $registro, $detalhesCompletos, $ip);
         $stmt->execute();
         $stmt->close();
     } catch (Throwable $e) {
@@ -434,7 +435,7 @@ if (sgl_tabela_existe($conn, 'usuarios')) {
 $logs = [];
 if (sgl_tabela_existe($conn, 'logs_sistema')) {
     try {
-        $resLogs = $conn->query("SELECT l.*, u.nome AS usuario_nome, u.usuario AS usuario_login, u.perfil AS usuario_perfil FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id ORDER BY l.id DESC LIMIT 50");
+        $resLogs = $conn->query("SELECT l.*, COALESCE(l.usuario_nome, u.nome) AS responsavel_nome, COALESCE(l.usuario_login, u.usuario) AS responsavel_login, COALESCE(l.usuario_perfil, u.perfil) AS responsavel_perfil FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id ORDER BY l.id DESC LIMIT 50");
         if ($resLogs) {
             while ($l = $resLogs->fetch_assoc()) { $logs[] = $l; }
         }
@@ -447,7 +448,7 @@ $totalLogs = sgl_select_count($conn, "SELECT COUNT(*) AS total FROM logs_sistema
 $inventarioLogs = [];
 if (sgl_tabela_existe($conn, 'logs_sistema')) {
     try {
-        $resInv = $conn->query("SELECT COALESCE(u.nome, 'Sistema') AS usuario_nome, COALESCE(u.perfil, '-') AS perfil, COALESCE(l.tabela, '-') AS modulo, COUNT(*) AS total, MAX(l.criado_em) AS ultimo_registro FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id GROUP BY usuario_nome, perfil, modulo ORDER BY total DESC, ultimo_registro DESC LIMIT 30");
+        $resInv = $conn->query("SELECT COALESCE(l.usuario_nome, u.nome, 'Sistema') AS usuario_nome, COALESCE(l.usuario_perfil, u.perfil, '-') AS perfil, COALESCE(l.tabela, '-') AS modulo, COUNT(*) AS total, MAX(l.criado_em) AS ultimo_registro FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id GROUP BY usuario_nome, perfil, modulo ORDER BY total DESC, ultimo_registro DESC LIMIT 30");
         if ($resInv) { while ($i = $resInv->fetch_assoc()) { $inventarioLogs[] = $i; } }
     } catch (Throwable $e) {}
 }
@@ -728,11 +729,11 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                 <thead class="table-light"><tr><th>Data</th><th>Quem fez</th><th>Perfil</th><th>Ação</th><th>Módulo</th><th>IP</th><th>Detalhes</th></tr></thead><tbody>
                 <?php if(empty($logs)): ?><tr><td colspan="7" class="text-center py-4 text-muted">Nenhum log registrado ainda.</td></tr><?php endif; ?>
                 <?php foreach($logs as $log): ?>
-                    <?php $quem = $log['usuario_nome'] ?: ($log['usuario_login'] ?: 'Sistema'); ?>
+                    <?php $quem = $log['responsavel_nome'] ?: ($log['responsavel_login'] ?: 'Sistema'); ?>
                     <tr>
                         <td><?=date('d/m/Y H:i', strtotime($log['criado_em']))?></td>
                         <td><strong><?=htmlspecialchars($quem)?></strong></td>
-                        <td><?=htmlspecialchars($log['usuario_perfil'] ?? '-')?></td>
+                        <td><?=htmlspecialchars($log['responsavel_perfil'] ?? '-')?></td>
                         <td><strong><?=htmlspecialchars($log['acao'])?></strong></td>
                         <td><?=htmlspecialchars($log['tabela'] ?? '-')?></td>
                         <td><small><?=htmlspecialchars($log['ip'] ?? '-')?></small></td>

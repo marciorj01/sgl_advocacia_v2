@@ -160,33 +160,40 @@ if ($acao === 'imprimir'):
     if (!$rec) { echo '<div class="alert alert-danger">Recibo não encontrado.</div>'; return; }
 ?>
 <style>
-@media print { .sidebar, .btn, .no-print { display:none!important; } main { padding:0!important; background:#fff!important; } .recibo-print { box-shadow:none!important; border:0!important; } }
-.recibo-print{max-width:900px;margin:0 auto;background:white;border:1px solid #ddd;border-radius:10px;padding:36px;}
-.recibo-title{letter-spacing:1px;font-size:28px;font-weight:800;color:#0d3b66;}
-.recibo-box{border:1px solid #e5e7eb;border-radius:8px;padding:16px;background:#fafafa;}
+@page { size: A5 portrait; margin: 8mm; }
+@media print {
+    .sidebar, .btn, .no-print, nav, header { display:none!important; }
+    body, main { background:#fff!important; padding:0!important; margin:0!important; }
+    .recibo-print { box-shadow:none!important; border:1px solid #222!important; margin:0 auto!important; width:132mm!important; min-height:190mm!important; page-break-after:auto!important; }
+}
+.recibo-print{width:132mm;max-width:132mm;min-height:190mm;margin:0 auto;background:white;border:1px solid #d1d5db;border-radius:6px;padding:10mm;font-size:12px;line-height:1.35;}
+.recibo-title{letter-spacing:1px;font-size:22px;font-weight:800;color:#0d3b66;}
+.recibo-box{border:1px solid #e5e7eb;border-radius:6px;padding:10px;background:#fafafa;}
+.recibo-print img{max-height:48px!important;}
+.assinatura-recibo{border-top:1px solid #333; display:inline-block; min-width:230px; padding-top:6px; text-align:center;}
 </style>
 <div class="d-flex justify-content-between align-items-center mb-3 no-print">
     <h3 class="fw-bold"><i class="bi bi-receipt"></i> Recibo <?= hRec($rec['numero']) ?></h3>
-    <div><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir / Salvar PDF</button> <a href="?mod=recibos" class="btn btn-outline-secondary">Voltar</a></div>
+    <div><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir A5 / Salvar PDF</button> <a href="?mod=recibos" class="btn btn-outline-secondary">Voltar</a></div>
 </div>
 <div class="recibo-print shadow-sm">
-    <div class="text-center mb-4">
+    <div class="text-center mb-3">
         <img src="<?= hRec($logo_src ?? 'assets/img/logo_custom.png') ?>" style="max-height:90px" class="mb-2">
         <div class="recibo-title">RECIBO</div>
         <div class="text-muted">Nº <?= hRec($rec['numero']) ?> · Emitido em <?= dataRec($rec['data_emissao']) ?></div>
     </div>
-    <div class="recibo-box mb-4">
-        <p class="fs-5 mb-0">Recebemos de <strong><?= hRec($rec['nome_cliente']) ?></strong><?= $rec['cpf_cnpj'] ? ', inscrito(a) no CPF/CNPJ nº <strong>'.hRec($rec['cpf_cnpj']).'</strong>' : '' ?>, a importância de <strong><?= brlRec($rec['valor']) ?></strong>, referente a <strong><?= hRec($rec['referente']) ?></strong>.</p>
+    <div class="recibo-box mb-3">
+        <p class="mb-0">Recebemos de <strong><?= hRec($rec['nome_cliente']) ?></strong><?= $rec['cpf_cnpj'] ? ', inscrito(a) no CPF/CNPJ nº <strong>'.hRec($rec['cpf_cnpj']).'</strong>' : '' ?>, a importância de <strong><?= brlRec($rec['valor']) ?></strong>, referente a <strong><?= hRec($rec['referente']) ?></strong>.</p>
     </div>
-    <div class="row mb-4">
+    <div class="row mb-3">
         <div class="col-md-6"><strong>Forma de pagamento:</strong><br><?= hRec($rec['forma_pagamento'] ?: '-') ?></div>
         <div class="col-md-6"><strong>Data do pagamento:</strong><br><?= dataRec($rec['data_pagamento']) ?></div>
         <div class="col-md-6 mt-3"><strong>Processo:</strong><br><?= hRec($rec['processo_numero'] ?: '-') ?></div>
         <div class="col-md-6 mt-3"><strong>Status:</strong><br><?= hRec($rec['status']) ?></div>
     </div>
     <?php if(!empty($rec['observacoes'])): ?><div class="mb-4"><strong>Observações:</strong><br><?= nl2br(hRec($rec['observacoes'])) ?></div><?php endif; ?>
-    <div class="text-end mt-5 pt-5">
-        <div style="border-top:1px solid #333; display:inline-block; min-width:320px; padding-top:8px; text-align:center;">Assinatura</div>
+    <div class="text-end mt-4 pt-4">
+        <div class="assinatura-recibo">Assinatura</div>
     </div>
     <div class="text-muted small mt-4">Chave de validação: <?= hRec(substr((string)$rec['chave_validacao'],0,32)) ?></div>
 </div>

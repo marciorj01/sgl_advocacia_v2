@@ -8,6 +8,81 @@ $acao = $_GET['acao'] ?? 'listar'; // listar | novo_cp | editar_cp | novo_cr | e
 $msg  = '';
 
 /* ======================================================
+   COMPATIBILIDADE DO BANCO — FINANCEIRO
+   Evita erros em instalações antigas que ainda não tenham
+   todas as colunas usadas pelo módulo.
+   ====================================================== */
+function financeiroColunaExiste(mysqli $conn, string $tabela, string $coluna): bool
+{
+    $tabela = $conn->real_escape_string($tabela);
+    $coluna = $conn->real_escape_string($coluna);
+    $res = $conn->query("SHOW COLUMNS FROM `{$tabela}` LIKE '{$coluna}'");
+    return $res && $res->num_rows > 0;
+}
+
+function financeiroAdicionarColuna(mysqli $conn, string $tabela, string $coluna, string $definicao): void
+{
+    if (!financeiroColunaExiste($conn, $tabela, $coluna)) {
+        @$conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}");
+    }
+}
+
+function financeiroGarantirEstrutura(mysqli $conn): void
+{
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'qtd_parcelas', "qtd_parcelas INT DEFAULT 1");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_parcela', "valor_parcela DECIMAL(12,2) DEFAULT 0");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_pago', "valor_pago DECIMAL(12,2) DEFAULT 0");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_pendente', "valor_pendente DECIMAL(12,2) DEFAULT 0");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'forma_pagamento', "forma_pagamento VARCHAR(80) NULL");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'mes_referencia', "mes_referencia VARCHAR(7) NULL");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'observacoes', "observacoes TEXT NULL");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0");
+
+    financeiroAdicionarColuna($conn, 'contas_receber', 'cliente_id', "cliente_id VARCHAR(10) NULL");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'qtd_parcelas', "qtd_parcelas INT DEFAULT 1");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'valor_parcela', "valor_parcela DECIMAL(12,2) DEFAULT 0");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'valor_pago', "valor_pago DECIMAL(12,2) DEFAULT 0");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'valor_pendente', "valor_pendente DECIMAL(12,2) DEFAULT 0");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'forma_recebimento', "forma_recebimento VARCHAR(80) NULL");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'mes_referencia', "mes_referencia VARCHAR(7) NULL");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'observacoes', "observacoes TEXT NULL");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0");
+
+    $conn->query("CREATE TABLE IF NOT EXISTS contas_pagar_parcelas (
+        id VARCHAR(20) PRIMARY KEY,
+        conta_id VARCHAR(10) NOT NULL,
+        parcela_numero INT NOT NULL,
+        valor_parcela DECIMAL(12,2) NOT NULL DEFAULT 0,
+        data_vencimento DATE NULL,
+        forma_pagamento VARCHAR(80) NULL,
+        status_pagamento VARCHAR(30) DEFAULT 'Pendente',
+        valor_pago DECIMAL(12,2) DEFAULT 0,
+        saldo_devedor DECIMAL(12,2) DEFAULT 0,
+        observacoes TEXT NULL,
+        INDEX idx_cpp_conta (conta_id),
+        INDEX idx_cpp_status (status_pagamento)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    $conn->query("CREATE TABLE IF NOT EXISTS contas_receber_parcelas (
+        id VARCHAR(20) PRIMARY KEY,
+        conta_id VARCHAR(10) NOT NULL,
+        parcela_numero INT NOT NULL,
+        valor_parcela DECIMAL(12,2) NOT NULL DEFAULT 0,
+        data_vencimento DATE NULL,
+        forma_pagamento VARCHAR(80) NULL,
+        status_pagamento VARCHAR(30) DEFAULT 'Pendente',
+        valor_pago DECIMAL(12,2) DEFAULT 0,
+        saldo_devedor DECIMAL(12,2) DEFAULT 0,
+        observacoes TEXT NULL,
+        INDEX idx_crp_conta (conta_id),
+        INDEX idx_crp_status (status_pagamento)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+}
+
+financeiroGarantirEstrutura($conn);
+
+
+/* ======================================================
    FUNÇÕES AUXILIARES GERAIS
    ====================================================== */
 
@@ -504,11 +579,74 @@ $filtro_deletado_cr = ($aba === 'cr' && $acao === 'lixeira') ? 1 : 0;
 $lista_cp = $conn->query("SELECT * FROM contas_pagar WHERE deletado = $filtro_deletado_cp ORDER BY data_vencimento DESC, id DESC");
 $lista_cr = $conn->query("SELECT * FROM contas_receber WHERE deletado = $filtro_deletado_cr ORDER BY data_vencimento DESC, id DESC");
 
+$hoje = date('Y-m-d');
+$inicioMes = date('Y-m-01');
+$fimMes = date('Y-m-t');
+
+$resumoFinanceiro = [
+    'pagar_aberto' => 0,
+    'receber_aberto' => 0,
+    'pago_mes' => 0,
+    'recebido_mes' => 0,
+    'vencidas_pagar' => 0,
+    'vencidas_receber' => 0,
+];
+
+$q = $conn->query("SELECT COALESCE(SUM(valor_pendente),0) AS total FROM contas_pagar WHERE deletado = 0 AND status IN ('Pendente','Parcial')");
+if ($q) $resumoFinanceiro['pagar_aberto'] = (float)($q->fetch_assoc()['total'] ?? 0);
+$q = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pendente > 0 THEN valor_pendente ELSE valor END),0) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Pendente','Parcial')");
+if ($q) $resumoFinanceiro['receber_aberto'] = (float)($q->fetch_assoc()['total'] ?? 0);
+$q = $conn->query("SELECT COALESCE(SUM(valor_pago),0) AS total FROM contas_pagar WHERE deletado = 0 AND data_pagamento BETWEEN '$inicioMes' AND '$fimMes'");
+if ($q) $resumoFinanceiro['pago_mes'] = (float)($q->fetch_assoc()['total'] ?? 0);
+$q = $conn->query("SELECT COALESCE(SUM(valor),0) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Recebido','Pago','Quitada') AND data_recebimento BETWEEN '$inicioMes' AND '$fimMes'");
+if ($q) $resumoFinanceiro['recebido_mes'] = (float)($q->fetch_assoc()['total'] ?? 0);
+$q = $conn->query("SELECT COUNT(*) AS total FROM contas_pagar WHERE deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '$hoje'");
+if ($q) $resumoFinanceiro['vencidas_pagar'] = (int)($q->fetch_assoc()['total'] ?? 0);
+$q = $conn->query("SELECT COUNT(*) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '$hoje'");
+if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total'] ?? 0);
+
 ?>
 <div class="container-fluid">
-    <h2 class="mb-3">💰 Financeiro</h2>
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+        <div>
+            <h2 class="mb-1"><i class="bi bi-cash-coin"></i> Financeiro</h2>
+            <p class="text-muted mb-0">Controle de contas a pagar, contas a receber, parcelas e fluxo financeiro do escritório.</p>
+        </div>
+        <div class="d-flex gap-2 no-print">
+            <a href="?mod=financeiro&aba=cp&acao=novo_cp" class="btn btn-outline-danger"><i class="bi bi-plus-circle"></i> Nova despesa</a>
+            <a href="?mod=financeiro&aba=cr&acao=novo_cr" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo recebimento</a>
+        </div>
+    </div>
 
     <?= $msg ?>
+
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="card shadow-sm border-0 h-100"><div class="card-body">
+                <div class="text-muted small text-uppercase">A receber em aberto</div>
+                <div class="fs-4 fw-bold text-primary"><?= fmtBrlFin($resumoFinanceiro['receber_aberto']) ?></div>
+            </div></div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow-sm border-0 h-100"><div class="card-body">
+                <div class="text-muted small text-uppercase">A pagar em aberto</div>
+                <div class="fs-4 fw-bold text-danger"><?= fmtBrlFin($resumoFinanceiro['pagar_aberto']) ?></div>
+            </div></div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow-sm border-0 h-100"><div class="card-body">
+                <div class="text-muted small text-uppercase">Recebido no mês</div>
+                <div class="fs-4 fw-bold text-success"><?= fmtBrlFin($resumoFinanceiro['recebido_mes']) ?></div>
+            </div></div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow-sm border-0 h-100"><div class="card-body">
+                <div class="text-muted small text-uppercase">Alertas vencidos</div>
+                <div class="fs-4 fw-bold text-warning"><?= (int)($resumoFinanceiro['vencidas_pagar'] + $resumoFinanceiro['vencidas_receber']) ?></div>
+                <div class="small text-muted">pagar: <?= (int)$resumoFinanceiro['vencidas_pagar'] ?> | receber: <?= (int)$resumoFinanceiro['vencidas_receber'] ?></div>
+            </div></div>
+        </div>
+    </div>
 
     <ul class="nav nav-tabs mb-3">
         <li class="nav-item">
@@ -1239,7 +1377,7 @@ function imprimirRelatorio(aba) {
 </head>
 <body>
     <div class="rel-header">
-        <img src="/sistema_sgl/assets/img/logo_custom.png" alt="SGL" class="logo">
+        <img src="/sgl_advocacia/assets/img/logo_custom.png" alt="SGL" class="logo">
         <div class="titulo">
             <h2>Relatório de ${abaLabel}</h2>
             <p>Struzik, Guimarães &amp; Lecz — Advocacia &nbsp;|&nbsp; Sistema de Gestão Jurídica</p>

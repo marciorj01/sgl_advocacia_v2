@@ -9,7 +9,7 @@ exigirLogin('auth/login.php');
 $modulo = isset($_GET['mod']) ? trim($_GET['mod']) : 'dashboard';
 $modulos_validos = [
     'dashboard', 'advogados', 'clientes', 'processos', 'honorarios', 'agenda',
-    'financeiro', 'recibos', 'documentos', 'modelos', 'configuracoes'
+    'financeiro', 'recibos', 'documentos', 'modelos', 'busca_global', 'central_inteligente', 'configuracoes'
 ];
 if (!in_array($modulo, $modulos_validos, true)) { $modulo = 'dashboard'; }
 
@@ -24,6 +24,8 @@ $titulos = [
     'recibos' => 'Recibos',
     'documentos' => 'Documentos',
     'modelos' => 'Modelos Jurídicos',
+    'busca_global' => 'Busca Global',
+    'central_inteligente' => 'Central Inteligente',
     'configuracoes' => 'Configurações',
 ];
 $tituloPagina = $titulos[$modulo] ?? 'SGL';
@@ -113,6 +115,17 @@ function sgl_link_active(string $atual, string $item): string {
             border-top: 1px solid rgba(255,255,255,.12);
         }
         .sgl-main { min-width:0; background:#f5f7fa; }
+
+        .sgl-topbar {
+            background:#fff;
+            border:1px solid rgba(15,23,42,.08);
+            border-radius:14px;
+            padding:10px 12px;
+            margin-bottom:18px;
+            box-shadow:0 4px 18px rgba(15,23,42,.05);
+        }
+        .sgl-global-search .form-control { border-radius: 12px; }
+        .sgl-global-search .btn { border-radius: 12px; }
         @media (max-width: 991px) {
             .sgl-layout { display:block!important; }
             .sgl-sidebar { position:relative; width:100%; min-width:100%; height:auto; min-height:auto; }
@@ -135,6 +148,8 @@ function sgl_link_active(string $atual, string $item): string {
 
         <div class="sgl-menu">
             <a href="?mod=dashboard" class="nav-link <?= sgl_link_active($modulo, 'dashboard') ?>"><i class="bi bi-speedometer2"></i> Dashboard</a>
+            <a href="?mod=busca_global" class="nav-link <?= sgl_link_active($modulo, 'busca_global') ?>"><i class="bi bi-search"></i> Busca Global</a>
+            <a href="?mod=central_inteligente" class="nav-link <?= sgl_link_active($modulo, 'central_inteligente') ?>"><i class="bi bi-lightbulb"></i> Central Inteligente</a>
 
             <div class="sgl-menu-title">Cadastros</div>
             <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuCadastros" aria-expanded="<?= sgl_menu_active($modulo, ['advogados','clientes']) ? 'true' : 'false' ?>">
@@ -186,6 +201,17 @@ function sgl_link_active(string $atual, string $item): string {
     </nav>
 
     <main class="flex-grow-1 p-4 sgl-main">
+        <div class="sgl-topbar d-flex flex-column flex-xl-row gap-2 align-items-xl-center justify-content-between">
+            <div>
+                <strong class="text-primary"><i class="bi bi-search"></i> Busca Global Inteligente</strong>
+                <div class="small text-muted">Pesquise cliente, CPF, processo, recibo, documento, financeiro ou modelo.</div>
+            </div>
+            <form class="sgl-global-search d-flex gap-2" method="get" action="index.php" style="min-width:min(620px,100%);">
+                <input type="hidden" name="mod" value="busca_global">
+                <input type="text" name="q" class="form-control" placeholder="Digite nome, CPF, processo, OAB, recibo, CR, documento..." value="<?= htmlspecialchars($modulo === 'busca_global' ? ($_GET['q'] ?? '') : '', ENT_QUOTES, 'UTF-8') ?>">
+                <button class="btn btn-primary px-4" type="submit"><i class="bi bi-search"></i></button>
+            </form>
+        </div>
         <?php
         $arquivo = __DIR__ . "/modules/{$modulo}.php";
         if (file_exists($arquivo)) {

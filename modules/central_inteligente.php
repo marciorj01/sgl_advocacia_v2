@@ -266,7 +266,9 @@ foreach ($alertas as $a) { $porTipo[$a['tipo']] = ($porTipo[$a['tipo']] ?? 0) + 
 ?>
 
 <style>
-.ci-hero{background:linear-gradient(135deg,#123a5a,#2f7cc0);border-radius:18px;color:#fff;padding:24px;box-shadow:0 12px 28px rgba(18,58,90,.18)}
+.ci-hero{background:linear-gradient(135deg,#123a5a,#2f7cc0);border-radius:18px;color:#fff!important;padding:24px;box-shadow:0 12px 28px rgba(18,58,90,.18)}
+.ci-hero h1,.ci-hero h2,.ci-hero h3,.ci-hero p,.ci-hero div{color:#fff!important}
+.ci-hero .opacity-75{opacity:.9!important}
 .ci-card{background:#fff;border-radius:16px;border:1px solid rgba(15,23,42,.08);box-shadow:0 8px 24px rgba(15,23,42,.06)}
 .ci-kpi{padding:18px}.ci-kpi .num{font-size:2rem;font-weight:900;line-height:1}.ci-kpi .lbl{font-size:.78rem;text-transform:uppercase;color:#64748b;font-weight:700}
 .ci-alerta{border-left:5px solid #94a3b8;border-radius:14px;background:#fff;padding:16px;box-shadow:0 6px 18px rgba(15,23,42,.06);margin-bottom:12px}

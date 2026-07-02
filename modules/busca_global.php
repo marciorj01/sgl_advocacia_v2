@@ -263,7 +263,9 @@ if ($q !== '') {
 ?>
 
 <style>
-.busca-hero { background: linear-gradient(135deg,#0d3b66,#1e75bb); color:#fff; border-radius:18px; padding:24px; box-shadow:0 12px 30px rgba(13,59,102,.18); }
+.busca-hero { background: linear-gradient(135deg,#0d3b66,#1e75bb); color:#fff!important; border-radius:18px; padding:24px; box-shadow:0 12px 30px rgba(13,59,102,.18); }
+.busca-hero h1,.busca-hero h2,.busca-hero h3,.busca-hero p,.busca-hero div{color:#fff!important}
+.busca-hero .opacity-75{opacity:.9!important}
 .busca-hero .form-control { border-radius:14px; min-height:50px; }
 .busca-hero .btn { border-radius:14px; }
 .busca-card { border:0; border-radius:16px; box-shadow:0 6px 22px rgba(15,23,42,.06); overflow:hidden; }

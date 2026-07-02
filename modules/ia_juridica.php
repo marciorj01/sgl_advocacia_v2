@@ -134,7 +134,9 @@ $historico = sgl_ia_rows($conn, "SELECT id, tipo, titulo, modo, usuario_nome, cr
 ?>
 
 <style>
-.ia-hero{background:linear-gradient(135deg,#123a5a,#1f73b7);border-radius:18px;color:#fff;padding:24px;box-shadow:0 10px 28px rgba(15,23,42,.12)}
+.ia-hero{background:linear-gradient(135deg,#123a5a,#1f73b7);border-radius:18px;color:#fff!important;padding:24px;box-shadow:0 10px 28px rgba(15,23,42,.12)}
+.ia-hero h1,.ia-hero h2,.ia-hero h3,.ia-hero p,.ia-hero div{color:#fff!important}
+.ia-hero .opacity-75{opacity:.9!important}
 .ia-card{border:0;border-radius:16px;box-shadow:0 6px 20px rgba(15,23,42,.08)}
 .ia-badge{border-radius:999px;padding:.35rem .7rem;font-weight:700;font-size:.75rem}
 .ia-output{white-space:pre-wrap;background:#fff;border:1px solid rgba(15,23,42,.12);border-radius:14px;padding:18px;min-height:260px;font-family:Arial, sans-serif;line-height:1.55}

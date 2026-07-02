@@ -9,7 +9,7 @@ exigirLogin('auth/login.php');
 $modulo = isset($_GET['mod']) ? trim($_GET['mod']) : 'dashboard';
 $modulos_validos = [
     'dashboard', 'advogados', 'clientes', 'processos', 'honorarios', 'agenda',
-    'financeiro', 'recibos', 'documentos', 'modelos', 'busca_global', 'central_inteligente', 'configuracoes'
+    'financeiro', 'recibos', 'documentos', 'modelos', 'busca_global', 'central_inteligente', 'ia_juridica', 'configuracoes'
 ];
 if (!in_array($modulo, $modulos_validos, true)) { $modulo = 'dashboard'; }
 
@@ -26,6 +26,7 @@ $titulos = [
     'modelos' => 'Modelos Jurídicos',
     'busca_global' => 'Busca Global',
     'central_inteligente' => 'Central Inteligente',
+    'ia_juridica' => 'IA para Advogados',
     'configuracoes' => 'Configurações',
 ];
 $tituloPagina = $titulos[$modulo] ?? 'SGL';
@@ -150,6 +151,7 @@ function sgl_link_active(string $atual, string $item): string {
             <a href="?mod=dashboard" class="nav-link <?= sgl_link_active($modulo, 'dashboard') ?>"><i class="bi bi-speedometer2"></i> Dashboard</a>
             <a href="?mod=busca_global" class="nav-link <?= sgl_link_active($modulo, 'busca_global') ?>"><i class="bi bi-search"></i> Busca Global</a>
             <a href="?mod=central_inteligente" class="nav-link <?= sgl_link_active($modulo, 'central_inteligente') ?>"><i class="bi bi-lightbulb"></i> Central Inteligente</a>
+            <a href="?mod=ia_juridica" class="nav-link <?= sgl_link_active($modulo, 'ia_juridica') ?>"><i class="bi bi-robot"></i> IA Jurídica</a>
 
             <div class="sgl-menu-title">Cadastros</div>
             <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuCadastros" aria-expanded="<?= sgl_menu_active($modulo, ['advogados','clientes']) ? 'true' : 'false' ?>">

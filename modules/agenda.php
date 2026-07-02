@@ -1,665 +1,480 @@
 <?php
+/**
+ * Módulo Agenda — Fase 2.5
+ * Gestão profissional de compromissos, prazos, audiências e atendimentos.
+ */
+
 $conn = conectar();
+
+/* -----------------------------------------------------------
+   AUTO-CORREÇÃO DE ESTRUTURA DA AGENDA
+   Compatível com versões do MySQL/MariaDB que não aceitam
+   ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+----------------------------------------------------------- */
+if (!function_exists('sgl_coluna_existe')) {
+    function sgl_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool {
+        $tabelaSegura = $conn->real_escape_string($tabela);
+        $colunaSegura = $conn->real_escape_string($coluna);
+        $res = $conn->query("SHOW COLUMNS FROM `{$tabelaSegura}` LIKE '{$colunaSegura}'");
+        return $res && $res->num_rows > 0;
+    }
+}
+
+if (!function_exists('sgl_adicionar_coluna')) {
+    function sgl_adicionar_coluna(mysqli $conn, string $tabela, string $coluna, string $definicao): void {
+        if (!sgl_coluna_existe($conn, $tabela, $coluna)) {
+            try {
+                $conn->query("ALTER TABLE `{$tabela}` ADD COLUMN `{$coluna}` {$definicao}");
+            } catch (mysqli_sql_exception $e) {
+                // Mantém o sistema sem exibir erro técnico ao usuário.
+            }
+        }
+    }
+}
+
+sgl_adicionar_coluna($conn, 'agenda', 'tipo_compromisso', "VARCHAR(80) NULL AFTER `horario`");
+sgl_adicionar_coluna($conn, 'agenda', 'cliente_id', "VARCHAR(10) NULL AFTER `tipo_compromisso`");
+sgl_adicionar_coluna($conn, 'agenda', 'nome_cliente', "VARCHAR(120) NULL AFTER `cliente_id`");
+sgl_adicionar_coluna($conn, 'agenda', 'numero_processo', "VARCHAR(60) NULL AFTER `nome_cliente`");
+sgl_adicionar_coluna($conn, 'agenda', 'local', "VARCHAR(150) NULL AFTER `numero_processo`");
+sgl_adicionar_coluna($conn, 'agenda', 'advogado_id', "VARCHAR(10) NULL AFTER `local`");
+sgl_adicionar_coluna($conn, 'agenda', 'status', "VARCHAR(30) NOT NULL DEFAULT 'Pendente' AFTER `advogado_id`");
+sgl_adicionar_coluna($conn, 'agenda', 'prazo_fatal', "VARCHAR(3) NOT NULL DEFAULT 'Não' AFTER `status`");
+sgl_adicionar_coluna($conn, 'agenda', 'observacoes', "TEXT NULL AFTER `prazo_fatal`");
+sgl_adicionar_coluna($conn, 'agenda', 'deletado', "TINYINT(1) NOT NULL DEFAULT 0 AFTER `observacoes`");
+sgl_adicionar_coluna($conn, 'agenda', 'criado_em', "TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER `deletado`");
+sgl_adicionar_coluna($conn, 'agenda', 'atualizado_em', "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER `criado_em`");
+
+$agendaTemDeletado = sgl_coluna_existe($conn, 'agenda', 'deletado');
+$clientesTemDeletado = sgl_coluna_existe($conn, 'clientes', 'deletado');
+$advogadosTemDeletado = sgl_coluna_existe($conn, 'advogados', 'deletado');
+$processosTemDeletado = sgl_coluna_existe($conn, 'processos', 'deletado');
+
 $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
 
-// Captura mensagens vindas por redirecionamento seguro
+if (!function_exists('h')) {
+    function h($valor): string {
+        return htmlspecialchars((string)($valor ?? ''), ENT_QUOTES, 'UTF-8');
+    }
+}
+
+function gerarIdAgenda(mysqli $conn): string {
+    $res = $conn->query("SELECT id FROM agenda WHERE id LIKE 'AGE%' ORDER BY CAST(SUBSTRING(id, 4) AS UNSIGNED) DESC LIMIT 1");
+    if (!$res || $res->num_rows === 0) {
+        return 'AGE001';
+    }
+    $ultimo = $res->fetch_assoc()['id'];
+    $num = (int) substr($ultimo, 3) + 1;
+    return 'AGE' . str_pad((string)$num, 3, '0', STR_PAD_LEFT);
+}
+
+function camposAgenda(array $d = []): array {
+    return [
+        'data_evento'      => trim($d['data_evento'] ?? ''),
+        'horario'          => trim($d['horario'] ?? ''),
+        'tipo_compromisso' => trim($d['tipo_compromisso'] ?? 'Audiência'),
+        'cliente_id'       => trim($d['cliente_id'] ?? ''),
+        'nome_cliente'     => trim($d['nome_cliente'] ?? ''),
+        'numero_processo'  => trim($d['numero_processo'] ?? ''),
+        'local'            => trim($d['local'] ?? ''),
+        'advogado_id'      => trim($d['advogado_id'] ?? ''),
+        'status'           => trim($d['status'] ?? 'Pendente'),
+        'prazo_fatal'      => trim($d['prazo_fatal'] ?? 'Não'),
+        'observacoes'      => trim($d['observacoes'] ?? ''),
+    ];
+}
+
+function validarAgenda(array $c): array {
+    $erros = [];
+    $tiposValidos = ['Audiência','Reunião','Prazo','Atendimento','Perícia','Sustentação Oral','Lembrete','Outro'];
+    $statusValidos = ['Pendente','Confirmado','Realizado','Cancelado'];
+
+    if ($c['data_evento'] === '') {
+        $erros[] = 'Informe a data do compromisso.';
+    }
+    if ($c['data_evento'] !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $c['data_evento'])) {
+        $erros[] = 'A data informada é inválida.';
+    }
+    if ($c['horario'] !== '' && !preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $c['horario'])) {
+        $erros[] = 'O horário informado é inválido.';
+    }
+    if (!in_array($c['tipo_compromisso'], $tiposValidos, true)) {
+        $erros[] = 'Tipo de compromisso inválido.';
+    }
+    if (!in_array($c['status'], $statusValidos, true)) {
+        $erros[] = 'Status inválido.';
+    }
+    if (!in_array($c['prazo_fatal'], ['Sim','Não'], true)) {
+        $erros[] = 'Prazo fatal inválido.';
+    }
+    return $erros;
+}
+
+function redirecionarAgenda(string $params): void {
+    echo "<script>window.location.href='?mod=agenda{$params}';</script>";
+    exit;
+}
+
 if (isset($_GET['msg_sucesso'])) {
-    $msg = "<div class='alert alert-success'>✅ " . htmlspecialchars($_GET['msg_sucesso']) . "</div>";
+    $msg = "<div class='alert alert-success'>✅ " . h($_GET['msg_sucesso']) . "</div>";
 }
 if (isset($_GET['msg_erro'])) {
-    $msg = "<div class='alert alert-danger'>❌ " . htmlspecialchars($_GET['msg_erro']) . "</div>";
+    $msg = "<div class='alert alert-danger'>❌ " . h($_GET['msg_erro']) . "</div>";
 }
 
-// Gera ID sequencial de forma segura: AGE001, AGE002...
-function gerarIdAgenda(mysqli $conn): string
-{
-    $res = $conn->query("SELECT id FROM agenda ORDER BY id DESC LIMIT 1");
-    if (!$res || $res->num_rows === 0) return 'AGE001';
-    $ultimo = $res->fetch_assoc()['id'];
-    $num    = (int) substr($ultimo, 3) + 1;
-    return 'AGE' . str_pad($num, 3, '0', STR_PAD_LEFT);
-}
-
-/* -----------------------------------------------------------
-   AJUSTE SGL: LIXEIRA SEGURA ACTIONS (Agenda)
-   (mover para lixeira / restaurar / excluir definitivo)
------------------------------------------------------------ */
+/* Ações protegidas */
 if (isset($_GET['excluir'])) {
     $id = trim($_GET['excluir']);
-
     try {
         $stmt = $conn->prepare("UPDATE agenda SET deletado = 1 WHERE id = ?");
         $stmt->bind_param("s", $id);
         $stmt->execute();
         $stmt->close();
-
-        echo "<script>window.location.href='?mod=agenda&msg_sucesso=Compromisso movido para a lixeira com sucesso!';</script>";
-        exit;
+        redirecionarAgenda('&msg_sucesso=' . urlencode('Compromisso movido para a lixeira.'));
     } catch (mysqli_sql_exception $e) {
-        $erro_msg = "Erro ao mover para lixeira: " . $e->getMessage();
-        echo "<script>window.location.href='?mod=agenda&msg_erro=" . urlencode($erro_msg) . "';</script>";
-        exit;
+        redirecionarAgenda('&msg_erro=' . urlencode('Erro ao mover compromisso para a lixeira.'));
     }
 }
 
 if (isset($_GET['restaurar'])) {
     $id = trim($_GET['restaurar']);
-
     try {
         $stmt = $conn->prepare("UPDATE agenda SET deletado = 0 WHERE id = ?");
         $stmt->bind_param("s", $id);
         $stmt->execute();
         $stmt->close();
-
-        echo "<script>window.location.href='?mod=agenda&msg_sucesso=Compromisso restaurado com sucesso!';</script>";
-        exit;
+        redirecionarAgenda('&acao=lixeira&msg_sucesso=' . urlencode('Compromisso restaurado.'));
     } catch (mysqli_sql_exception $e) {
-        $erro_msg = "Erro ao restaurar: " . $e->getMessage();
-        echo "<script>window.location.href='?mod=agenda&msg_erro=" . urlencode($erro_msg) . "';</script>";
-        exit;
+        redirecionarAgenda('&acao=lixeira&msg_erro=' . urlencode('Erro ao restaurar compromisso.'));
     }
 }
 
 if (isset($_GET['excluir_permanente'])) {
     $id = trim($_GET['excluir_permanente']);
-
     try {
         $stmt = $conn->prepare("DELETE FROM agenda WHERE id = ?");
         $stmt->bind_param("s", $id);
         $stmt->execute();
         $stmt->close();
-
-        echo "<script>window.location.href='?mod=agenda&acao=lixeira&msg_sucesso=Compromisso excluído permanentemente!';</script>";
-        exit;
+        redirecionarAgenda('&acao=lixeira&msg_sucesso=' . urlencode('Compromisso excluído permanentemente.'));
     } catch (mysqli_sql_exception $e) {
-        // Trata o erro de integridade referencial (chave estrangeira travando a exclusão)
-        if ($e->getCode() === 1451) {
-            $erro_msg = "Não é possível excluir este compromisso porque ele está sendo usado ou vinculado em outra tabela do sistema.";
-        } else {
-            $erro_msg = "Erro ao excluir: " . $e->getMessage();
-        }
-        echo "<script>window.location.href='?mod=agenda&acao=lixeira&msg_erro=" . urlencode($erro_msg) . "';</script>";
-        exit;
+        redirecionarAgenda('&acao=lixeira&msg_erro=' . urlencode('Não foi possível excluir permanentemente este compromisso.'));
     }
 }
 
-/* -----------------------------------------------------------
-   SALVAR NOVO (Tratamento de NULL e Redirecionamento de Sucesso)
------------------------------------------------------------ */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_evento'])) {
-    $id               = gerarIdAgenda($conn);
-    $data_evento      = trim($_POST['data_evento']      ?? '');
-    $horario          = trim($_POST['horario']          ?? '');
-    $tipo_compromisso = trim($_POST['tipo_compromisso'] ?? 'Audiência');
-    $cliente_id       = trim($_POST['cliente_id']       ?? '');
-    $nome_cliente     = trim($_POST['nome_cliente']     ?? '');
-    $numero_processo  = trim($_POST['numero_processo']  ?? '');
-    $local            = trim($_POST['local']            ?? '');
-    $advogado_id      = trim($_POST['advogado_id']      ?? '');
-    $status           = trim($_POST['status']           ?? 'Pendente');
-    $prazo_fatal      = trim($_POST['prazo_fatal']      ?? 'Não');
-    $observacoes      = trim($_POST['observacoes']      ?? '');
-
-    if ($data_evento === '') {
-        $msg  = '<div class="alert alert-danger">❌ Informe a data do compromisso.</div>';
-        $acao = 'novo';
+/* Salvar / atualizar */
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!validarTokenCsrf($_POST['csrf_token'] ?? null)) {
+        $msg = '<div class="alert alert-danger">❌ Token de segurança inválido. Atualize a página e tente novamente.</div>';
+        $acao = isset($_POST['atualizar_evento']) ? 'editar' : 'novo';
     } else {
-        $cliente_id_val  = ($cliente_id === '') ? null : $cliente_id;
-        $advogado_id_val = ($advogado_id === '') ? null : $advogado_id;
+        $dados = camposAgenda($_POST);
+        $erros = validarAgenda($dados);
 
-        try {
-            $sql = "INSERT INTO agenda
-                        (id, data_evento, horario, tipo_compromisso,
-                         cliente_id, nome_cliente, numero_processo,
-                         `local`, advogado_id, status, prazo_fatal, observacoes, deletado)
-                    VALUES
-                        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)";
+        if ($erros) {
+            $msg = '<div class="alert alert-danger">❌ ' . h(implode(' ', $erros)) . '</div>';
+            $acao = isset($_POST['atualizar_evento']) ? 'editar' : 'novo';
+        } else {
+            $clienteId = $dados['cliente_id'] === '' ? null : $dados['cliente_id'];
+            $advogadoId = $dados['advogado_id'] === '' ? null : $dados['advogado_id'];
+            $horario = $dados['horario'] === '' ? null : $dados['horario'];
 
-            $stmt = $conn->prepare($sql);
-            $stmt->bind_param(
-                "ssssssssssss",
-                $id,
-                $data_evento,
-                $horario,
-                $tipo_compromisso,
-                $cliente_id_val,
-                $nome_cliente,
-                $numero_processo,
-                $local,
-                $advogado_id_val,
-                $status,
-                $prazo_fatal,
-                $observacoes
-            );
+            try {
+                if (isset($_POST['salvar_evento'])) {
+                    $id = gerarIdAgenda($conn);
+                    $sql = "INSERT INTO agenda
+                            (id, data_evento, horario, tipo_compromisso, cliente_id, nome_cliente, numero_processo, `local`, advogado_id, status, prazo_fatal, observacoes, deletado)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)";
+                    $stmt = $conn->prepare($sql);
+                    $stmt->bind_param(
+                        "ssssssssssss",
+                        $id,
+                        $dados['data_evento'],
+                        $horario,
+                        $dados['tipo_compromisso'],
+                        $clienteId,
+                        $dados['nome_cliente'],
+                        $dados['numero_processo'],
+                        $dados['local'],
+                        $advogadoId,
+                        $dados['status'],
+                        $dados['prazo_fatal'],
+                        $dados['observacoes']
+                    );
+                    $stmt->execute();
+                    $stmt->close();
+                    redirecionarAgenda('&msg_sucesso=' . urlencode("Compromisso {$id} cadastrado com sucesso."));
+                }
 
-            $stmt->execute();
-            $stmt->close();
-
-            echo "<script>window.location.href='?mod=agenda&msg_sucesso=Compromisso " . $id . " cadastrado com sucesso!';</script>";
-            exit;
-        } catch (mysqli_sql_exception $e) {
-            $msg  = "<div class='alert alert-danger'>❌ Erro ao salvar: " . htmlspecialchars($e->getMessage()) . "</div>";
-            $acao = 'novo';
+                if (isset($_POST['atualizar_evento'])) {
+                    $id = trim($_POST['id'] ?? '');
+                    $sql = "UPDATE agenda SET
+                                data_evento = ?, horario = ?, tipo_compromisso = ?, cliente_id = ?, nome_cliente = ?,
+                                numero_processo = ?, `local` = ?, advogado_id = ?, status = ?, prazo_fatal = ?, observacoes = ?
+                            WHERE id = ?";
+                    $stmt = $conn->prepare($sql);
+                    $stmt->bind_param(
+                        "ssssssssssss",
+                        $dados['data_evento'],
+                        $horario,
+                        $dados['tipo_compromisso'],
+                        $clienteId,
+                        $dados['nome_cliente'],
+                        $dados['numero_processo'],
+                        $dados['local'],
+                        $advogadoId,
+                        $dados['status'],
+                        $dados['prazo_fatal'],
+                        $dados['observacoes'],
+                        $id
+                    );
+                    $stmt->execute();
+                    $stmt->close();
+                    redirecionarAgenda('&msg_sucesso=' . urlencode("Compromisso {$id} atualizado com sucesso."));
+                }
+            } catch (mysqli_sql_exception $e) {
+                $msg = '<div class="alert alert-danger">❌ Erro ao salvar compromisso. Verifique se a migração da Fase 2.5 foi importada.</div>';
+                $acao = isset($_POST['atualizar_evento']) ? 'editar' : 'novo';
+            }
         }
     }
 }
 
-/* -----------------------------------------------------------
-   ATUALIZAR (Tratamento de NULL e Redirecionamento de Sucesso)
------------------------------------------------------------ */
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_evento'])) {
-    $id               = trim($_POST['id']               ?? '');
-    $data_evento      = trim($_POST['data_evento']      ?? '');
-    $horario          = trim($_POST['horario']          ?? '');
-    $tipo_compromisso = trim($_POST['tipo_compromisso'] ?? 'Audiência');
-    $cliente_id       = trim($_POST['cliente_id']       ?? '');
-    $nome_cliente     = trim($_POST['nome_cliente']     ?? '');
-    $numero_processo  = trim($_POST['numero_processo']  ?? '');
-    $local            = trim($_POST['local']            ?? '');
-    $advogado_id      = trim($_POST['advogado_id']      ?? '');
-    $status           = trim($_POST['status']           ?? 'Pendente');
-    $prazo_fatal      = trim($_POST['prazo_fatal']      ?? 'Não');
-    $observacoes      = trim($_POST['observacoes']      ?? '');
-
-    $cliente_id_val  = ($cliente_id === '') ? null : $cliente_id;
-    $advogado_id_val = ($advogado_id === '') ? null : $advogado_id;
-
-    try {
-        $sql = "UPDATE agenda SET
-                    data_evento      = ?,
-                    horario          = ?,
-                    tipo_compromisso = ?,
-                    cliente_id       = ?,
-                    nome_cliente     = ?,
-                    numero_processo  = ?,
-                    `local`          = ?,
-                    advogado_id      = ?,
-                    status           = ?,
-                    prazo_fatal      = ?,
-                    observacoes      = ?
-                WHERE id = ?";
-
-        $stmt = $conn->prepare($sql);
-        $stmt->bind_param(
-            "ssssssssssss",
-            $data_evento,
-            $horario,
-            $tipo_compromisso,
-            $cliente_id_val,
-            $nome_cliente,
-            $numero_processo,
-            $local,
-            $advogado_id_val,
-            $status,
-            $prazo_fatal,
-            $observacoes,
-            $id
-        );
-
-        $stmt->execute();
-        $stmt->close();
-
-        echo "<script>window.location.href='?mod=agenda&msg_sucesso=Compromisso " . $id . " atualizado com sucesso!';</script>";
-        exit;
-    } catch (mysqli_sql_exception $e) {
-        $msg  = "<div class='alert alert-danger'>❌ Erro ao atualizar: " . htmlspecialchars($e->getMessage()) . "</div>";
-        $acao = 'editar';
-    }
-}
-
-/* -----------------------------------------------------------
-   CARREGAR PARA EDIÇÃO
------------------------------------------------------------ */
+/* Dados para edição */
 $evento_editar = null;
 if ($acao === 'editar' && isset($_GET['id'])) {
     $id_editar = trim($_GET['id']);
-
     $stmt = $conn->prepare("SELECT * FROM agenda WHERE id = ?");
     $stmt->bind_param("s", $id_editar);
     $stmt->execute();
     $res = $stmt->get_result();
-
-    if ($res && $res->num_rows > 0) {
-        $evento_editar = $res->fetch_assoc();
-    } else {
-        $msg  = "<div class='alert alert-danger'>Compromisso não encontrado.</div>";
+    $evento_editar = $res && $res->num_rows ? $res->fetch_assoc() : null;
+    $stmt->close();
+    if (!$evento_editar) {
+        $msg = '<div class="alert alert-danger">Compromisso não encontrado.</div>';
         $acao = 'listar';
     }
-    $stmt->close();
 }
 
-/* -----------------------------------------------------------
-   DADOS PARA FORMULÁRIO
------------------------------------------------------------ */
-$f = [
-    'data_evento'      => $evento_editar['data_evento']      ?? '',
-    'horario'          => $evento_editar['horario']          ?? '',
-    'tipo_compromisso' => $evento_editar['tipo_compromisso'] ?? 'Audiência',
-    'cliente_id'       => $evento_editar['cliente_id']       ?? '',
-    'nome_cliente'     => $evento_editar['nome_cliente']     ?? '',
-    'numero_processo'  => $evento_editar['numero_processo']  ?? '',
-    'local'            => $evento_editar['local']            ?? '',
-    'advogado_id'      => $evento_editar['advogado_id']      ?? '',
-    'status'           => $evento_editar['status']           ?? 'Pendente',
-    'prazo_fatal'      => $evento_editar['prazo_fatal']      ?? 'Não',
-    'observacoes'      => $evento_editar['observacoes']      ?? '',
-];
-
-$tipos    = ['Audiência','Reunião','Prazo','Atendimento','Lembrete','Outro'];
+$f = camposAgenda($evento_editar ?? []);
+$tipos = ['Audiência','Reunião','Prazo','Atendimento','Perícia','Sustentação Oral','Lembrete','Outro'];
 $statuses = ['Pendente','Confirmado','Realizado','Cancelado'];
-$simnao   = ['Não','Sim'];
 
-// Clientes e advogados para selects
-$clientes  = $conn->query("SELECT id, nome FROM clientes ORDER BY nome");
-$advogados = $conn->query("SELECT id, nome FROM advogados WHERE status='Ativo' ORDER BY nome");
+$whereClientesAtivos = $clientesTemDeletado ? 'WHERE deletado = 0' : '';
+$clientes  = $conn->query("SELECT id, nome FROM clientes {$whereClientesAtivos} ORDER BY nome");
+$whereAdvogadosAtivos = $advogadosTemDeletado ? "WHERE deletado = 0 AND status='Ativo'" : "WHERE status='Ativo'";
+$advogados = $conn->query("SELECT id, nome FROM advogados {$whereAdvogadosAtivos} ORDER BY nome");
 
-// Processos agrupados por cliente (PHP puro, sem AJAX)
 $processos_por_cliente = [];
-$resProc = $conn->query("
-    SELECT DISTINCT cliente_id, numero_processo
-    FROM processos
-    WHERE cliente_id <> '' AND numero_processo <> ''
-    ORDER BY cliente_id, numero_processo
-");
+$whereProcessosAtivos = $processosTemDeletado ? "WHERE deletado = 0 AND cliente_id <> '' AND numero_processo <> ''" : "WHERE cliente_id <> '' AND numero_processo <> ''";
+$resProc = $conn->query("SELECT DISTINCT cliente_id, numero_processo FROM processos {$whereProcessosAtivos} ORDER BY cliente_id, numero_processo");
 if ($resProc) {
     while ($p = $resProc->fetch_assoc()) {
-        $cid = $p['cliente_id'];
-        if (!isset($processos_por_cliente[$cid])) {
-            $processos_por_cliente[$cid] = [];
-        }
-        $processos_por_cliente[$cid][] = $p['numero_processo'];
+        $processos_por_cliente[$p['cliente_id']][] = $p['numero_processo'];
     }
 }
+
+/* Indicadores */
+$hoje = date('Y-m-d');
+$em7 = date('Y-m-d', strtotime('+7 days'));
+$whereAgendaAtiva = $agendaTemDeletado ? 'WHERE deletado = 0' : '';
+$totalAgenda = (int)($conn->query("SELECT COUNT(*) AS total FROM agenda {$whereAgendaAtiva}")->fetch_assoc()['total'] ?? 0);
+$agendaHojeWhere = $agendaTemDeletado ? "WHERE deletado = 0 AND data_evento='{$hoje}'" : "WHERE data_evento='{$hoje}'";
+$agendaHoje = (int)($conn->query("SELECT COUNT(*) AS total FROM agenda {$agendaHojeWhere}")->fetch_assoc()['total'] ?? 0);
+$agenda7Where = $agendaTemDeletado ? "WHERE deletado = 0 AND data_evento BETWEEN '{$hoje}' AND '{$em7}'" : "WHERE data_evento BETWEEN '{$hoje}' AND '{$em7}'";
+$agenda7 = (int)($conn->query("SELECT COUNT(*) AS total FROM agenda {$agenda7Where}")->fetch_assoc()['total'] ?? 0);
+$prazosWhere = $agendaTemDeletado ? "WHERE deletado = 0 AND prazo_fatal='Sim' AND status IN ('Pendente','Confirmado')" : "WHERE prazo_fatal='Sim' AND status IN ('Pendente','Confirmado')";
+$prazosFatais = (int)($conn->query("SELECT COUNT(*) AS total FROM agenda {$prazosWhere}")->fetch_assoc()['total'] ?? 0);
 ?>
 
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h2><i class="bi bi-calendar-event"></i> Agenda <?= $acao === 'lixeira' ? '<span class="text-danger">(Lixeira)</span>' : '' ?></h2>
+<div class="d-flex justify-content-between align-items-start mb-4">
+    <div>
+        <h2 class="mb-1"><i class="bi bi-calendar-event"></i> Agenda <?= $acao === 'lixeira' ? '<span class="text-danger">(Lixeira)</span>' : '' ?></h2>
+        <div class="text-muted">Controle de audiências, prazos, reuniões e compromissos do escritório.</div>
+    </div>
     <div class="d-flex gap-2">
         <?php if ($acao === 'lixeira'): ?>
-            <a href="?mod=agenda&acao=listar" class="btn btn-outline-primary">
-                <i class="bi bi-arrow-left"></i> Voltar à Listagem
-            </a>
+            <a href="?mod=agenda" class="btn btn-outline-primary"><i class="bi bi-arrow-left"></i> Voltar</a>
         <?php else: ?>
-            <a href="?mod=agenda&acao=lixeira" class="btn btn-outline-danger">
-                <i class="bi bi-trash"></i> Ver Lixeira
-            </a>
-            <a href="?mod=agenda&acao=novo" class="btn btn-primary">
-                <i class="bi bi-plus"></i> Novo Compromisso
-            </a>
+            <a href="?mod=agenda&acao=lixeira" class="btn btn-outline-danger"><i class="bi bi-trash"></i> Lixeira</a>
+            <a href="?mod=agenda&acao=novo" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo Compromisso</a>
         <?php endif; ?>
     </div>
 </div>
 
 <?= $msg ?>
 
+<?php if ($acao !== 'novo' && $acao !== 'editar'): ?>
+<div class="row g-3 mb-4">
+    <div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><div class="text-muted small">TOTAL NA AGENDA</div><h3 class="mb-0"><?= $totalAgenda ?></h3></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><div class="text-muted small">COMPROMISSOS HOJE</div><h3 class="text-primary mb-0"><?= $agendaHoje ?></h3></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><div class="text-muted small">PRÓXIMOS 7 DIAS</div><h3 class="text-warning mb-0"><?= $agenda7 ?></h3></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><div class="text-muted small">PRAZOS FATAIS</div><h3 class="text-danger mb-0"><?= $prazosFatais ?></h3></div></div></div>
+</div>
+<?php endif; ?>
+
 <script>
 const processosPorCliente = <?= json_encode($processos_por_cliente, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
-
 function preencherNomeCliente(select) {
-    const opt       = select.options[select.selectedIndex];
+    const opt = select.options[select.selectedIndex];
     const clienteId = select.value;
     const inputNome = document.getElementById('nome_cliente');
-
-    if (inputNome) {
-        inputNome.value = (opt && opt.dataset && opt.dataset.nome) ? opt.dataset.nome : '';
-    }
-
-    // Preenche processos
+    if (inputNome) inputNome.value = (opt && opt.dataset.nome) ? opt.dataset.nome : '';
     const selProc = document.getElementById('numero_processo');
     if (!selProc) return;
-
-    const processoAtual = selProc.dataset.selected || '';
-    selProc.innerHTML   = '';
-
-    if (!clienteId || !processosPorCliente[clienteId] || processosPorCliente[clienteId].length === 0) {
-        const opt0 = document.createElement('option');
-        opt0.value       = '';
-        opt0.textContent = 'Nenhum processo encontrado';
-        selProc.appendChild(opt0);
+    const atual = selProc.dataset.selected || '';
+    selProc.innerHTML = '';
+    if (!clienteId || !processosPorCliente[clienteId]) {
+        selProc.innerHTML = '<option value="">-- Selecione o cliente primeiro --</option>';
         return;
     }
-
-    // Opção vazia padrão
-    const optVazio = document.createElement('option');
-    optVazio.value       = '';
-    optVazio.textContent = '-- Selecione --';
-    selProc.appendChild(optVazio);
-
+    selProc.innerHTML = '<option value="">-- Sem vínculo obrigatório --</option>';
     processosPorCliente[clienteId].forEach(function(numero) {
-        const o       = document.createElement('option');
-        o.value       = numero;
-        o.textContent = numero;
-        if (numero === processoAtual) o.selected = true;
+        const o = document.createElement('option');
+        o.value = numero; o.textContent = numero;
+        if (numero === atual) o.selected = true;
         selProc.appendChild(o);
     });
 }
-
-document.addEventListener('DOMContentLoaded', function () {
+document.addEventListener('DOMContentLoaded', function(){
     const sel = document.querySelector('select[name="cliente_id"]');
     if (sel && sel.value) preencherNomeCliente(sel);
 });
 </script>
 
 <?php if ($acao === 'novo' || $acao === 'editar'): ?>
-
-<div class="card mb-4">
-    <div class="card-header <?= $acao === 'editar' ? 'bg-warning text-dark' : 'bg-primary text-white' ?>">
-        <?= $acao === 'editar'
-            ? '✏️ Editar Compromisso — ' . htmlspecialchars($evento_editar['id'] ?? '')
-            : '📅 Cadastrar Novo Compromisso' ?>
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header <?= $acao === 'editar' ? 'bg-warning text-dark' : 'bg-primary text-white' ?> fw-bold">
+        <?= $acao === 'editar' ? '✏️ Editar Compromisso — ' . h($evento_editar['id'] ?? '') : '📅 Novo Compromisso' ?>
     </div>
     <div class="card-body">
         <form method="POST" autocomplete="off">
-
-            <?php if ($acao === 'editar'): ?>
-                <input type="hidden" name="id" value="<?= htmlspecialchars($evento_editar['id'] ?? '') ?>">
-            <?php endif; ?>
-
+            <input type="hidden" name="csrf_token" value="<?= h(gerarTokenCsrf()) ?>">
+            <?php if ($acao === 'editar'): ?><input type="hidden" name="id" value="<?= h($evento_editar['id'] ?? '') ?>"><?php endif; ?>
             <div class="row g-3">
-
-                <div class="col-md-2">
-                    <label class="form-label">Data *</label>
-                    <input type="date" name="data_evento" class="form-control"
-                           value="<?= htmlspecialchars($f['data_evento']) ?>" required>
-                </div>
-
-                <div class="col-md-2">
-                    <label class="form-label">Horário</label>
-                    <input type="time" name="horario" class="form-control"
-                           value="<?= htmlspecialchars($f['horario']) ?>">
-                </div>
-
-                <div class="col-md-3">
-                    <label class="form-label">Tipo Compromisso</label>
-                    <select name="tipo_compromisso" class="form-select">
-                        <?php foreach ($tipos as $tp): ?>
-                            <option value="<?= $tp ?>"
-                                <?= $f['tipo_compromisso'] === $tp ? 'selected' : '' ?>>
-                                <?= $tp ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-
-                <div class="col-md-2">
-                    <label class="form-label">Status</label>
-                    <select name="status" class="form-select">
-                        <?php foreach ($statuses as $st): ?>
-                            <option value="<?= $st ?>"
-                                <?= $f['status'] === $st ? 'selected' : '' ?>>
-                                <?= $st ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-
-                <div class="col-md-3">
-                    <label class="form-label">Prazo Fatal</label>
-                    <select name="prazo_fatal" class="form-select">
-                        <?php foreach ($simnao as $op): ?>
-                            <option value="<?= $op ?>"
-                                <?= $f['prazo_fatal'] === $op ? 'selected' : '' ?>>
-                                <?= $op ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-
-                <div class="col-md-4">
-                    <label class="form-label">ID Cliente</label>
-                    <select name="cliente_id" class="form-select"
-                            onchange="preencherNomeCliente(this)">
-                        <option value="">-- Selecione --</option>
-                        <?php if ($clientes): while ($c = $clientes->fetch_assoc()): ?>
-                            <option value="<?= htmlspecialchars($c['id']) ?>"
-                                    data-nome="<?= htmlspecialchars($c['nome'], ENT_QUOTES) ?>"
-                                    <?= $f['cliente_id'] === $c['id'] ? 'selected' : '' ?>>
-                                <?= htmlspecialchars($c['id']) ?> — <?= htmlspecialchars($c['nome']) ?>
-                            </option>
-                        <?php endwhile; endif; ?>
-                    </select>
-                </div>
-
-                <div class="col-md-4">
-                    <label class="form-label">Nome Cliente</label>
-                    <input type="text" id="nome_cliente" name="nome_cliente"
-                           class="form-control"
-                           list="clientes_list"
-                           value="<?= htmlspecialchars($f['nome_cliente']) ?>"
-                           placeholder="Digite nome ou selecione...">
-                    <datalist id="clientes_list">
-                        <?php
-                            $clientes_list = $conn->query("SELECT DISTINCT nome FROM clientes ORDER BY nome ASC");
-                            if ($clientes_list):
-                                while ($c = $clientes_list->fetch_assoc()):
-                        ?>
-                            <option value="<?= htmlspecialchars($c['nome']) ?>">
-                        <?php endwhile; endif; ?>
-                    </datalist>
-                </div>
-
-                <div class="col-md-4">
-                    <label class="form-label">Nº Processo</label>
-                    <select id="numero_processo" name="numero_processo" class="form-select"
-                            data-selected="<?= htmlspecialchars($f['numero_processo']) ?>">
-                        <option value="">-- Selecione o cliente primeiro --</option>
-                        <?php if (!empty($f['numero_processo'])): ?>
-                            <option value="<?= htmlspecialchars($f['numero_processo']) ?>" selected>
-                                <?= htmlspecialchars($f['numero_processo']) ?>
-                            </option>
-                        <?php endif; ?>
-                    </select>
-                </div>
-
-                <div class="col-md-6">
-                    <label class="form-label">Local</label>
-                    <input type="text" name="local" class="form-control"
-                           value="<?= htmlspecialchars($f['local']) ?>"
-                           placeholder="Ex.: 2ª Vara Cível, Fórum Central...">
-                </div>
-
-                <div class="col-md-6">
-                    <label class="form-label">Advogado Responsável</label>
-                    <select name="advogado_id" class="form-select">
-                        <option value="">-- Selecione --</option>
-                        <?php if ($advogados): while ($a = $advogados->fetch_assoc()): ?>
-                            <option value="<?= htmlspecialchars($a['id']) ?>"
-                                <?= $f['advogado_id'] === $a['id'] ? 'selected' : '' ?>>
-                                <?= htmlspecialchars($a['nome']) ?>
-                            </option>
-                        <?php endwhile; endif; ?>
-                    </select>
-                </div>
-
-                <div class="col-12">
-                    <label class="form-label">Observações</label>
-                    <textarea name="observacoes" class="form-control"
-                              rows="3"><?= htmlspecialchars($f['observacoes']) ?></textarea>
-                </div>
-
-            </div><div class="mt-4 d-flex gap-2">
-                <?php if ($acao === 'editar'): ?>
-                    <button type="submit" name="atualizar_evento" class="btn btn-warning">
-                        💾 Salvar Alterações
-                    </button>
-                <?php else: ?>
-                    <button type="submit" name="salvar_evento" class="btn btn-success">
-                        💾 Salvar Compromisso
-                    </button>
-                <?php endif; ?>
+                <div class="col-md-2"><label class="form-label">Data *</label><input type="date" name="data_evento" class="form-control" value="<?= h($f['data_evento']) ?>" required></div>
+                <div class="col-md-2"><label class="form-label">Horário</label><input type="time" name="horario" class="form-control" value="<?= h(substr($f['horario'],0,5)) ?>"></div>
+                <div class="col-md-3"><label class="form-label">Tipo</label><select name="tipo_compromisso" class="form-select"><?php foreach ($tipos as $tp): ?><option value="<?= h($tp) ?>" <?= $f['tipo_compromisso']===$tp?'selected':'' ?>><?= h($tp) ?></option><?php endforeach; ?></select></div>
+                <div class="col-md-3"><label class="form-label">Status</label><select name="status" class="form-select"><?php foreach ($statuses as $st): ?><option value="<?= h($st) ?>" <?= $f['status']===$st?'selected':'' ?>><?= h($st) ?></option><?php endforeach; ?></select></div>
+                <div class="col-md-2"><label class="form-label">Prazo Fatal</label><select name="prazo_fatal" class="form-select"><option value="Não" <?= $f['prazo_fatal']==='Não'?'selected':'' ?>>Não</option><option value="Sim" <?= $f['prazo_fatal']==='Sim'?'selected':'' ?>>Sim</option></select></div>
+                <div class="col-md-4"><label class="form-label">Cliente</label><select name="cliente_id" class="form-select" onchange="preencherNomeCliente(this)"><option value="">-- Selecione --</option><?php if ($clientes): while ($c=$clientes->fetch_assoc()): ?><option value="<?= h($c['id']) ?>" data-nome="<?= h($c['nome']) ?>" <?= $f['cliente_id']===$c['id']?'selected':'' ?>><?= h($c['id']) ?> — <?= h($c['nome']) ?></option><?php endwhile; endif; ?></select></div>
+                <div class="col-md-4"><label class="form-label">Nome Cliente</label><input type="text" id="nome_cliente" name="nome_cliente" class="form-control" value="<?= h($f['nome_cliente']) ?>" placeholder="Preenchido automaticamente ou livre"></div>
+                <div class="col-md-4"><label class="form-label">Processo vinculado</label><select id="numero_processo" name="numero_processo" class="form-select" data-selected="<?= h($f['numero_processo']) ?>"><option value="">-- Selecione o cliente primeiro --</option><?php if ($f['numero_processo']): ?><option value="<?= h($f['numero_processo']) ?>" selected><?= h($f['numero_processo']) ?></option><?php endif; ?></select></div>
+                <div class="col-md-6"><label class="form-label">Local</label><input type="text" name="local" class="form-control" value="<?= h($f['local']) ?>" placeholder="Fórum, vara, endereço ou sala"></div>
+                <div class="col-md-6"><label class="form-label">Advogado Responsável</label><select name="advogado_id" class="form-select"><option value="">-- Selecione --</option><?php if ($advogados): while ($a=$advogados->fetch_assoc()): ?><option value="<?= h($a['id']) ?>" <?= $f['advogado_id']===$a['id']?'selected':'' ?>><?= h($a['nome']) ?></option><?php endwhile; endif; ?></select></div>
+                <div class="col-12"><label class="form-label">Observações</label><textarea name="observacoes" class="form-control" rows="3"><?= h($f['observacoes']) ?></textarea></div>
+            </div>
+            <div class="mt-4 d-flex gap-2">
+                <button type="submit" name="<?= $acao === 'editar' ? 'atualizar_evento' : 'salvar_evento' ?>" class="btn <?= $acao === 'editar' ? 'btn-warning' : 'btn-success' ?>">💾 Salvar</button>
                 <a href="?mod=agenda" class="btn btn-secondary">Cancelar</a>
             </div>
-
         </form>
     </div>
 </div>
-
 <?php else: ?>
-
 <?php
 $busca = trim($_GET['busca'] ?? '');
+$filtroStatus = trim($_GET['status'] ?? '');
+$filtroTipo = trim($_GET['tipo'] ?? '');
+$filtroPeriodo = trim($_GET['periodo'] ?? '');
 $filtro_deletado = ($acao === 'lixeira') ? 1 : 0;
 
-if ($busca !== '') {
-    $likeBusca = "%$busca%";
-    $sqlLista = "SELECT
-                    a.id,
-                    a.data_evento,
-                    a.horario,
-                    a.tipo_compromisso,
-                    a.cliente_id,
-                    a.nome_cliente,
-                    a.numero_processo,
-                    a.`local`,
-                    adv.nome AS advogado_nome,
-                    a.status,
-                    a.prazo_fatal
-                FROM agenda a
-                LEFT JOIN advogados adv ON adv.id = a.advogado_id
-                WHERE
-                    a.deletado = ? AND (
-                        a.nome_cliente     LIKE ? OR
-                        a.tipo_compromisso LIKE ? OR
-                        a.numero_processo  LIKE ? OR
-                        a.status           LIKE ? OR
-                        a.prazo_fatal      LIKE ?
-                    )
-                ORDER BY a.data_evento ASC, a.horario ASC
-                LIMIT 200";
-
-    $stmtLista = $conn->prepare($sqlLista);
-    $stmtLista->bind_param("isssss", $filtro_deletado, $likeBusca, $likeBusca, $likeBusca, $likeBusca, $likeBusca);
-    $stmtLista->execute();
-    $lista = $stmtLista->get_result();
-} else {
-    $sqlLista = "SELECT
-                    a.id,
-                    a.data_evento,
-                    a.horario,
-                    a.tipo_compromisso,
-                    a.cliente_id,
-                    a.nome_cliente,
-                    a.numero_processo,
-                    a.`local`,
-                    adv.nome AS advogado_nome,
-                    a.status,
-                    a.prazo_fatal
-                FROM agenda a
-                LEFT JOIN advogados adv ON adv.id = a.advogado_id
-                WHERE a.deletado = ?
-                ORDER BY a.data_evento ASC, a.horario ASC
-                LIMIT 200";
-    $stmtLista = $conn->prepare($sqlLista);
-    $stmtLista->bind_param("i", $filtro_deletado);
-    $stmtLista->execute();
-    $lista = $stmtLista->get_result();
+$where = [];
+$params = [];
+$types = '';
+if ($agendaTemDeletado) {
+    $where[] = 'a.deletado = ?';
+    $params[] = $filtro_deletado;
+    $types .= 'i';
+} elseif ($acao === 'lixeira') {
+    $where[] = '1 = 0';
 }
+if ($busca !== '') {
+    $where[] = '(a.nome_cliente LIKE ? OR a.tipo_compromisso LIKE ? OR a.numero_processo LIKE ? OR a.`local` LIKE ? OR adv.nome LIKE ?)';
+    $like = "%{$busca}%";
+    array_push($params, $like, $like, $like, $like, $like);
+    $types .= 'sssss';
+}
+if ($filtroStatus !== '') { $where[] = 'a.status = ?'; $params[] = $filtroStatus; $types .= 's'; }
+if ($filtroTipo !== '') { $where[] = 'a.tipo_compromisso = ?'; $params[] = $filtroTipo; $types .= 's'; }
+if ($filtroPeriodo === 'hoje') { $where[] = 'a.data_evento = ?'; $params[] = $hoje; $types .= 's'; }
+if ($filtroPeriodo === '7dias') { $where[] = 'a.data_evento BETWEEN ? AND ?'; array_push($params, $hoje, $em7); $types .= 'ss'; }
+if ($filtroPeriodo === 'vencidos') { $where[] = "a.data_evento < ? AND a.status IN ('Pendente','Confirmado')"; $params[] = $hoje; $types .= 's'; }
+if ($filtroPeriodo === 'fatal') { $where[] = "a.prazo_fatal = 'Sim'"; }
+
+$sqlLista = "SELECT a.id, a.data_evento, a.horario, a.tipo_compromisso, a.cliente_id, a.nome_cliente, a.numero_processo, a.`local`, adv.nome AS advogado_nome, a.status, a.prazo_fatal
+             FROM agenda a
+             LEFT JOIN advogados adv ON adv.id = a.advogado_id
+             " . (count($where) ? "WHERE " . implode(' AND ', $where) : "") . "
+             ORDER BY a.data_evento ASC, a.horario ASC
+             LIMIT 300";
+$stmtLista = $conn->prepare($sqlLista);
+if ($types !== '') {
+    $stmtLista->bind_param($types, ...$params);
+}
+$stmtLista->execute();
+$lista = $stmtLista->get_result();
+$totalEncontrado = $lista ? $lista->num_rows : 0;
 ?>
 
-<form class="d-flex gap-2 mb-3" method="GET">
-    <input type="hidden" name="mod" value="agenda">
-    <input type="hidden" name="acao" value="<?= htmlspecialchars($acao) ?>">
-    <input type="text" name="busca" class="form-control"
-           placeholder="Buscar por cliente, tipo, processo ou status..."
-           value="<?= htmlspecialchars($busca) ?>">
-    <button class="btn btn-outline-primary" type="submit">
-        <i class="bi bi-search"></i>
-    </button>
-    <?php if ($busca): ?>
-        <a href="?mod=agenda&acao=<?= htmlspecialchars($acao) ?>" class="btn btn-outline-secondary">Limpar</a>
-    <?php endif; ?>
-</form>
-
-<div class="card">
-    <div class="card-body p-0">
-        <div class="table-responsive">
-            <table class="table table-hover table-striped mb-0">
-                <thead class="table-dark">
-                    <tr>
-                        <th>ID Evento</th>
-                        <th>Data</th>
-                        <th>Horário</th>
-                        <th>Tipo</th>
-                        <th>Cliente</th>
-                        <th>Nº Processo</th>
-                        <th>Local</th>
-                        <th>Advogado</th>
-                        <th>Status</th>
-                        <th>Prazo Final</th>
-                        <th>Ações</th>
-                    </tr>
-                </thead>
-                <tbody>
-                <?php if ($lista && $lista->num_rows > 0): ?>
-                    <?php while ($row = $lista->fetch_assoc()):
-                        $badge = match($row['status']) {
-                            'Confirmado' => 'primary',
-                            'Realizado'  => 'success',
-                            'Cancelado'  => 'secondary',
-                            default      => 'warning'
-                        };
-                        $fatal = $row['prazo_fatal'] === 'Sim'
-                            ? '<span class="badge bg-danger">Sim</span>'
-                            : '<span class="badge bg-light text-dark border">Não</span>';
-                    ?>
-                    <tr <?= $row['prazo_fatal'] === 'Sim' ? 'class="table-danger"' : '' ?>>
-                        <td><?= htmlspecialchars($row['id']) ?></td>
-                        <td>
-                            <?= !empty($row['data_evento'])
-                                ? date('d/m/Y', strtotime($row['data_evento']))
-                                : '-' ?>
-                        </td>
-                        <td><?= htmlspecialchars($row['horario']) ?></td>
-                        <td><?= htmlspecialchars($row['tipo_compromisso']) ?></td>
-                        <td><?= htmlspecialchars($row['nome_cliente'] ?? $row['cliente_id'] ?? '-') ?></td>
-                        <td><?= htmlspecialchars($row['numero_processo'] ?? '-') ?></td>
-                        <td><?= htmlspecialchars($row['local'] ?? '-') ?></td>
-                        <td><?= htmlspecialchars($row['advogado_nome'] ?? '-') ?></td>
-                        <td>
-                            <span class="badge bg-<?= $badge ?>">
-                                <?= htmlspecialchars($row['status']) ?>
-                            </span>
-                        </td>
-                        <td><?= $fatal ?></td>
-                        <td class="text-nowrap">
-                            <?php if ($acao === 'lixeira'): ?>
-                                <a href="?mod=agenda&restaurar=<?= urlencode($row['id']) ?>"
-                                   class="btn btn-sm btn-outline-success" title="Restaurar">
-                                    <i class="bi bi-arrow-counterclockwise"></i>
-                                </a>
-                                <a href="?mod=agenda&excluir_permanente=<?= urlencode($row['id']) ?>"
-                                   class="btn btn-sm btn-danger"
-                                   onclick="return confirm('ATENÇÃO: Excluir PERMANENTEMENTE este compromisso? Esta ação não pode ser desfeita.')"
-                                   title="Excluir do Banco">
-                                    <i class="bi bi-fire"></i>
-                                </a>
-                            <?php else: ?>
-                                <a href="?mod=agenda&acao=editar&id=<?= urlencode($row['id']) ?>"
-                                   class="btn btn-sm btn-warning">✏️ Editar</a>
-                                <a href="?mod=agenda&excluir=<?= urlencode($row['id']) ?>"
-                                   class="btn btn-sm btn-outline-danger"
-                                   onclick="return confirm('Deseja mover este compromisso para a lixeira?')">🗑️</a>
-                            <?php endif; ?>
-                        </td>
-                    </tr>
-                    <?php endwhile; ?>
-                <?php else: ?>
-                    <tr>
-                        <td colspan="11" class="text-center text-muted py-4">
-                            <?= $acao === 'lixeira' ? 'A lixeira está vazia.' : 'Nenhum compromisso encontrado.' ?>
-                        </td>
-                    </tr>
-                <?php endif; ?>
-                </tbody>
-            </table>
+<form class="card shadow-sm border-0 mb-3" method="GET">
+    <div class="card-body">
+        <input type="hidden" name="mod" value="agenda">
+        <input type="hidden" name="acao" value="<?= h($acao) ?>">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-4"><label class="form-label">Pesquisa inteligente</label><input type="text" name="busca" class="form-control" placeholder="Cliente, processo, local, advogado ou tipo" value="<?= h($busca) ?>"></div>
+            <div class="col-md-2"><label class="form-label">Status</label><select name="status" class="form-select"><option value="">Todos</option><?php foreach ($statuses as $st): ?><option value="<?= h($st) ?>" <?= $filtroStatus===$st?'selected':'' ?>><?= h($st) ?></option><?php endforeach; ?></select></div>
+            <div class="col-md-2"><label class="form-label">Tipo</label><select name="tipo" class="form-select"><option value="">Todos</option><?php foreach ($tipos as $tp): ?><option value="<?= h($tp) ?>" <?= $filtroTipo===$tp?'selected':'' ?>><?= h($tp) ?></option><?php endforeach; ?></select></div>
+            <div class="col-md-2"><label class="form-label">Período</label><select name="periodo" class="form-select"><option value="">Todos</option><option value="hoje" <?= $filtroPeriodo==='hoje'?'selected':'' ?>>Hoje</option><option value="7dias" <?= $filtroPeriodo==='7dias'?'selected':'' ?>>Próximos 7 dias</option><option value="vencidos" <?= $filtroPeriodo==='vencidos'?'selected':'' ?>>Vencidos</option><option value="fatal" <?= $filtroPeriodo==='fatal'?'selected':'' ?>>Prazo fatal</option></select></div>
+            <div class="col-md-2 d-flex gap-2"><button class="btn btn-outline-primary flex-fill" type="submit"><i class="bi bi-search"></i> Buscar</button><a href="?mod=agenda&acao=<?= h($acao) ?>" class="btn btn-outline-secondary"><i class="bi bi-x-lg"></i></a></div>
         </div>
     </div>
+</form>
+
+<div class="card shadow-sm border-0">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <strong><i class="bi bi-list-check"></i> Lista de Compromissos</strong>
+        <span><?= (int)$totalEncontrado ?> registro(s) encontrado(s)</span>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-light">
+                <tr><th>ID</th><th>Data/Hora</th><th>Tipo</th><th>Cliente</th><th>Processo</th><th>Local</th><th>Advogado</th><th>Status</th><th>Prazo</th><th class="text-end">Ações</th></tr>
+            </thead>
+            <tbody>
+            <?php if ($lista && $lista->num_rows > 0): while ($row = $lista->fetch_assoc()):
+                $badge = match($row['status']) { 'Confirmado'=>'primary', 'Realizado'=>'success', 'Cancelado'=>'secondary', default=>'warning' };
+                $dataFmt = $row['data_evento'] ? date('d/m/Y', strtotime($row['data_evento'])) : '-';
+                $horaFmt = $row['horario'] ? substr($row['horario'],0,5) : '--:--';
+                $vencido = $row['data_evento'] < $hoje && in_array($row['status'], ['Pendente','Confirmado'], true);
+            ?>
+                <tr class="<?= $row['prazo_fatal']==='Sim' ? 'table-danger' : ($vencido ? 'table-warning' : '') ?>">
+                    <td><?= h($row['id']) ?></td>
+                    <td><strong><?= h($dataFmt) ?></strong><br><span class="text-muted small"><?= h($horaFmt) ?></span></td>
+                    <td><?= h($row['tipo_compromisso']) ?></td>
+                    <td><?= h($row['nome_cliente'] ?: $row['cliente_id'] ?: '-') ?></td>
+                    <td><?= h($row['numero_processo'] ?: '-') ?></td>
+                    <td><?= h($row['local'] ?: '-') ?></td>
+                    <td><?= h($row['advogado_nome'] ?: '-') ?></td>
+                    <td><span class="badge bg-<?= $badge ?>"><?= h($row['status']) ?></span></td>
+                    <td><?= $row['prazo_fatal']==='Sim' ? '<span class="badge bg-danger">Fatal</span>' : '<span class="badge bg-light text-dark border">Normal</span>' ?></td>
+                    <td class="text-end text-nowrap">
+                        <?php if ($acao === 'lixeira'): ?>
+                            <a href="?mod=agenda&restaurar=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-outline-success" title="Restaurar"><i class="bi bi-arrow-counterclockwise"></i></a>
+                            <a href="?mod=agenda&excluir_permanente=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-danger" onclick="return confirm('Excluir PERMANENTEMENTE este compromisso?')" title="Excluir definitivo"><i class="bi bi-fire"></i></a>
+                        <?php else: ?>
+                            <a href="?mod=agenda&acao=editar&id=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-warning"><i class="bi bi-pencil"></i></a>
+                            <a href="?mod=agenda&excluir=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('Mover este compromisso para a lixeira?')"><i class="bi bi-trash"></i></a>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            <?php endwhile; else: ?>
+                <tr><td colspan="10" class="text-center text-muted py-4"><?= $acao === 'lixeira' ? 'A lixeira está vazia.' : 'Nenhum compromisso encontrado.' ?></td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
 </div>
-
-<?php
-if (isset($stmtLista)) { $stmtLista->close(); }
-endif;
-?>
-
-<?php $conn->close(); ?>
+<?php if (isset($stmtLista)) { $stmtLista->close(); } ?>
+<?php endif; ?>

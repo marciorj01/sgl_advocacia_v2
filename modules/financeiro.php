@@ -114,6 +114,8 @@ function financeiroGarantirEstrutura(mysqli $conn): void
         banco_destino_id INT NULL,
         valor DECIMAL(12,2) NOT NULL DEFAULT 0,
         descricao VARCHAR(255) NULL,
+        origem_outros VARCHAR(150) NULL,
+        destino_outros VARCHAR(150) NULL,
         usuario_nome VARCHAR(150) NULL,
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_bm_data (data_movimento),
@@ -121,6 +123,8 @@ function financeiroGarantirEstrutura(mysqli $conn): void
         INDEX idx_bm_destino (banco_destino_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+    financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'origem_outros', "origem_outros VARCHAR(150) NULL");
+    financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'destino_outros', "destino_outros VARCHAR(150) NULL");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'banco_id', "banco_id INT NULL");
     financeiroAdicionarColuna($conn, 'contas_receber', 'banco_id', "banco_id INT NULL");
 }
@@ -158,14 +162,37 @@ function gerarIdFin(mysqli $conn, string $prefixo): string
 
 function brlParaFloatFin(string $valor): float
 {
-    $v = trim($valor);
+    $v = trim((string)$valor);
     if ($v === '') return 0.0;
 
-    $v = str_replace(['R$', ' '], '', $v);
-    if (strpos($v, ',') !== false) {
+    // Aceita: 1000,00 | 1.000,00 | R$ 1.000,00 | 1000.00 | 1,000.00
+    $v = str_replace(["Â ", 'R$', 'r$', ' '], '', $v);
+    $v = preg_replace('/[^0-9,\.\-]/', '', $v);
+    if ($v === '' || $v === '-' || $v === ',' || $v === '.') return 0.0;
+
+    $lastComma = strrpos($v, ',');
+    $lastDot = strrpos($v, '.');
+
+    if ($lastComma !== false && $lastDot !== false) {
+        if ($lastComma > $lastDot) {
+            // padrão BR: 1.000,00
+            $v = str_replace('.', '', $v);
+            $v = str_replace(',', '.', $v);
+        } else {
+            // padrão internacional: 1,000.00
+            $v = str_replace(',', '', $v);
+        }
+    } elseif ($lastComma !== false) {
         $v = str_replace('.', '', $v);
         $v = str_replace(',', '.', $v);
+    } elseif ($lastDot !== false) {
+        // Se só há ponto e ele parece separador de milhar (1.000), remove; se parece decimal (1000.00), mantém.
+        $decimals = strlen($v) - $lastDot - 1;
+        if ($decimals === 3 && substr_count($v, '.') >= 1) {
+            $v = str_replace('.', '', $v);
+        }
     }
+
     return is_numeric($v) ? (float)$v : 0.0;
 }
 
@@ -520,22 +547,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_banco'])) {
 
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['transferir_banco'])) {
-    $origem = (int)($_POST['banco_origem_id'] ?? 0);
-    $destino = (int)($_POST['banco_destino_id'] ?? 0);
+    $origemRaw = trim((string)($_POST['banco_origem_id'] ?? ''));
+    $destinoRaw = trim((string)($_POST['banco_destino_id'] ?? ''));
+    $origem = ctype_digit($origemRaw) ? (int)$origemRaw : 0;
+    $destino = ctype_digit($destinoRaw) ? (int)$destinoRaw : 0;
+    $origemOutros = strtoupper($origemRaw) === 'OUTROS' ? trim((string)($_POST['origem_outros'] ?? 'OUTROS')) : null;
+    $destinoOutros = strtoupper($destinoRaw) === 'OUTROS' ? trim((string)($_POST['destino_outros'] ?? 'OUTROS')) : null;
     $valor = brlParaFloatFin((string)($_POST['valor_transferencia'] ?? '0'));
     $dataMov = $_POST['data_movimento'] ?: date('Y-m-d');
     $descricao = trim($_POST['descricao_transferencia'] ?? 'Transferência entre contas');
-    $usuarioNome = $_SESSION['usuario_nome'] ?? $_SESSION['usuario'] ?? 'Sistema';
-    if ($origem <= 0 || $destino <= 0 || $origem === $destino || $valor <= 0) {
-        $msg = '<div class="alert alert-danger">Informe origem, destino diferentes e valor válido para transferir.</div>';
+    $usuarioNome = $_SESSION['usuario_nome'] ?? $_SESSION['usuario'] ?? $_SESSION['nome'] ?? 'Sistema';
+
+    $origemValida = $origem > 0 || $origemOutros !== null;
+    $destinoValido = $destino > 0 || $destinoOutros !== null;
+    $mesmaConta = ($origem > 0 && $destino > 0 && $origem === $destino) || ($origemRaw !== '' && $origemRaw === $destinoRaw);
+
+    if (!$origemValida || !$destinoValido || $mesmaConta || $valor <= 0) {
+        $msg = '<div class="alert alert-danger">Não foi possível registrar a transferência: selecione origem/destino diferentes e informe valor maior que zero. Aceita: 1000,00, 1.000,00 ou R$ 1.000,00.</div>';
     } else {
-        $stmt = $conn->prepare("INSERT INTO bancos_movimentacoes (data_movimento, tipo, banco_origem_id, banco_destino_id, valor, descricao, usuario_nome) VALUES (?, 'Transferência', ?, ?, ?, ?, ?)");
-        $stmt->bind_param('siidss', $dataMov, $origem, $destino, $valor, $descricao, $usuarioNome);
+        if ($origemOutros !== null && $origemOutros === '') $origemOutros = 'OUTROS';
+        if ($destinoOutros !== null && $destinoOutros === '') $destinoOutros = 'OUTROS';
+        $stmt = $conn->prepare("INSERT INTO bancos_movimentacoes (data_movimento, tipo, banco_origem_id, banco_destino_id, valor, descricao, origem_outros, destino_outros, usuario_nome) VALUES (?, 'Transferência', ?, ?, ?, ?, ?, ?, ?)");
+        $origemDb = $origem > 0 ? $origem : null;
+        $destinoDb = $destino > 0 ? $destino : null;
+        $stmt->bind_param('siidssss', $dataMov, $origemDb, $destinoDb, $valor, $descricao, $origemOutros, $destinoOutros, $usuarioNome);
         $ok = $stmt->execute();
         $movId = $stmt->insert_id;
         $stmt->close();
-        $msg = $ok ? '<div class="alert alert-success">Transferência registrada entre bancos/caixa.</div>' : '<div class="alert alert-danger">Erro ao registrar transferência.</div>';
-        if ($ok && function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Transferiu valor entre bancos/caixa', 'bancos_movimentacoes', (string)$movId, $descricao . ' - ' . fmtBrlFin($valor)); }
+        $msg = $ok ? '<div class="alert alert-success">Transferência registrada entre Caixa/Bancos/Outros.</div>' : '<div class="alert alert-danger">Erro ao registrar transferência.</div>';
+        if ($ok && function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Transferiu valor entre bancos/caixa/outros', 'bancos_movimentacoes', (string)$movId, $descricao . ' - ' . fmtBrlFin($valor)); }
     }
     $acao = 'movimentacao_bancos';
 }
@@ -897,6 +937,44 @@ if ($acao === 'caixa') {
     $res = $conn->query($sqlEntradas); if ($res) while($r=$res->fetch_assoc()) $entradas[]=$r;
     $sqlSaidas = "SELECT cp.id, cp.descricao, cp.categoria, cp.fornecedor, cp.valor_pago, cp.valor, cp.data_pagamento, cp.forma_pagamento, cp.status, b.nome AS banco_nome FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id=cp.banco_id WHERE cp.deletado=0 AND cp.status IN ('Pago','Quitada') AND cp.data_pagamento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cp.data_pagamento ASC, cp.id ASC";
     $res = $conn->query($sqlSaidas); if ($res) while($r=$res->fetch_assoc()) $saidas[]=$r;
+
+    // Movimentações internas envolvendo CAIXA físico entram no fechamento profissional:
+    // CAIXA -> Banco/Outros = saída do caixa; Banco/Outros -> CAIXA = entrada do caixa.
+    $sqlTransfEntradasCaixa = "SELECT m.id,
+            CONCAT('Transferência interna: ', COALESCE(bo.nome, m.origem_outros, 'OUTROS'), ' → ', COALESCE(bd.nome, m.destino_outros, 'CAIXA')) AS descricao,
+            m.valor AS valor_pago,
+            m.valor,
+            m.data_movimento AS data_recebimento,
+            'Movimentação interna' AS forma_recebimento,
+            'Transferência' AS status,
+            'Transferência interna' AS cliente_nome,
+            COALESCE(bd.nome, 'CAIXA') AS banco_nome
+        FROM bancos_movimentacoes m
+        LEFT JOIN bancos_caixa bo ON bo.id = m.banco_origem_id
+        LEFT JOIN bancos_caixa bd ON bd.id = m.banco_destino_id
+        WHERE m.data_movimento BETWEEN '$inicioCaixa' AND '$fimCaixa'
+          AND m.banco_destino_id IS NOT NULL
+          AND (UPPER(COALESCE(bd.tipo,''))='CAIXA' OR UPPER(COALESCE(bd.nome,''))='CAIXA')";
+    $res = $conn->query($sqlTransfEntradasCaixa); if ($res) while($r=$res->fetch_assoc()) $entradas[]=$r;
+
+    $sqlTransfSaidasCaixa = "SELECT m.id,
+            CONCAT('Transferência interna: ', COALESCE(bo.nome, 'CAIXA'), ' → ', COALESCE(bd.nome, m.destino_outros, 'OUTROS')) AS descricao,
+            'Transferência interna' AS categoria,
+            COALESCE(bd.nome, m.destino_outros, 'OUTROS') AS fornecedor,
+            m.valor AS valor_pago,
+            m.valor,
+            m.data_movimento AS data_pagamento,
+            'Movimentação interna' AS forma_pagamento,
+            'Transferência' AS status,
+            COALESCE(bo.nome, 'CAIXA') AS banco_nome
+        FROM bancos_movimentacoes m
+        LEFT JOIN bancos_caixa bo ON bo.id = m.banco_origem_id
+        LEFT JOIN bancos_caixa bd ON bd.id = m.banco_destino_id
+        WHERE m.data_movimento BETWEEN '$inicioCaixa' AND '$fimCaixa'
+          AND m.banco_origem_id IS NOT NULL
+          AND (UPPER(COALESCE(bo.tipo,''))='CAIXA' OR UPPER(COALESCE(bo.nome,''))='CAIXA')";
+    $res = $conn->query($sqlTransfSaidasCaixa); if ($res) while($r=$res->fetch_assoc()) $saidas[]=$r;
+
     $totalEntradas = array_sum(array_map(fn($r)=>(float)($r['valor_pago'] ?: $r['valor']), $entradas));
     $totalSaidas = array_sum(array_map(fn($r)=>(float)($r['valor_pago'] ?: $r['valor']), $saidas));
     $saldoCaixa = $totalEntradas - $totalSaidas;
@@ -921,7 +999,7 @@ if ($acao === 'caixa') {
 if ($acao === 'movimentacao_bancos') {
     $bancos = financeiroListaBancos($conn, false);
     $movs = [];
-    $resMov = $conn->query("SELECT m.*, bo.nome AS origem_nome, bd.nome AS destino_nome FROM bancos_movimentacoes m LEFT JOIN bancos_caixa bo ON bo.id=m.banco_origem_id LEFT JOIN bancos_caixa bd ON bd.id=m.banco_destino_id ORDER BY m.data_movimento DESC, m.id DESC LIMIT 80");
+    $resMov = $conn->query("SELECT m.*, COALESCE(bo.nome, m.origem_outros, 'OUTROS') AS origem_nome, COALESCE(bd.nome, m.destino_outros, 'OUTROS') AS destino_nome FROM bancos_movimentacoes m LEFT JOIN bancos_caixa bo ON bo.id=m.banco_origem_id LEFT JOIN bancos_caixa bd ON bd.id=m.banco_destino_id ORDER BY m.data_movimento DESC, m.id DESC LIMIT 80");
     if ($resMov) while($r=$resMov->fetch_assoc()) $movs[]=$r;
     ?>
     <div class="container-fluid">
@@ -936,7 +1014,7 @@ if ($acao === 'movimentacao_bancos') {
                 <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><div class="d-flex justify-content-between"><div><div class="text-muted small text-uppercase"><?= htmlspecialchars($b['tipo']) ?></div><h5 class="fw-bold mb-1"><?= htmlspecialchars($b['nome']) ?></h5><small class="text-muted"><?= htmlspecialchars(trim(($b['banco']??'') . ' ' . ($b['conta']??'')) ?: '-') ?></small></div><i class="bi bi-bank fs-2 text-primary opacity-50"></i></div><div class="fs-4 fw-bold mt-3 <?= $saldoBanco>=0?'text-success':'text-danger' ?>"><?= fmtBrlFin($saldoBanco) ?></div><small class="text-muted">Saldo atual estimado</small></div></div></div>
             <?php endforeach; ?>
         </div>
-        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-dark text-white fw-bold">Transferir entre Caixa/Bancos</div><div class="card-body"><form method="post" class="row g-3"><input type="hidden" name="transferir_banco" value="1"><div class="col-md-3"><label class="form-label">Data</label><input type="date" name="data_movimento" class="form-control" value="<?= date('Y-m-d') ?>" required></div><div class="col-md-3"><label class="form-label">Origem</label><select name="banco_origem_id" class="form-select" required><option value="">Selecione...</option><?php foreach($bancos as $b): ?><option value="<?= (int)$b['id'] ?>"><?= htmlspecialchars($b['nome']) ?></option><?php endforeach; ?></select></div><div class="col-md-3"><label class="form-label">Destino</label><select name="banco_destino_id" class="form-select" required><option value="">Selecione...</option><?php foreach($bancos as $b): ?><option value="<?= (int)$b['id'] ?>"><?= htmlspecialchars($b['nome']) ?></option><?php endforeach; ?></select></div><div class="col-md-3"><label class="form-label">Valor</label><input name="valor_transferencia" class="form-control" placeholder="R$ 0,00" required></div><div class="col-md-9"><label class="form-label">Descrição</label><input name="descricao_transferencia" class="form-control" placeholder="Ex.: depósito do caixa físico na conta corrente"></div><div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100"><i class="bi bi-check-circle"></i> Registrar transferência</button></div></form></div></div>
+        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-dark text-white fw-bold">Transferir entre Caixa/Bancos/Outros</div><div class="card-body"><form method="post" class="row g-3" id="formTransferenciaBanco"><input type="hidden" name="transferir_banco" value="1"><div class="col-md-3"><label class="form-label">Data</label><input type="date" name="data_movimento" class="form-control" value="<?= date('Y-m-d') ?>" required></div><div class="col-md-3"><label class="form-label">Origem</label><select name="banco_origem_id" id="banco_origem_id" class="form-select" required><option value="">Selecione...</option><?php foreach($bancos as $b): ?><option value="<?= (int)$b['id'] ?>"><?= htmlspecialchars($b['nome']) ?></option><?php endforeach; ?><option value="OUTROS">OUTROS</option></select><input name="origem_outros" id="origem_outros" class="form-control mt-2 d-none" placeholder="Descreva a origem"></div><div class="col-md-3"><label class="form-label">Destino</label><select name="banco_destino_id" id="banco_destino_id" class="form-select" required><option value="">Selecione...</option><?php foreach($bancos as $b): ?><option value="<?= (int)$b['id'] ?>"><?= htmlspecialchars($b['nome']) ?></option><?php endforeach; ?><option value="OUTROS">OUTROS</option></select><input name="destino_outros" id="destino_outros" class="form-control mt-2 d-none" placeholder="Descreva o destino"></div><div class="col-md-3"><label class="form-label">Valor</label><input name="valor_transferencia" id="valor_transferencia" class="form-control" inputmode="decimal" autocomplete="off" placeholder="Ex.: 1.000,00" required><div class="form-text">Digite 1000,00 ou 1.000,00.</div></div><div class="col-md-9"><label class="form-label">Descrição</label><input name="descricao_transferencia" class="form-control" placeholder="Ex.: depósito do caixa físico na conta corrente"></div><div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100"><i class="bi bi-check-circle"></i> Registrar transferência</button></div></form><script>(function(){function t(sel,input){var s=document.getElementById(sel),i=document.getElementById(input);if(!s||!i)return;function u(){i.classList.toggle('d-none',s.value!=='OUTROS');if(s.value!=='OUTROS')i.value='';}s.addEventListener('change',u);u();}t('banco_origem_id','origem_outros');t('banco_destino_id','destino_outros');var v=document.getElementById('valor_transferencia');if(v){v.addEventListener('blur',function(){var x=this.value.replace(/[^0-9,.]/g,''); if(!x)return; var n=x; if(n.indexOf(',')>=0){n=n.replace(/\./g,'').replace(',','.');} var f=parseFloat(n); if(!isNaN(f)){this.value=f.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});}});}})();</script></div></div>
         <div class="card shadow-sm border-0"><div class="card-header bg-dark text-white fw-bold">Histórico de transferências</div><div class="table-responsive"><table class="table align-middle mb-0"><thead><tr><th>Data</th><th>Origem</th><th>Destino</th><th>Descrição</th><th>Responsável</th><th class="text-end">Valor</th></tr></thead><tbody><?php if(empty($movs)): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma transferência registrada.</td></tr><?php endif; foreach($movs as $m): ?><tr><td><?= date('d/m/Y', strtotime($m['data_movimento'])) ?></td><td><?= htmlspecialchars($m['origem_nome'] ?: '-') ?></td><td><?= htmlspecialchars($m['destino_nome'] ?: '-') ?></td><td><?= htmlspecialchars($m['descricao'] ?: '-') ?></td><td><?= htmlspecialchars($m['usuario_nome'] ?: '-') ?></td><td class="text-end fw-bold"><?= fmtBrlFin($m['valor']) ?></td></tr><?php endforeach; ?></tbody></table></div></div>
     </div>
     <?php return; }

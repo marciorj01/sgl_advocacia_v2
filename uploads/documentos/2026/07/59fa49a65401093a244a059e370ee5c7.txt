@@ -1,0 +1,11 @@
+Correção do menu Recibos - Fase 4.4
+
+1. Substitua o arquivo:
+   modules/recibos.php
+
+2. No phpMyAdmin, com o banco sistema_sgl_novo selecionado, execute:
+   sql/06_correcao_recibos_banco_limpo.sql
+
+3. Atualize o menu Recibos no navegador.
+
+Observação: o config/database.php recebido já aponta para sistema_sgl_novo no ambiente local.

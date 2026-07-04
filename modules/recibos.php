@@ -14,6 +14,18 @@ function brlParaFloatRec(string $valor): float {
     if (strpos($v, ',') !== false) $v = str_replace(',', '.', str_replace('.', '', $v));
     return is_numeric($v) ? (float)$v : 0.0;
 }
+function sglReciboColunaExiste(mysqli $conn, string $coluna): bool {
+    $coluna = $conn->real_escape_string($coluna);
+    $res = $conn->query("SHOW COLUMNS FROM `recibos` LIKE '{$coluna}'");
+    return $res && $res->num_rows > 0;
+}
+
+function sglReciboGarantirColuna(mysqli $conn, string $coluna, string $definicao): void {
+    if (!sglReciboColunaExiste($conn, $coluna)) {
+        $conn->query("ALTER TABLE `recibos` ADD COLUMN {$definicao}");
+    }
+}
+
 function sglReciboTabela(mysqli $conn): void {
     $conn->query("CREATE TABLE IF NOT EXISTS recibos (
         id VARCHAR(20) PRIMARY KEY,
@@ -41,6 +53,27 @@ function sglReciboTabela(mysqli $conn): void {
         INDEX idx_rec_deletado (deletado),
         INDEX idx_rec_data (data_emissao)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // Compatibilidade com bancos criados nas fases anteriores.
+    sglReciboGarantirColuna($conn, 'processo_numero', "processo_numero VARCHAR(80) NULL AFTER cpf_cnpj");
+    sglReciboGarantirColuna($conn, 'honorario_id', "honorario_id VARCHAR(20) NULL AFTER processo_numero");
+    sglReciboGarantirColuna($conn, 'parcela_id', "parcela_id VARCHAR(20) NULL AFTER honorario_id");
+    sglReciboGarantirColuna($conn, 'data_emissao', "data_emissao DATE NULL AFTER parcela_id");
+    sglReciboGarantirColuna($conn, 'data_pagamento', "data_pagamento DATE NULL AFTER data_emissao");
+    sglReciboGarantirColuna($conn, 'referente', "referente VARCHAR(255) NULL AFTER data_pagamento");
+    sglReciboGarantirColuna($conn, 'observacoes', "observacoes TEXT NULL AFTER valor");
+    sglReciboGarantirColuna($conn, 'chave_validacao', "chave_validacao VARCHAR(80) NULL AFTER status");
+    sglReciboGarantirColuna($conn, 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0 AFTER chave_validacao");
+
+    if (sglReciboColunaExiste($conn, 'data_recibo')) {
+        $conn->query("UPDATE recibos SET data_emissao = COALESCE(data_emissao, data_recibo) WHERE data_emissao IS NULL");
+    }
+    if (sglReciboColunaExiste($conn, 'descricao')) {
+        $conn->query("UPDATE recibos SET referente = COALESCE(NULLIF(referente,''), descricao, 'Honorários advocatícios') WHERE referente IS NULL OR referente = ''");
+    } else {
+        $conn->query("UPDATE recibos SET referente = 'Honorários advocatícios' WHERE referente IS NULL OR referente = ''");
+    }
+    $conn->query("UPDATE recibos SET data_emissao = CURDATE() WHERE data_emissao IS NULL");
 }
 function gerarIdRecibo(mysqli $conn): string {
     $res = $conn->query("SELECT id FROM recibos ORDER BY CAST(SUBSTRING(id, 4) AS UNSIGNED) DESC LIMIT 1");

@@ -9,30 +9,28 @@ if (usuarioLogado()) {
     exit();
 }
 
-function sgl_tabela_existe(mysqli $conn, string $tabela): bool
-{
-    $t = $conn->real_escape_string($tabela);
-    $res = $conn->query("SHOW TABLES LIKE '{$t}'");
-    return $res && $res->num_rows > 0;
-}
-
-function sgl_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool
-{
-    $t = $conn->real_escape_string($tabela);
-    $c = $conn->real_escape_string($coluna);
-    $res = $conn->query("SHOW COLUMNS FROM `{$t}` LIKE '{$c}'");
-    return $res && $res->num_rows > 0;
-}
-
-function sgl_senha_valida(string $senhaDigitada, string $senhaBanco): bool
-{
-    if (password_verify($senhaDigitada, $senhaBanco)) return true;
-    // Compatibilidade com senha antiga em MD5: admin123 = 0192023a7bbd73250516f069df18b500
-    if (strlen($senhaBanco) === 32 && ctype_xdigit($senhaBanco) && hash_equals($senhaBanco, md5($senhaDigitada))) return true;
-    return false;
-}
-
 $mensagem_erro = '';
+
+function sgl_login_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool {
+    $tabela = preg_replace('/[^a-zA-Z0-9_]/', '', $tabela);
+    $coluna = $conn->real_escape_string($coluna);
+    $res = $conn->query("SHOW COLUMNS FROM `{$tabela}` LIKE '{$coluna}'");
+    return $res && $res->num_rows > 0;
+}
+
+function sgl_login_tabela_existe(mysqli $conn, string $tabela): bool {
+    $tabela = $conn->real_escape_string($tabela);
+    $res = $conn->query("SHOW TABLES LIKE '{$tabela}'");
+    return $res && $res->num_rows > 0;
+}
+
+function sgl_login_verificar_senha(string $senhaDigitada, string $hashSalvo): bool {
+    if (password_get_info($hashSalvo)['algo'] !== 0 && password_verify($senhaDigitada, $hashSalvo)) {
+        return true;
+    }
+    // Compatibilidade temporária com senha antiga em MD5.
+    return strlen($hashSalvo) === 32 && hash_equals(strtolower($hashSalvo), md5($senhaDigitada));
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $usuario = trim((string)($_POST['usuario'] ?? ''));
@@ -42,61 +40,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!validarTokenCsrf($csrf)) {
         $mensagem_erro = 'Sessão expirada ou formulário inválido. Atualize a página e tente novamente.';
     } elseif ($usuario === '' || $senha === '') {
-        $mensagem_erro = 'Por favor, preencha todos os campos.';
+        $mensagem_erro = 'Por favor, preencha usuário e senha.';
     } else {
-        $conn = conectar();
-        $tabela = sgl_tabela_existe($conn, 'usuarios_sistema') ? 'usuarios_sistema' : 'usuarios';
+        try {
+            $conn = conectar();
+            $tabela = sgl_login_tabela_existe($conn, 'usuarios_sistema') ? 'usuarios_sistema' : 'usuarios';
+            $campoStatus = sgl_login_coluna_existe($conn, $tabela, 'ativo') ? 'ativo' : (sgl_login_coluna_existe($conn, $tabela, 'status') ? 'status' : '');
+            $campoPerfil = sgl_login_coluna_existe($conn, $tabela, 'perfil') ? 'perfil' : (sgl_login_coluna_existe($conn, $tabela, 'nivel') ? 'nivel' : "'Administrador'");
+            $campoUsuario = sgl_login_coluna_existe($conn, $tabela, 'usuario') ? 'usuario' : 'email';
 
-        if (!sgl_tabela_existe($conn, $tabela)) {
-            $mensagem_erro = 'Tabela de usuários não encontrada. Execute a correção do banco de dados.';
-        } else {
-            $temAtivo = sgl_coluna_existe($conn, $tabela, 'ativo');
-            $temStatus = sgl_coluna_existe($conn, $tabela, 'status');
-            $temEmail = sgl_coluna_existe($conn, $tabela, 'email');
+            $whereStatus = '';
+            if ($campoStatus === 'ativo') {
+                $whereStatus = ' AND COALESCE(ativo,1)=1';
+            } elseif ($campoStatus === 'status') {
+                $whereStatus = " AND COALESCE(status,'Ativo') <> 'Inativo'";
+            }
 
-            $campoPerfil = sgl_coluna_existe($conn, $tabela, 'perfil') ? 'perfil' : "'Administrador' AS perfil";
-            $whereStatus = $temAtivo ? ' AND ativo = 1' : ($temStatus ? " AND status = 'Ativo'" : '');
-            $whereLogin = $temEmail ? '(usuario = ? OR email = ?)' : 'usuario = ?';
-
-            $sql = "SELECT id, nome, usuario, senha, {$campoPerfil} FROM `{$tabela}` WHERE {$whereLogin}{$whereStatus} LIMIT 1";
+            $sql = "SELECT id, nome, {$campoUsuario} AS usuario, senha, {$campoPerfil} AS perfil FROM `{$tabela}` WHERE `{$campoUsuario}` = ? {$whereStatus} LIMIT 1";
             $stmt = $conn->prepare($sql);
+            $stmt->bind_param('s', $usuario);
+            $stmt->execute();
+            $user = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
 
-            if (!$stmt) {
-                $mensagem_erro = 'Erro ao validar login: ' . $conn->error;
-            } else {
-                if ($temEmail) $stmt->bind_param('ss', $usuario, $usuario);
-                else $stmt->bind_param('s', $usuario);
-                $stmt->execute();
-                $result = $stmt->get_result();
-                $user = $result ? $result->fetch_assoc() : null;
-
-                if ($user && sgl_senha_valida($senha, (string)$user['senha'])) {
-                    if (!password_get_info((string)$user['senha'])['algo']) {
-                        $novoHash = password_hash($senha, PASSWORD_DEFAULT);
-                        $up = $conn->prepare("UPDATE `{$tabela}` SET senha = ? WHERE id = ?");
-                        if ($up) {
-                            $id = (int)$user['id'];
-                            $up->bind_param('si', $novoHash, $id);
-                            $up->execute();
-                            $up->close();
-                        }
-                    }
-
-                    session_regenerate_id(true);
-                    $_SESSION['user_id'] = (int)$user['id'];
-                    $_SESSION['username'] = $user['usuario'];
-                    $_SESSION['nome'] = $user['nome'];
-                    $_SESSION['perfil'] = $user['perfil'] ?: 'Administrador';
-                    $_SESSION['ultimo_acesso'] = time();
-                    header('Location: ../index.php');
-                    exit();
+            if ($user && sgl_login_verificar_senha($senha, (string)$user['senha'])) {
+                // Migra MD5 antigo para password_hash no primeiro login válido.
+                if (strlen((string)$user['senha']) === 32) {
+                    $novoHash = password_hash($senha, PASSWORD_DEFAULT);
+                    $upd = $conn->prepare("UPDATE `{$tabela}` SET senha=? WHERE id=?");
+                    $uid = (int)$user['id'];
+                    $upd->bind_param('si', $novoHash, $uid);
+                    $upd->execute();
+                    $upd->close();
                 }
 
-                $mensagem_erro = 'Usuário ou senha inválidos.';
-                $stmt->close();
+                session_regenerate_id(true);
+                $_SESSION['user_id'] = (int)$user['id'];
+                $_SESSION['username'] = (string)$user['usuario'];
+                $_SESSION['nome'] = (string)$user['nome'];
+                $_SESSION['perfil'] = (string)$user['perfil'];
+                $_SESSION['ultimo_acesso'] = time();
+
+                header('Location: ../index.php');
+                exit();
             }
+
+            $mensagem_erro = 'Usuário ou senha inválidos.';
+            $conn->close();
+        } catch (Throwable $e) {
+            $mensagem_erro = 'Erro ao validar login: ' . $e->getMessage();
         }
-        $conn->close();
     }
 }
 
@@ -107,43 +100,25 @@ $csrfToken = gerarTokenCsrf();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - SGL Advocacia</title>
+    <title>ROJEX.AI - Login</title>
     <style>
-        body { font-family: Arial, sans-serif; background: #f4f6f8; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .container { background: #fff; padding: 32px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.08); width: 390px; text-align: center; }
-        .logo { max-width: 180px; max-height: 90px; object-fit: contain; margin-bottom: 18px; }
-        h2 { color: #1a3c5e; margin: 0 0 6px; }
-        .sub { color:#6c757d; margin-bottom:20px; }
-        .form-group { margin-bottom: 15px; text-align: left; }
-        label { display: block; margin-bottom: 6px; color: #444; font-weight: 600; }
-        input[type="text"], input[type="password"] { width: 100%; padding: 12px; border: 1px solid #d7dce1; border-radius: 8px; box-sizing: border-box; }
-        button { width: 100%; padding: 12px; background: #2c6fad; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: 700; margin-top: 8px; }
-        button:hover { background: #1a3c5e; }
-        .mensagem-erro { color: #842029; background: #f8d7da; border: 1px solid #f5c2c7; padding: 12px; border-radius: 8px; margin-bottom: 15px; text-align: left; }
-        .ajuda { margin-top: 18px; color: #6c757d; font-size: 12px; }
+        *{box-sizing:border-box} body{font-family:Arial,sans-serif;background:linear-gradient(135deg,#0b2440,#f4f6f8 38%,#fff);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;padding:20px}.container{background:#fff;padding:34px;border-radius:18px;box-shadow:0 18px 50px rgba(5,22,45,.22);width:420px;text-align:center;border-top:5px solid #164f86}.logo{max-width:260px;max-height:180px;object-fit:contain;margin-bottom:8px}.brand{font-size:30px;font-weight:900;color:#0b3158;margin:6px 0 2px}.subtitle{color:#5f6b7a;font-size:14px;margin-bottom:22px}.form-group{margin-bottom:15px;text-align:left}label{display:block;margin-bottom:7px;color:#25364d;font-weight:700}input[type="text"],input[type="password"]{width:100%;padding:13px;border:1px solid #cfd8e3;border-radius:10px;font-size:15px}input:focus{outline:2px solid rgba(44,111,173,.25);border-color:#2c6fad}button{width:100%;padding:13px;background:#255d91;color:white;border:none;border-radius:10px;cursor:pointer;font-size:16px;font-weight:800;margin-top:8px}button:hover{background:#163e66}.mensagem-erro{color:#842029;background:#f8d7da;border:1px solid #f5c2c7;padding:12px;border-radius:10px;margin-bottom:16px;text-align:left}.rodape{margin-top:20px;color:#7b8794;font-size:12px}.selo{display:inline-block;background:#eef6ff;color:#164f86;border-radius:999px;padding:6px 12px;font-weight:700;font-size:12px;margin-bottom:4px}
     </style>
 </head>
 <body>
     <div class="container">
-        <img src="../assets/img/logo_custom.png" alt="SGL Advocacia" class="logo">
-        <h2>SGL Advocacia</h2>
-        <div class="sub">Acesso ao sistema</div>
-        <?php if ($mensagem_erro): ?>
-            <div class="mensagem-erro"><?= htmlspecialchars($mensagem_erro, ENT_QUOTES, 'UTF-8') ?></div>
-        <?php endif; ?>
+        <img src="../assets/img/rojex_ai.png" alt="ROJEX.AI" class="logo">
+        <div class="selo">Plataforma SGL Advocacia</div>
+        <div class="brand">ROJEX.AI</div>
+        <div class="subtitle">Inteligência Artificial para PMEs</div>
+        <?php if ($mensagem_erro): ?><div class="mensagem-erro"><?= htmlspecialchars($mensagem_erro, ENT_QUOTES, 'UTF-8') ?></div><?php endif; ?>
         <form action="login.php" method="POST" autocomplete="off">
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
-            <div class="form-group">
-                <label for="usuario">Usuário</label>
-                <input type="text" id="usuario" name="usuario" required autofocus>
-            </div>
-            <div class="form-group">
-                <label for="senha">Senha</label>
-                <input type="password" id="senha" name="senha" required>
-            </div>
+            <div class="form-group"><label for="usuario">Usuário</label><input type="text" id="usuario" name="usuario" required autofocus></div>
+            <div class="form-group"><label for="senha">Senha</label><input type="password" id="senha" name="senha" required></div>
             <button type="submit">Entrar</button>
         </form>
-        <div class="ajuda">Usuário padrão recuperado: admin</div>
+        <div class="rodape">Marca ROJEX.AI na entrada. Logo do escritório continua configurável dentro do sistema.</div>
     </div>
 </body>
 </html>

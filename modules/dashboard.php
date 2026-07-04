@@ -71,6 +71,43 @@ function queryRows(mysqli $conn, string $sql): array
     return $dados;
 }
 
+function dashboardTabelaExiste(mysqli $conn, string $tabela): bool
+{
+    $tabela = $conn->real_escape_string($tabela);
+    $res = $conn->query("SHOW TABLES LIKE '{$tabela}'");
+    return $res && $res->num_rows > 0;
+}
+
+function dashboardSaldoBanco(mysqli $conn, int $bancoId): float
+{
+    if ($bancoId <= 0) return 0.0;
+
+    $saldo = totalScalar($conn, "SELECT COALESCE(saldo_inicial,0) AS total FROM bancos_caixa WHERE id={$bancoId}");
+
+    $saldo += totalScalar($conn, "
+        SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total
+        FROM contas_receber
+        WHERE deletado=0
+          AND banco_id={$bancoId}
+          AND status IN ('Recebido','Pago','Quitada')
+    ");
+
+    $saldo -= totalScalar($conn, "
+        SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total
+        FROM contas_pagar
+        WHERE deletado=0
+          AND banco_id={$bancoId}
+          AND status IN ('Pago','Quitada')
+    ");
+
+    if (dashboardTabelaExiste($conn, 'bancos_movimentacoes')) {
+        $saldo += totalScalar($conn, "SELECT COALESCE(SUM(valor),0) AS total FROM bancos_movimentacoes WHERE banco_destino_id={$bancoId}");
+        $saldo -= totalScalar($conn, "SELECT COALESCE(SUM(valor),0) AS total FROM bancos_movimentacoes WHERE banco_origem_id={$bancoId}");
+    }
+
+    return $saldo;
+}
+
 function badgeStatus(string $status): string
 {
     $statusLimpo = trim($status);
@@ -151,28 +188,105 @@ $despesasPagasMes = totalScalar($conn, "
       AND COALESCE(data_pagamento, atualizado_em) BETWEEN '{$inicioMes}' AND '{$fimMes} 23:59:59'
 ");
 
-$entradasHoje = totalScalar($conn, "
-    SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END), 0) AS total
-    FROM contas_receber
-    WHERE deletado = 0
-      AND status IN ('Recebido','Pago','Quitada')
-      AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) = '{$hoje}'
-");
 
-$saidasHoje = totalScalar($conn, "
-    SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END), 0) AS total
-    FROM contas_pagar
-    WHERE deletado = 0
-      AND status IN ('Pago','Quitada')
-      AND COALESCE(data_pagamento, DATE(atualizado_em), data_vencimento) = '{$hoje}'
+// Fechamento profissional do CAIXA físico.
+// Entradas/saídas operacionais no caixa + transferências internas envolvendo contas do tipo CAIXA.
+$entradasCaixaRecebimentosHoje = totalScalar($conn, "
+    SELECT COALESCE(SUM(CASE WHEN cr.valor_pago > 0 THEN cr.valor_pago ELSE cr.valor END), 0) AS total
+    FROM contas_receber cr
+    LEFT JOIN bancos_caixa b ON b.id = cr.banco_id
+    WHERE cr.deletado = 0
+      AND cr.status IN ('Recebido','Pago','Quitada')
+      AND COALESCE(cr.data_recebimento, DATE(cr.atualizado_em), cr.data_vencimento) = '{$hoje}'
+      AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
 ");
+$saidasCaixaDespesasHoje = totalScalar($conn, "
+    SELECT COALESCE(SUM(CASE WHEN cp.valor_pago > 0 THEN cp.valor_pago ELSE cp.valor END), 0) AS total
+    FROM contas_pagar cp
+    LEFT JOIN bancos_caixa b ON b.id = cp.banco_id
+    WHERE cp.deletado = 0
+      AND cp.status IN ('Pago','Quitada')
+      AND COALESCE(cp.data_pagamento, DATE(cp.atualizado_em), cp.data_vencimento) = '{$hoje}'
+      AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
+");
+$transferenciasEntradaCaixaHoje = dashboardTabelaExiste($conn, 'bancos_movimentacoes') ? totalScalar($conn, "
+    SELECT COALESCE(SUM(m.valor),0) AS total
+    FROM bancos_movimentacoes m
+    LEFT JOIN bancos_caixa b ON b.id = m.banco_destino_id
+    WHERE m.data_movimento = '{$hoje}'
+      AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
+") : 0.0;
+$transferenciasSaidaCaixaHoje = dashboardTabelaExiste($conn, 'bancos_movimentacoes') ? totalScalar($conn, "
+    SELECT COALESCE(SUM(m.valor),0) AS total
+    FROM bancos_movimentacoes m
+    LEFT JOIN bancos_caixa b ON b.id = m.banco_origem_id
+    WHERE m.data_movimento = '{$hoje}'
+      AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
+") : 0.0;
 
+$entradasCaixaRecebimentosMes = totalScalar($conn, "
+    SELECT COALESCE(SUM(CASE WHEN cr.valor_pago > 0 THEN cr.valor_pago ELSE cr.valor END), 0) AS total
+    FROM contas_receber cr
+    LEFT JOIN bancos_caixa b ON b.id = cr.banco_id
+    WHERE cr.deletado = 0
+      AND cr.status IN ('Recebido','Pago','Quitada')
+      AND COALESCE(cr.data_recebimento, DATE(cr.atualizado_em), cr.data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
+      AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
+");
+$saidasCaixaDespesasMes = totalScalar($conn, "
+    SELECT COALESCE(SUM(CASE WHEN cp.valor_pago > 0 THEN cp.valor_pago ELSE cp.valor END), 0) AS total
+    FROM contas_pagar cp
+    LEFT JOIN bancos_caixa b ON b.id = cp.banco_id
+    WHERE cp.deletado = 0
+      AND cp.status IN ('Pago','Quitada')
+      AND COALESCE(cp.data_pagamento, DATE(cp.atualizado_em), cp.data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
+      AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
+");
+$transferenciasEntradaCaixaMes = dashboardTabelaExiste($conn, 'bancos_movimentacoes') ? totalScalar($conn, "
+    SELECT COALESCE(SUM(m.valor),0) AS total
+    FROM bancos_movimentacoes m
+    LEFT JOIN bancos_caixa b ON b.id = m.banco_destino_id
+    WHERE m.data_movimento BETWEEN '{$inicioMes}' AND '{$fimMes}'
+      AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
+") : 0.0;
+$transferenciasSaidaCaixaMes = dashboardTabelaExiste($conn, 'bancos_movimentacoes') ? totalScalar($conn, "
+    SELECT COALESCE(SUM(m.valor),0) AS total
+    FROM bancos_movimentacoes m
+    LEFT JOIN bancos_caixa b ON b.id = m.banco_origem_id
+    WHERE m.data_movimento BETWEEN '{$inicioMes}' AND '{$fimMes}'
+      AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
+") : 0.0;
+
+// Fechamento de caixa físico: inclui dinheiro que entra/sai do CAIXA e transferências CAIXA ↔ Banco/Outros.
+$entradasHoje = $entradasCaixaRecebimentosHoje + $transferenciasEntradaCaixaHoje;
+$saidasHoje = $saidasCaixaDespesasHoje + $transferenciasSaidaCaixaHoje;
 $saldoCaixaHoje = $entradasHoje - $saidasHoje;
-$entradasMes = $recebidoMes;
-$saidasMes = $despesasPagasMes;
+
+$entradasMes = $entradasCaixaRecebimentosMes + $transferenciasEntradaCaixaMes;
+$saidasMes = $saidasCaixaDespesasMes + $transferenciasSaidaCaixaMes;
 $saldoCaixaMes = $entradasMes - $saidasMes;
 
 $saldoEstimado = $recebidoMes + $totalAReceber - $despesasAbertas - $despesasPagasMes;
+
+// Saldo real por Caixa/Bancos, incluindo movimentações internas.
+// Transferência Caixa -> Banco não aumenta o total geral; apenas muda o saldo entre contas.
+$contasCaixaBancos = [];
+$saldoCaixaBancosTotal = 0.0;
+if (dashboardTabelaExiste($conn, 'bancos_caixa')) {
+    $contasCaixaBancos = queryRows($conn, "
+        SELECT id, nome, tipo, banco, conta, ativo
+        FROM bancos_caixa
+        WHERE COALESCE(ativo,1)=1
+        ORDER BY FIELD(tipo,'Caixa','PIX','Conta Corrente','Poupança','Cartão'), nome ASC
+        LIMIT 8
+    ");
+    foreach ($contasCaixaBancos as &$contaBancoDash) {
+        $contaBancoDash['saldo_atual'] = dashboardSaldoBanco($conn, (int)$contaBancoDash['id']);
+        $saldoCaixaBancosTotal += (float)$contaBancoDash['saldo_atual'];
+    }
+    unset($contaBancoDash);
+}
+$saldoEstimado = $saldoCaixaBancosTotal + $totalAReceber - $despesasAbertas;
 
 // ========================
 // Indicadores operacionais
@@ -404,13 +518,49 @@ if ($compromissosHoje > 0) {
                 <div class="card-body">
                     <h6 class="text-uppercase text-white-50 small mb-2">Saldo estimado</h6>
                     <h3 class="fw-bold mb-0"><?= moeda($saldoEstimado) ?></h3>
-                    <small class="text-white-50">Recebido + previsto - despesas abertas e pagas</small>
+                    <small class="text-white-50">Caixa/Bancos + previsto - despesas abertas</small>
                     <i class="bi bi-calculator fs-1 position-absolute end-0 bottom-0 m-3 opacity-25"></i>
                 </div>
             </div>
         </div>
     </div>
 
+
+    <?php if (!empty($contasCaixaBancos)): ?>
+    <div class="row g-3 mb-4">
+        <div class="col-12">
+            <div class="card border-0 shadow-sm">
+                <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-bank me-2"></i>Saldo real por Caixa/Bancos</span>
+                    <a href="?mod=financeiro&acao=movimentacao_bancos" class="btn btn-sm btn-outline-light">Abrir movimentação</a>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <?php foreach ($contasCaixaBancos as $cb): ?>
+                            <div class="col-xl-3 col-md-6">
+                                <div class="border rounded-3 p-3 h-100">
+                                    <div class="text-muted small text-uppercase"><?= h($cb['tipo'] ?: 'Conta') ?></div>
+                                    <div class="fw-bold"><?= h($cb['nome']) ?></div>
+                                    <div class="small text-muted"><?= h(trim(($cb['banco'] ?? '') . ' ' . ($cb['conta'] ?? '')) ?: 'Caixa físico') ?></div>
+                                    <div class="fs-5 fw-bold mt-2 <?= ((float)$cb['saldo_atual'] >= 0) ? 'text-success' : 'text-danger' ?>"><?= moeda($cb['saldo_atual']) ?></div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                        <div class="col-xl-3 col-md-6">
+                            <div class="border rounded-3 p-3 h-100 bg-light">
+                                <div class="text-muted small text-uppercase">Total disponível</div>
+                                <div class="fw-bold">Caixa + Bancos</div>
+                                <div class="small text-muted">Inclui transferências internas</div>
+                                <div class="fs-5 fw-bold mt-2 <?= $saldoCaixaBancosTotal >= 0 ? 'text-primary' : 'text-danger' ?>"><?= moeda($saldoCaixaBancosTotal) ?></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="small text-muted mt-3">Transferências entre Caixa e Banco não aumentam o saldo total; elas apenas mudam o dinheiro de uma conta para outra.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <?php endif; ?>
 
     <div class="row g-3 mb-4">
         <div class="col-lg-6">
@@ -425,7 +575,7 @@ if ($compromissosHoje > 0) {
                         <div class="col-4"><small class="text-muted text-uppercase">Saídas</small><div class="fw-bold text-danger fs-5"><?= moeda($saidasHoje) ?></div></div>
                         <div class="col-4"><small class="text-muted text-uppercase">Saldo</small><div class="fw-bold <?= $saldoCaixaHoje >= 0 ? 'text-primary' : 'text-danger' ?> fs-5"><?= moeda($saldoCaixaHoje) ?></div></div>
                     </div>
-                    <div class="small text-muted mt-3">Baseado em recebimentos e pagamentos confirmados em <?= date('d/m/Y') ?>.</div>
+                    <div class="small text-muted mt-3">Inclui recebimentos/despesas em CAIXA e transferências CAIXA ↔ Banco em <?= date('d/m/Y') ?>.</div>
                 </div>
             </div>
         </div>
@@ -441,7 +591,7 @@ if ($compromissosHoje > 0) {
                         <div class="col-4"><small class="text-muted text-uppercase">Saídas</small><div class="fw-bold text-danger fs-5"><?= moeda($saidasMes) ?></div></div>
                         <div class="col-4"><small class="text-muted text-uppercase">Resultado</small><div class="fw-bold <?= $saldoCaixaMes >= 0 ? 'text-primary' : 'text-danger' ?> fs-5"><?= moeda($saldoCaixaMes) ?></div></div>
                     </div>
-                    <div class="small text-muted mt-3">Fechamento consolidado do mês <?= date('m/Y') ?>.</div>
+                    <div class="small text-muted mt-3">Inclui movimentações internas do CAIXA no mês <?= date('m/Y') ?>.</div>
                 </div>
             </div>
         </div>

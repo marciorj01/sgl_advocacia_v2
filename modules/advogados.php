@@ -5,6 +5,19 @@
  */
 
 $conn = conectar();
+
+// Correção preventiva Fase 5: garante colunas usadas por este módulo sem apagar dados.
+@$conn->query("ALTER TABLE advogados ADD COLUMN IF NOT EXISTS cpf VARCHAR(20) NULL AFTER nome");
+@$conn->query("ALTER TABLE advogados ADD COLUMN IF NOT EXISTS oab_uf CHAR(2) NULL AFTER oab");
+@$conn->query("ALTER TABLE advogados ADD COLUMN IF NOT EXISTS deletado TINYINT(1) NOT NULL DEFAULT 0 AFTER observacoes");
+
+function adv_scalar(mysqli $conn, string $sql, int $default = 0): int {
+    $res = @$conn->query($sql);
+    if (!$res) { return $default; }
+    $row = $res->fetch_assoc();
+    return (int)($row['total'] ?? $default);
+}
+
 $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
 
@@ -326,10 +339,10 @@ if ($especialidadeFiltro !== '') {
 
 $whereSql = 'WHERE ' . implode(' AND ', $where);
 
-$totalAdvogados = (int)($conn->query("SELECT COUNT(*) AS total FROM advogados WHERE deletado = 0")->fetch_assoc()['total'] ?? 0);
-$ativos = (int)($conn->query("SELECT COUNT(*) AS total FROM advogados WHERE deletado = 0 AND status = 'Ativo'")->fetch_assoc()['total'] ?? 0);
-$inativos = (int)($conn->query("SELECT COUNT(*) AS total FROM advogados WHERE deletado = 0 AND status = 'Inativo'")->fetch_assoc()['total'] ?? 0);
-$novosMes = (int)($conn->query("SELECT COUNT(*) AS total FROM advogados WHERE deletado = 0 AND data_cadastro >= DATE_FORMAT(CURDATE(), '%Y-%m-01')")->fetch_assoc()['total'] ?? 0);
+$totalAdvogados = adv_scalar($conn, "SELECT COUNT(*) AS total FROM advogados WHERE COALESCE(deletado,0) = 0");
+$ativos = adv_scalar($conn, "SELECT COUNT(*) AS total FROM advogados WHERE COALESCE(deletado,0) = 0 AND status = 'Ativo'");
+$inativos = adv_scalar($conn, "SELECT COUNT(*) AS total FROM advogados WHERE COALESCE(deletado,0) = 0 AND status = 'Inativo'");
+$novosMes = adv_scalar($conn, "SELECT COUNT(*) AS total FROM advogados WHERE COALESCE(deletado,0) = 0 AND data_cadastro >= DATE_FORMAT(CURDATE(), '%Y-%m-01')");
 
 $especialidadesPadrao = [
     'Administrativo',
@@ -371,11 +384,14 @@ $sqlLista = "SELECT id, nome, cpf, oab, oab_uf, especialidade, telefone, email, 
              ORDER BY status ASC, nome ASC
              LIMIT 200";
 $stmtLista = $conn->prepare($sqlLista);
-if ($params) {
-    $stmtLista->bind_param($types, ...$params);
+$lista = false;
+if ($stmtLista) {
+    if ($params) {
+        $stmtLista->bind_param($types, ...$params);
+    }
+    $stmtLista->execute();
+    $lista = $stmtLista->get_result();
 }
-$stmtLista->execute();
-$lista = $stmtLista->get_result();
 $encontrados = $lista ? $lista->num_rows : 0;
 ?>
 
@@ -462,7 +478,7 @@ $encontrados = $lista ? $lista->num_rows : 0;
             </thead>
             <tbody>
             <?php if ($lista && $lista->num_rows > 0): ?>
-                <?php while ($row = $lista->fetch_assoc()): ?>
+                <?php if ($lista): while ($row = $lista->fetch_assoc()): ?>
                 <tr>
                     <td class="fw-semibold"><?= h($row['id']) ?></td>
                     <td>
@@ -483,7 +499,7 @@ $encontrados = $lista ? $lista->num_rows : 0;
                         <a href="?mod=advogados&excluir=<?= urlencode($row['id']) ?>&csrf_token=<?= urlencode($csrf) ?>" class="btn btn-sm btn-danger" onclick="return confirm('Deseja mover este advogado para a lixeira?')"><i class="bi bi-trash"></i></a>
                     </td>
                 </tr>
-                <?php endwhile; ?>
+                <?php endwhile; endif; ?>
             <?php else: ?>
                 <tr><td colspan="8" class="text-center text-muted py-5">Nenhum advogado encontrado.</td></tr>
             <?php endif; ?>

@@ -67,6 +67,15 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
         INDEX idx_gerados_cliente (cliente_id),
         INDEX idx_gerados_processo (processo_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // Compatibilidade com bancos restaurados/antigos: garante colunas usadas abaixo.
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'modelo_id', "modelo_id INT NOT NULL DEFAULT 0 AFTER id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'cliente_id', "cliente_id INT NULL AFTER modelo_id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'processo_id', "processo_id INT NULL AFTER cliente_id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'titulo', "titulo VARCHAR(180) NOT NULL DEFAULT 'Documento gerado' AFTER processo_id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'conteudo_final', "conteudo_final LONGTEXT NULL AFTER titulo");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'gerado_por', "gerado_por INT NULL AFTER conteudo_final");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'gerado_em', "gerado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER gerado_por");
 }
 function sgl_modelos_codigo(mysqli $conn): string {
     $res = $conn->query("SELECT codigo FROM modelos_documentos WHERE codigo LIKE 'MOD%' ORDER BY CAST(SUBSTRING(codigo,4) AS UNSIGNED) DESC LIMIT 1");

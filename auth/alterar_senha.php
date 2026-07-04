@@ -8,6 +8,54 @@ exigirLogin('login.php');
 $mensagem = '';
 $mensagem_tipo = '';
 
+function sglTabelaExisteSenha(mysqli $conn, string $tabela): bool
+{
+    $stmt = $conn->prepare("SELECT COUNT(*) AS total FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+    $stmt->bind_param('s', $tabela);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return (int)($row['total'] ?? 0) > 0;
+}
+
+function sglColunaExisteSenha(mysqli $conn, string $tabela, string $coluna): bool
+{
+    $stmt = $conn->prepare("SELECT COUNT(*) AS total FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?");
+    $stmt->bind_param('ss', $tabela, $coluna);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return (int)($row['total'] ?? 0) > 0;
+}
+
+function sglObterTabelaUsuariosSenha(mysqli $conn): string
+{
+    if (!empty($_SESSION['tabela_usuarios']) && sglTabelaExisteSenha($conn, (string)$_SESSION['tabela_usuarios'])) {
+        return (string)$_SESSION['tabela_usuarios'];
+    }
+
+    if (sglTabelaExisteSenha($conn, 'usuarios_sistema')) {
+        return 'usuarios_sistema';
+    }
+
+    if (sglTabelaExisteSenha($conn, 'usuarios')) {
+        return 'usuarios';
+    }
+
+    throw new RuntimeException('Nenhuma tabela de usuários foi encontrada.');
+}
+
+function sglSenhaConfereSenha(string $senhaDigitada, string $hashBanco): bool
+{
+    if (password_get_info($hashBanco)['algo'] !== 0 && password_verify($senhaDigitada, $hashBanco)) {
+        return true;
+    }
+
+    return hash_equals(strtolower($hashBanco), md5($senhaDigitada));
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $senha_atual = (string)($_POST['senha_atual'] ?? '');
     $nova_senha = (string)($_POST['nova_senha'] ?? '');
@@ -30,16 +78,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         try {
             $conn = conectar();
-            $stmt = $conn->prepare('SELECT senha FROM usuarios WHERE id = ? AND ativo = 1 LIMIT 1');
+            $tabelaUsuarios = sglObterTabelaUsuariosSenha($conn);
+            $temAtivo = sglColunaExisteSenha($conn, $tabelaUsuarios, 'ativo');
+            $temStatus = sglColunaExisteSenha($conn, $tabelaUsuarios, 'status');
+            $temAtualizadoEm = sglColunaExisteSenha($conn, $tabelaUsuarios, 'atualizado_em');
+
+            $whereStatus = '';
+            if ($temAtivo) {
+                $whereStatus = ' AND ativo = 1';
+            } elseif ($temStatus) {
+                $whereStatus = " AND status = 'Ativo'";
+            }
+
+            $stmt = $conn->prepare("SELECT senha FROM `$tabelaUsuarios` WHERE id = ? $whereStatus LIMIT 1");
             $stmt->bind_param('i', $user_id);
             $stmt->execute();
             $user = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
 
-            if ($user && password_verify($senha_atual, $user['senha'])) {
+            if ($user && sglSenhaConfereSenha($senha_atual, (string)$user['senha'])) {
                 $nova_senha_hash = password_hash($nova_senha, PASSWORD_DEFAULT);
-                $stmt_update = $conn->prepare('UPDATE usuarios SET senha = ?, atualizado_em = NOW() WHERE id = ?');
+
+                if ($temAtualizadoEm) {
+                    $stmt_update = $conn->prepare("UPDATE `$tabelaUsuarios` SET senha = ?, atualizado_em = NOW() WHERE id = ?");
+                } else {
+                    $stmt_update = $conn->prepare("UPDATE `$tabelaUsuarios` SET senha = ? WHERE id = ?");
+                }
+
                 $stmt_update->bind_param('si', $nova_senha_hash, $user_id);
                 $stmt_update->execute();
+                $stmt_update->close();
 
                 $mensagem = 'Senha alterada com sucesso!';
                 $mensagem_tipo = 'success';
@@ -47,8 +115,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $mensagem = 'Senha atual incorreta.';
                 $mensagem_tipo = 'error';
             }
+
+            $conn->close();
         } catch (Throwable $e) {
-            $mensagem = 'Erro ao alterar a senha. Verifique a estrutura do banco de dados.';
+            $mensagem = 'Erro ao alterar a senha: ' . $e->getMessage();
             $mensagem_tipo = 'error';
         }
     }
@@ -83,7 +153,7 @@ $csrfToken = gerarTokenCsrf();
         <?php if ($mensagem): ?>
             <div class="mensagem <?= htmlspecialchars($mensagem_tipo, ENT_QUOTES, 'UTF-8') ?>"><?= htmlspecialchars($mensagem, ENT_QUOTES, 'UTF-8') ?></div>
         <?php endif; ?>
-        <form action="alterar_senha.php" method="POST">
+        <form method="POST" autocomplete="off">
             <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
             <div class="form-group">
                 <label for="senha_atual">Senha atual</label>
@@ -91,15 +161,15 @@ $csrfToken = gerarTokenCsrf();
             </div>
             <div class="form-group">
                 <label for="nova_senha">Nova senha</label>
-                <input type="password" id="nova_senha" name="nova_senha" minlength="8" required>
+                <input type="password" id="nova_senha" name="nova_senha" required minlength="8">
             </div>
             <div class="form-group">
                 <label for="confirmar_nova_senha">Confirmar nova senha</label>
-                <input type="password" id="confirmar_nova_senha" name="confirmar_nova_senha" minlength="8" required>
+                <input type="password" id="confirmar_nova_senha" name="confirmar_nova_senha" required minlength="8">
             </div>
-            <button type="submit">Alterar Senha</button>
+            <button type="submit">Salvar nova senha</button>
         </form>
-        <a href="../index.php" class="back-link">Voltar para o sistema</a>
+        <a class="back-link" href="../index.php">Voltar ao sistema</a>
     </div>
 </body>
 </html>

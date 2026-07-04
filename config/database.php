@@ -1,45 +1,61 @@
 <?php
 /**
- * SGL Advocacia - Conexão com Banco de Dados
- * Correção emergencial Login / usuários_sistema
+ * config/database.php
+ * Conexão principal do Sistema SGL Advocacia.
+ *
+ * Ambiente local padrão: XAMPP + MySQL/MariaDB.
+ * Ambiente produção: configurar variáveis de ambiente na Hostinger, quando possível.
  */
 
 declare(strict_types=1);
 
-$DB_HOST = 'localhost';
-$DB_NAME = 'sistema_sgl';
-$DB_USER = 'root';
-$DB_PASS = '';
-$DB_CHARSET = 'utf8mb4';
+date_default_timezone_set('America/Sao_Paulo');
 
-if (!defined('DB_HOST')) define('DB_HOST', $DB_HOST);
-if (!defined('DB_NAME')) define('DB_NAME', $DB_NAME);
-if (!defined('DB_USER')) define('DB_USER', $DB_USER);
-if (!defined('DB_PASS')) define('DB_PASS', $DB_PASS);
-if (!defined('DB_CHARSET')) define('DB_CHARSET', $DB_CHARSET);
+$hostAtual = $_SERVER['HTTP_HOST'] ?? 'localhost';
+$ambienteLocal = in_array($hostAtual, ['localhost', '127.0.0.1'], true)
+    || str_starts_with($hostAtual, 'localhost:')
+    || str_starts_with($hostAtual, '127.0.0.1:');
 
-function sgl_conectar(): PDO
+if (!defined('DB_HOST')) {
+    define('DB_HOST', getenv('SGL_DB_HOST') ?: 'localhost');
+}
+
+if (!defined('DB_USER')) {
+    define('DB_USER', getenv('SGL_DB_USER') ?: ($ambienteLocal ? 'root' : 'ALTERE_USUARIO_HOSTINGER'));
+}
+
+if (!defined('DB_PASS')) {
+    define('DB_PASS', getenv('SGL_DB_PASS') ?: ($ambienteLocal ? '' : 'ALTERE_SENHA_HOSTINGER'));
+}
+
+if (!defined('DB_NAME')) {
+    define('DB_NAME', getenv('SGL_DB_NAME') ?: ($ambienteLocal ? 'sistema_sgl' : 'ALTERE_BANCO_HOSTINGER'));
+}
+
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+
+function conectar(): mysqli
 {
-    static $pdo = null;
-
-    if ($pdo instanceof PDO) {
-        return $pdo;
-    }
-
-    $dsn = 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=' . DB_CHARSET;
-
     try {
-        $pdo = new PDO($dsn, DB_USER, DB_PASS, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]);
-        return $pdo;
-    } catch (PDOException $e) {
-        die('Erro ao conectar ao banco de dados. Verifique o XAMPP/MySQL e o arquivo config/database.php. Detalhe: ' . $e->getMessage());
+        $conn = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+        $conn->set_charset('utf8mb4');
+        return $conn;
+    } catch (mysqli_sql_exception $e) {
+        http_response_code(500);
+        die('<div style="font-family:Arial,sans-serif;padding:30px;color:#842029;background:#f8d7da;border:1px solid #f5c2c7;border-radius:8px;max-width:720px;margin:40px auto;">
+            <h3>Erro de conexão com o banco de dados</h3>
+            <p>Verifique as configurações em <strong>config/database.php</strong> e confirme se o banco <strong>' . htmlspecialchars(DB_NAME, ENT_QUOTES, 'UTF-8') . '</strong> existe.</p>
+            <p><strong>Detalhe técnico:</strong> ' . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8') . '</p>
+        </div>');
     }
 }
 
-$pdo = sgl_conectar();
-$conn = $pdo; // compatibilidade com arquivos antigos do sistema
-$conexao = $pdo; // compatibilidade adicional
+function getBaseUrl(): string
+{
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') === '443');
+    $scheme = $https ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $scriptDir = str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? ''));
+    $scriptDir = rtrim($scriptDir, '/');
+    return $scheme . '://' . $host . ($scriptDir === '' || $scriptDir === '/' ? '' : $scriptDir);
+}

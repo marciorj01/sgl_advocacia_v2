@@ -25,9 +25,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $conn = conectar();
 
             $stmt = $conn->prepare(
-                "SELECT id, nome, usuario, senha, perfil
-                 FROM usuarios
-                 WHERE usuario = ? AND ativo = 1
+                "SELECT id, nome, usuario, senha, perfil, status
+                 FROM usuarios_sistema
+                 WHERE usuario = ?
                  LIMIT 1"
             );
             $stmt->bind_param('s', $usuario);
@@ -35,7 +35,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $result = $stmt->get_result();
             $user = $result->fetch_assoc();
 
-            if ($user && password_verify($senha, $user['senha'])) {
+            if ($user && md5($senha) === $user['senha'] && strtolower($user['status']) === 'ativo') {
                 session_regenerate_id(true);
 
                 $_SESSION['user_id'] = (int)$user['id'];

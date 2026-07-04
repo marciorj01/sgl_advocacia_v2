@@ -127,6 +127,9 @@ function financeiroGarantirEstrutura(mysqli $conn): void
     financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'destino_outros', "destino_outros VARCHAR(150) NULL");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'banco_id', "banco_id INT NULL");
     financeiroAdicionarColuna($conn, 'contas_receber', 'banco_id', "banco_id INT NULL");
+    financeiroAdicionarColuna($conn, 'bancos_caixa', 'titularidade', "titularidade VARCHAR(40) NOT NULL DEFAULT 'Pessoa Jurídica'");
+    financeiroAdicionarColuna($conn, 'bancos_caixa', 'finalidade', "finalidade VARCHAR(120) NULL");
+    financeiroAdicionarColuna($conn, 'bancos_caixa', 'observacoes', "observacoes TEXT NULL");
 }
 
 financeiroGarantirEstrutura($conn);
@@ -924,74 +927,177 @@ if ($acao === 'caixa') {
     if ($periodo === 'mes') {
         $inicioCaixa = $mesBase . '-01';
         $fimCaixa = date('Y-m-t', strtotime($inicioCaixa));
-        $tituloCaixa = 'Fechamento de Caixa Mensal';
+        $tituloCaixa = 'Relatório de Fechamento Mensal';
         $subtituloCaixa = date('m/Y', strtotime($inicioCaixa));
     } else {
         $inicioCaixa = $fimCaixa = $dataBase;
-        $tituloCaixa = 'Fechamento de Caixa do Dia';
+        $tituloCaixa = 'Relatório de Fechamento Diário';
         $subtituloCaixa = date('d/m/Y', strtotime($dataBase));
     }
+
     $entradas = [];
     $saidas = [];
-    $sqlEntradas = "SELECT cr.id, cr.descricao, cr.valor_pago, cr.valor, cr.data_recebimento, cr.forma_recebimento, cr.status, c.nome AS cliente_nome, b.nome AS banco_nome FROM contas_receber cr LEFT JOIN clientes c ON c.id=cr.cliente_id LEFT JOIN bancos_caixa b ON b.id=cr.banco_id WHERE cr.deletado=0 AND cr.status IN ('Recebido','Pago','Quitada') AND cr.data_recebimento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cr.data_recebimento ASC, cr.id ASC";
-    $res = $conn->query($sqlEntradas); if ($res) while($r=$res->fetch_assoc()) $entradas[]=$r;
-    $sqlSaidas = "SELECT cp.id, cp.descricao, cp.categoria, cp.fornecedor, cp.valor_pago, cp.valor, cp.data_pagamento, cp.forma_pagamento, cp.status, b.nome AS banco_nome FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id=cp.banco_id WHERE cp.deletado=0 AND cp.status IN ('Pago','Quitada') AND cp.data_pagamento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cp.data_pagamento ASC, cp.id ASC";
-    $res = $conn->query($sqlSaidas); if ($res) while($r=$res->fetch_assoc()) $saidas[]=$r;
+    $transferencias = [];
 
-    // Movimentações internas envolvendo CAIXA físico entram no fechamento profissional:
-    // CAIXA -> Banco/Outros = saída do caixa; Banco/Outros -> CAIXA = entrada do caixa.
-    $sqlTransfEntradasCaixa = "SELECT m.id,
-            CONCAT('Transferência interna: ', COALESCE(bo.nome, m.origem_outros, 'OUTROS'), ' → ', COALESCE(bd.nome, m.destino_outros, 'CAIXA')) AS descricao,
-            m.valor AS valor_pago,
-            m.valor,
-            m.data_movimento AS data_recebimento,
-            'Movimentação interna' AS forma_recebimento,
-            'Transferência' AS status,
-            'Transferência interna' AS cliente_nome,
-            COALESCE(bd.nome, 'CAIXA') AS banco_nome
+    $isCaixa = function($nome, $tipo): bool {
+        $n = mb_strtoupper(trim((string)$nome), 'UTF-8');
+        $t = mb_strtoupper(trim((string)$tipo), 'UTF-8');
+        return $n === 'CAIXA' || $t === 'CAIXA' || str_contains($n, 'CAIXA');
+    };
+
+    // Entradas operacionais: recebimentos reais de clientes/honorários/contas.
+    $sqlEntradas = "SELECT cr.id, cr.descricao, cr.valor_pago, cr.valor, cr.data_recebimento, cr.forma_recebimento, cr.status, c.nome AS cliente_nome, b.nome AS banco_nome, b.tipo AS banco_tipo FROM contas_receber cr LEFT JOIN clientes c ON c.id=cr.cliente_id LEFT JOIN bancos_caixa b ON b.id=cr.banco_id WHERE cr.deletado=0 AND cr.status IN ('Recebido','Pago','Quitada') AND cr.data_recebimento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cr.data_recebimento ASC, cr.id ASC";
+    $res = $conn->query($sqlEntradas);
+    if ($res) while($r=$res->fetch_assoc()) $entradas[]=$r;
+
+    // Saídas operacionais: despesas reais pagas.
+    $sqlSaidas = "SELECT cp.id, cp.descricao, cp.categoria, cp.fornecedor, cp.valor_pago, cp.valor, cp.data_pagamento, cp.forma_pagamento, cp.status, b.nome AS banco_nome, b.tipo AS banco_tipo FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id=cp.banco_id WHERE cp.deletado=0 AND cp.status IN ('Pago','Quitada') AND cp.data_pagamento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cp.data_pagamento ASC, cp.id ASC";
+    $res = $conn->query($sqlSaidas);
+    if ($res) while($r=$res->fetch_assoc()) $saidas[]=$r;
+
+    // Transferências internas: caixa <-> bancos, banco <-> banco, banco/caixa <-> outros.
+    $sqlTransferencias = "
+        SELECT m.*, 
+               bo.nome AS origem_nome_real, bo.tipo AS origem_tipo,
+               bd.nome AS destino_nome_real, bd.tipo AS destino_tipo,
+               COALESCE(bo.nome, m.origem_outros, 'OUTROS') AS origem_nome,
+               COALESCE(bd.nome, m.destino_outros, 'OUTROS') AS destino_nome
         FROM bancos_movimentacoes m
         LEFT JOIN bancos_caixa bo ON bo.id = m.banco_origem_id
         LEFT JOIN bancos_caixa bd ON bd.id = m.banco_destino_id
         WHERE m.data_movimento BETWEEN '$inicioCaixa' AND '$fimCaixa'
-          AND m.banco_destino_id IS NOT NULL
-          AND (UPPER(COALESCE(bd.tipo,''))='CAIXA' OR UPPER(COALESCE(bd.nome,''))='CAIXA')";
-    $res = $conn->query($sqlTransfEntradasCaixa); if ($res) while($r=$res->fetch_assoc()) $entradas[]=$r;
+        ORDER BY m.data_movimento ASC, m.id ASC
+    ";
+    $res = $conn->query($sqlTransferencias);
+    if ($res) while($r=$res->fetch_assoc()) $transferencias[]=$r;
 
-    $sqlTransfSaidasCaixa = "SELECT m.id,
-            CONCAT('Transferência interna: ', COALESCE(bo.nome, 'CAIXA'), ' → ', COALESCE(bd.nome, m.destino_outros, 'OUTROS')) AS descricao,
-            'Transferência interna' AS categoria,
-            COALESCE(bd.nome, m.destino_outros, 'OUTROS') AS fornecedor,
-            m.valor AS valor_pago,
-            m.valor,
-            m.data_movimento AS data_pagamento,
-            'Movimentação interna' AS forma_pagamento,
-            'Transferência' AS status,
-            COALESCE(bo.nome, 'CAIXA') AS banco_nome
-        FROM bancos_movimentacoes m
-        LEFT JOIN bancos_caixa bo ON bo.id = m.banco_origem_id
-        LEFT JOIN bancos_caixa bd ON bd.id = m.banco_destino_id
-        WHERE m.data_movimento BETWEEN '$inicioCaixa' AND '$fimCaixa'
-          AND m.banco_origem_id IS NOT NULL
-          AND (UPPER(COALESCE(bo.tipo,''))='CAIXA' OR UPPER(COALESCE(bo.nome,''))='CAIXA')";
-    $res = $conn->query($sqlTransfSaidasCaixa); if ($res) while($r=$res->fetch_assoc()) $saidas[]=$r;
+    $totalEntradasOperacionais = 0.0;
+    $totalSaidasOperacionais = 0.0;
+    $entradasCaixa = 0.0;
+    $entradasBancos = 0.0;
+    $saidasCaixa = 0.0;
+    $saidasBancos = 0.0;
 
-    $totalEntradas = array_sum(array_map(fn($r)=>(float)($r['valor_pago'] ?: $r['valor']), $entradas));
-    $totalSaidas = array_sum(array_map(fn($r)=>(float)($r['valor_pago'] ?: $r['valor']), $saidas));
-    $saldoCaixa = $totalEntradas - $totalSaidas;
+    foreach ($entradas as $r) {
+        $valor = (float)($r['valor_pago'] ?: $r['valor']);
+        $totalEntradasOperacionais += $valor;
+        if ($isCaixa($r['banco_nome'] ?? '', $r['banco_tipo'] ?? '')) $entradasCaixa += $valor; else $entradasBancos += $valor;
+    }
+    foreach ($saidas as $r) {
+        $valor = (float)($r['valor_pago'] ?: $r['valor']);
+        $totalSaidasOperacionais += $valor;
+        if ($isCaixa($r['banco_nome'] ?? '', $r['banco_tipo'] ?? '')) $saidasCaixa += $valor; else $saidasBancos += $valor;
+    }
+
+    $transfEntradaCaixa = 0.0;
+    $transfSaidaCaixa = 0.0;
+    $transfEntradaBancos = 0.0;
+    $transfSaidaBancos = 0.0;
+    $totalTransferenciasInternas = 0.0;
+
+    foreach ($transferencias as $r) {
+        $valor = (float)($r['valor'] ?? 0);
+        if ($valor <= 0) continue;
+        $totalTransferenciasInternas += $valor;
+        $origemCaixa = $isCaixa($r['origem_nome_real'] ?? $r['origem_nome'] ?? '', $r['origem_tipo'] ?? '');
+        $destinoCaixa = $isCaixa($r['destino_nome_real'] ?? $r['destino_nome'] ?? '', $r['destino_tipo'] ?? '');
+        $origemBanco = !empty($r['banco_origem_id']) && !$origemCaixa;
+        $destinoBanco = !empty($r['banco_destino_id']) && !$destinoCaixa;
+        if ($destinoCaixa) $transfEntradaCaixa += $valor;
+        if ($origemCaixa) $transfSaidaCaixa += $valor;
+        if ($destinoBanco) $transfEntradaBancos += $valor;
+        if ($origemBanco) $transfSaidaBancos += $valor;
+    }
+
+    $resultadoOperacional = $totalEntradasOperacionais - $totalSaidasOperacionais;
+    $saldoPeriodoCaixa = $entradasCaixa - $saidasCaixa + $transfEntradaCaixa - $transfSaidaCaixa;
+    $saldoPeriodoBancos = $entradasBancos - $saidasBancos + $transfEntradaBancos - $transfSaidaBancos;
+    $saldoPeriodoGeral = $saldoPeriodoCaixa + $saldoPeriodoBancos;
     ?>
     <div class="container-fluid caixa-relatorio">
+        <style>
+            .relatorio-print-head{display:none;}
+            .kpi-card{border:1px solid #e5e7eb;border-radius:12px;background:#fff;box-shadow:0 4px 14px rgba(15,23,42,.06);height:100%;}
+            .kpi-card .small-title{font-size:.72rem;text-transform:uppercase;color:#6b7280;letter-spacing:.03em;}
+            .kpi-card .big-number{font-size:1.65rem;font-weight:800;line-height:1.1;}
+            .table-relatorio th{font-size:.78rem;text-transform:uppercase;letter-spacing:.02em;}
+            @media print{
+                body{background:#fff!important;color:#111!important;}
+                .sidebar,.sgl-sidebar,.no-print,nav,header,.navbar,.topbar,.sgl-topbar{display:none!important;}
+                main,.content,.container-fluid{margin:0!important;padding:0!important;width:100%!important;max-width:100%!important;}
+                .caixa-relatorio{font-family:Arial, sans-serif;font-size:11px;color:#111;}
+                .relatorio-print-head{display:block!important;text-align:center;border-bottom:2px solid #111;margin-bottom:12px;padding-bottom:8px;}
+                .relatorio-print-head h1{font-size:18px;margin:0;font-weight:800;}
+                .relatorio-print-head p{font-size:11px;margin:2px 0;color:#333;}
+                .card,.kpi-card{box-shadow:none!important;border:1px solid #ccc!important;border-radius:4px!important;break-inside:avoid;}
+                .card-header{background:#f1f5f9!important;color:#111!important;border-bottom:1px solid #ccc!important;font-weight:700!important;}
+                .table{font-size:10px!important;}
+                .table th,.table td{padding:5px!important;border-color:#ddd!important;}
+                .row{display:flex!important;flex-wrap:wrap!important;}
+                .col-md-2,.col-md-3,.col-md-4{flex:0 0 auto!important;width:33.333%!important;margin-bottom:8px!important;}
+                .kpi-card .big-number{font-size:16px!important;}
+                @page{size:A4 portrait;margin:12mm;}
+            }
+        </style>
+
+        <div class="relatorio-print-head">
+            <h1>ROJEX.AI / SGL Advocacia</h1>
+            <p><?= htmlspecialchars($tituloCaixa) ?> — Período: <?= htmlspecialchars($subtituloCaixa) ?></p>
+            <p>Emitido em <?= date('d/m/Y H:i') ?> por <?= htmlspecialchars($_SESSION['nome'] ?? $_SESSION['usuario'] ?? 'Usuário') ?></p>
+        </div>
+
         <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3 no-print">
-            <div><h2 class="fw-bold text-primary"><i class="bi bi-cash-register"></i> <?= $tituloCaixa ?></h2><p class="text-muted mb-0">Relatório de entradas, saídas e saldo do período: <strong><?= $subtituloCaixa ?></strong></p></div>
+            <div>
+                <h2 class="fw-bold text-primary"><i class="bi bi-cash-register"></i> <?= $tituloCaixa ?></h2>
+                <p class="text-muted mb-0">Relatório profissional de entradas, saídas, transferências internas, caixa físico e saldos bancários: <strong><?= $subtituloCaixa ?></strong></p>
+            </div>
             <div class="d-flex gap-2"><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir / Salvar PDF</button><a href="?mod=dashboard" class="btn btn-outline-secondary">Voltar</a></div>
         </div>
         <form class="card card-body shadow-sm border-0 mb-3 no-print" method="get">
             <input type="hidden" name="mod" value="financeiro"><input type="hidden" name="acao" value="caixa"><input type="hidden" name="periodo" value="<?= htmlspecialchars($periodo) ?>">
             <div class="row g-2 align-items-end"><div class="col-md-3"><label class="form-label">Data</label><input type="date" name="data" class="form-control" value="<?= htmlspecialchars($dataBase) ?>" <?= $periodo==='mes'?'disabled':'' ?>></div><div class="col-md-3"><label class="form-label">Mês</label><input type="month" name="mes" class="form-control" value="<?= htmlspecialchars($mesBase) ?>" <?= $periodo==='dia'?'disabled':'' ?>></div><div class="col-md-3"><button class="btn btn-outline-primary w-100">Filtrar</button></div></div>
         </form>
-        <style>@media print{.sidebar,.no-print{display:none!important} main{padding:0!important}.caixa-relatorio{font-size:12px}.card{box-shadow:none!important}.table{font-size:11px}}</style>
-        <div class="row g-3 mb-3"><div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Entradas</div><div class="fs-3 fw-bold text-success"><?= fmtBrlFin($totalEntradas) ?></div></div></div></div><div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Saídas</div><div class="fs-3 fw-bold text-danger"><?= fmtBrlFin($totalSaidas) ?></div></div></div></div><div class="col-md-4"><div class="card border-0 shadow-sm"><div class="card-body"><div class="text-muted text-uppercase small">Saldo do período</div><div class="fs-3 fw-bold <?= $saldoCaixa>=0?'text-primary':'text-danger' ?>"><?= fmtBrlFin($saldoCaixa) ?></div></div></div></div></div>
-        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-success text-white fw-bold">Entradas do período</div><div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead><tr><th>Data</th><th>Descrição</th><th>Cliente</th><th>Forma</th><th>Banco/Caixa</th><th class="text-end">Valor</th></tr></thead><tbody><?php if(empty($entradas)): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma entrada no período.</td></tr><?php endif; foreach($entradas as $r): ?><tr><td><?= date('d/m/Y', strtotime($r['data_recebimento'])) ?></td><td><?= htmlspecialchars($r['descricao'] ?: $r['id']) ?></td><td><?= htmlspecialchars($r['cliente_nome'] ?: '-') ?></td><td><?= htmlspecialchars($r['forma_recebimento'] ?: '-') ?></td><td><?= htmlspecialchars($r['banco_nome'] ?: '-') ?></td><td class="text-end fw-bold text-success"><?= fmtBrlFin($r['valor_pago'] ?: $r['valor']) ?></td></tr><?php endforeach; ?></tbody></table></div></div>
-        <div class="card shadow-sm border-0"><div class="card-header bg-danger text-white fw-bold">Saídas do período</div><div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead><tr><th>Data</th><th>Descrição</th><th>Fornecedor</th><th>Categoria</th><th>Forma</th><th>Banco/Caixa</th><th class="text-end">Valor</th></tr></thead><tbody><?php if(empty($saidas)): ?><tr><td colspan="7" class="text-center text-muted py-3">Nenhuma saída no período.</td></tr><?php endif; foreach($saidas as $r): ?><tr><td><?= date('d/m/Y', strtotime($r['data_pagamento'])) ?></td><td><?= htmlspecialchars($r['descricao'] ?: $r['id']) ?></td><td><?= htmlspecialchars($r['fornecedor'] ?: '-') ?></td><td><?= htmlspecialchars($r['categoria'] ?: '-') ?></td><td><?= htmlspecialchars($r['forma_pagamento'] ?: '-') ?></td><td><?= htmlspecialchars($r['banco_nome'] ?: '-') ?></td><td class="text-end fw-bold text-danger"><?= fmtBrlFin($r['valor_pago'] ?: $r['valor']) ?></td></tr><?php endforeach; ?></tbody></table></div></div>
+
+        <div class="row g-3 mb-3">
+            <div class="col-md-4 col-lg-2"><div class="kpi-card p-3"><div class="small-title">Entradas operacionais</div><div class="big-number text-success"><?= fmtBrlFin($totalEntradasOperacionais) ?></div><small class="text-muted">Recebimentos reais</small></div></div>
+            <div class="col-md-4 col-lg-2"><div class="kpi-card p-3"><div class="small-title">Saídas operacionais</div><div class="big-number text-danger"><?= fmtBrlFin($totalSaidasOperacionais) ?></div><small class="text-muted">Despesas reais</small></div></div>
+            <div class="col-md-4 col-lg-2"><div class="kpi-card p-3"><div class="small-title">Transferências internas</div><div class="big-number text-secondary"><?= fmtBrlFin($totalTransferenciasInternas) ?></div><small class="text-muted">Caixa/Bancos/Outros</small></div></div>
+            <div class="col-md-4 col-lg-2"><div class="kpi-card p-3"><div class="small-title">Resultado operacional</div><div class="big-number <?= $resultadoOperacional>=0?'text-primary':'text-danger' ?>"><?= fmtBrlFin($resultadoOperacional) ?></div><small class="text-muted">Entradas - despesas</small></div></div>
+            <div class="col-md-4 col-lg-2"><div class="kpi-card p-3"><div class="small-title">Saldo período caixa</div><div class="big-number <?= $saldoPeriodoCaixa>=0?'text-success':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoCaixa) ?></div><small class="text-muted">Caixa físico</small></div></div>
+            <div class="col-md-4 col-lg-2"><div class="kpi-card p-3"><div class="small-title">Saldo período bancos</div><div class="big-number <?= $saldoPeriodoBancos>=0?'text-success':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoBancos) ?></div><small class="text-muted">Contas bancárias</small></div></div>
+        </div>
+
+        <div class="alert alert-light border small mb-3">
+            <strong>Critério contábil:</strong> transferências internas mudam onde o dinheiro está, mas não representam receita ou despesa. Por isso, o <strong>resultado operacional</strong> considera apenas entradas reais menos despesas reais. O saldo do caixa e o saldo dos bancos consideram também as transferências.
+        </div>
+
+        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-success text-white fw-bold">Entradas operacionais</div><div class="table-responsive"><table class="table table-sm table-relatorio align-middle mb-0"><thead><tr><th>Data</th><th>Descrição</th><th>Cliente</th><th>Forma</th><th>Destino financeiro</th><th class="text-end">Valor</th></tr></thead><tbody>
+        <?php if(empty($entradas)): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma entrada operacional no período.</td></tr><?php endif; ?>
+        <?php foreach($entradas as $r): ?><tr><td><?= date('d/m/Y', strtotime($r['data_recebimento'])) ?></td><td><?= htmlspecialchars($r['descricao'] ?: $r['id']) ?></td><td><?= htmlspecialchars($r['cliente_nome'] ?: '-') ?></td><td><?= htmlspecialchars($r['forma_recebimento'] ?: '-') ?></td><td><?= htmlspecialchars($r['banco_nome'] ?: '-') ?></td><td class="text-end fw-bold text-success"><?= fmtBrlFin($r['valor_pago'] ?: $r['valor']) ?></td></tr><?php endforeach; ?>
+        </tbody></table></div></div>
+
+        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-danger text-white fw-bold">Saídas operacionais</div><div class="table-responsive"><table class="table table-sm table-relatorio align-middle mb-0"><thead><tr><th>Data</th><th>Descrição</th><th>Fornecedor</th><th>Categoria</th><th>Origem financeira</th><th class="text-end">Valor</th></tr></thead><tbody>
+        <?php if(empty($saidas)): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma saída operacional no período.</td></tr><?php endif; ?>
+        <?php foreach($saidas as $r): ?><tr><td><?= date('d/m/Y', strtotime($r['data_pagamento'])) ?></td><td><?= htmlspecialchars($r['descricao'] ?: $r['id']) ?></td><td><?= htmlspecialchars($r['fornecedor'] ?: '-') ?></td><td><?= htmlspecialchars($r['categoria'] ?: '-') ?></td><td><?= htmlspecialchars($r['banco_nome'] ?: '-') ?></td><td class="text-end fw-bold text-danger"><?= fmtBrlFin($r['valor_pago'] ?: $r['valor']) ?></td></tr><?php endforeach; ?>
+        </tbody></table></div></div>
+
+        <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-dark text-white fw-bold">Transferências internas</div><div class="table-responsive"><table class="table table-sm table-relatorio align-middle mb-0"><thead><tr><th>Data</th><th>Origem</th><th>Destino</th><th>Descrição</th><th>Responsável</th><th class="text-end">Valor</th></tr></thead><tbody>
+        <?php if(empty($transferencias)): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma transferência interna no período.</td></tr><?php endif; ?>
+        <?php foreach($transferencias as $r): ?><tr><td><?= date('d/m/Y', strtotime($r['data_movimento'])) ?></td><td><?= htmlspecialchars($r['origem_nome'] ?: '-') ?></td><td><?= htmlspecialchars($r['destino_nome'] ?: '-') ?></td><td><?= htmlspecialchars($r['descricao'] ?: 'Transferência interna') ?></td><td><?= htmlspecialchars($r['usuario_nome'] ?: '-') ?></td><td class="text-end fw-bold"><?= fmtBrlFin($r['valor']) ?></td></tr><?php endforeach; ?>
+        </tbody></table></div></div>
+
+        <div class="row g-3 mb-3">
+            <div class="col-md-4"><div class="kpi-card p-3"><div class="small-title">Saldo do período geral</div><div class="big-number <?= $saldoPeriodoGeral>=0?'text-primary':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoGeral) ?></div><small class="text-muted">Caixa + bancos no período</small></div></div>
+            <div class="col-md-4"><div class="kpi-card p-3"><div class="small-title">Caixa físico</div><div class="big-number <?= $saldoPeriodoCaixa>=0?'text-success':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoCaixa) ?></div><small class="text-muted">Entradas/saídas que afetaram o caixa</small></div></div>
+            <div class="col-md-4"><div class="kpi-card p-3"><div class="small-title">Bancos</div><div class="big-number <?= $saldoPeriodoBancos>=0?'text-success':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoBancos) ?></div><small class="text-muted">Entradas/saídas que afetaram bancos</small></div></div>
+        </div>
+
+        <div class="mt-4 small text-muted d-none d-print-block">
+            <div style="display:flex;gap:40px;margin-top:30px;">
+                <div style="flex:1;border-top:1px solid #333;text-align:center;padding-top:6px;">Responsável pelo fechamento</div>
+                <div style="flex:1;border-top:1px solid #333;text-align:center;padding-top:6px;">Conferência administrativa</div>
+            </div>
+        </div>
     </div>
     <?php return; }
 

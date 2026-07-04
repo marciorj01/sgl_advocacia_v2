@@ -1,103 +1,249 @@
 <?php
-require_once __DIR__ . '/../config/database.php';
-require_once __DIR__ . '/../config/auth.php';
+/**
+ * SGL Advocacia - Login
+ * Correção para tabela usuarios_sistema + senha MD5 legado/password_hash.
+ */
 
-iniciarSessaoSegura();
+declare(strict_types=1);
 
-if (usuarioLogado()) {
-    header('Location: ../index.php');
-    exit();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
 }
 
-$mensagem_erro = '';
+require_once __DIR__ . '/../config/database.php';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $usuario = trim((string)($_POST['usuario'] ?? ''));
-    $senha = (string)($_POST['senha'] ?? '');
-    $csrf = (string)($_POST['csrf_token'] ?? '');
+if (!empty($_SESSION['usuario_id'])) {
+    header('Location: ../index.php');
+    exit;
+}
 
-    if (!validarTokenCsrf($csrf)) {
-        $mensagem_erro = 'Sessão expirada ou formulário inválido. Atualize a página e tente novamente.';
-    } elseif ($usuario === '' || $senha === '') {
-        $mensagem_erro = 'Por favor, preencha todos os campos.';
-    } else {
-        try {
-            $conn = conectar();
+$erro = '';
+$usuarioInformado = '';
 
-            $stmt = $conn->prepare(
-                "SELECT id, nome, usuario, senha, perfil, status
-                 FROM usuarios_sistema
-                 WHERE usuario = ?
-                 LIMIT 1"
-            );
-            $stmt->bind_param('s', $usuario);
-            $stmt->execute();
-            $result = $stmt->get_result();
-            $user = $result->fetch_assoc();
+function sgl_tabela_existe(PDO $pdo, string $tabela): bool
+{
+    $stmt = $pdo->prepare("SHOW TABLES LIKE ?");
+    $stmt->execute([$tabela]);
+    return (bool) $stmt->fetchColumn();
+}
 
-            if ($user && md5($senha) === $user['senha'] && strtolower($user['status']) === 'ativo') {
-                session_regenerate_id(true);
+function sgl_buscar_usuario(PDO $pdo, string $login): ?array
+{
+    $tabelas = ['usuarios_sistema', 'usuarios'];
 
-                $_SESSION['user_id'] = (int)$user['id'];
-                $_SESSION['username'] = $user['usuario'];
-                $_SESSION['nome'] = $user['nome'];
-                $_SESSION['perfil'] = $user['perfil'];
-                $_SESSION['ultimo_acesso'] = time();
-
-                header('Location: ../index.php');
-                exit();
-            }
-
-            $mensagem_erro = 'Usuário ou senha inválidos.';
-            $stmt->close();
-            $conn->close();
-        } catch (Throwable $e) {
-            $mensagem_erro = 'Erro ao tentar fazer login. Verifique se o banco foi instalado corretamente.';
+    foreach ($tabelas as $tabela) {
+        if (!sgl_tabela_existe($pdo, $tabela)) {
+            continue;
         }
+
+        $stmt = $pdo->prepare("SELECT * FROM `$tabela` WHERE usuario = ? LIMIT 1");
+        $stmt->execute([$login]);
+        $usuario = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($usuario) {
+            $usuario['_tabela_origem'] = $tabela;
+            return $usuario;
+        }
+    }
+
+    return null;
+}
+
+function sgl_senha_confere(string $senhaDigitada, string $senhaBanco): bool
+{
+    if ($senhaBanco === '') {
+        return false;
+    }
+
+    if (password_get_info($senhaBanco)['algo'] !== 0 && password_verify($senhaDigitada, $senhaBanco)) {
+        return true;
+    }
+
+    // Compatibilidade com senha antiga do sistema. Ex.: admin123 = 0192023a7bbd73250516f069df18b500
+    if (strlen($senhaBanco) === 32 && hash_equals(strtolower($senhaBanco), md5($senhaDigitada))) {
+        return true;
+    }
+
+    return hash_equals($senhaBanco, $senhaDigitada);
+}
+
+function sgl_migrar_senha(PDO $pdo, array $usuario, string $senhaDigitada): void
+{
+    $hashAtual = (string)($usuario['senha'] ?? '');
+    $precisaMigrar = password_get_info($hashAtual)['algo'] === 0;
+
+    if (!$precisaMigrar) {
+        return;
+    }
+
+    $novoHash = password_hash($senhaDigitada, PASSWORD_DEFAULT);
+    $id = (int)$usuario['id'];
+    $tabela = $usuario['_tabela_origem'] ?? 'usuarios_sistema';
+
+    if (sgl_tabela_existe($pdo, $tabela)) {
+        $stmt = $pdo->prepare("UPDATE `$tabela` SET senha = ? WHERE id = ?");
+        $stmt->execute([$novoHash, $id]);
+    }
+
+    // Garante que a tabela oficial também fique atualizada quando existir.
+    if ($tabela !== 'usuarios_sistema' && sgl_tabela_existe($pdo, 'usuarios_sistema')) {
+        $stmt = $pdo->prepare("UPDATE `usuarios_sistema` SET senha = ? WHERE usuario = ?");
+        $stmt->execute([$novoHash, $usuario['usuario']]);
     }
 }
 
-$csrfToken = gerarTokenCsrf();
+function sgl_status_ativo(array $usuario): bool
+{
+    $status = strtolower(trim((string)($usuario['status'] ?? 'Ativo')));
+    $ativo = strtolower(trim((string)($usuario['ativo'] ?? '1')));
+
+    return in_array($status, ['ativo', '1', 'sim', 'active'], true)
+        && !in_array($ativo, ['0', 'nao', 'não', 'inativo', 'false'], true);
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $usuarioInformado = trim((string)($_POST['usuario'] ?? $_POST['login'] ?? $_POST['email'] ?? ''));
+    $senha = (string)($_POST['senha'] ?? $_POST['password'] ?? '');
+
+    if ($usuarioInformado === '' || $senha === '') {
+        $erro = 'Informe usuário e senha.';
+    } else {
+        try {
+            $usuario = sgl_buscar_usuario($pdo, $usuarioInformado);
+
+            if (!$usuario || !sgl_status_ativo($usuario) || !sgl_senha_confere($senha, (string)$usuario['senha'])) {
+                $erro = 'Usuário ou senha inválidos.';
+            } else {
+                sgl_migrar_senha($pdo, $usuario, $senha);
+
+                session_regenerate_id(true);
+
+                $_SESSION['logado'] = true;
+                $_SESSION['usuario_id'] = (int)$usuario['id'];
+                $_SESSION['usuario_nome'] = (string)($usuario['nome'] ?? $usuario['usuario']);
+                $_SESSION['usuario_login'] = (string)$usuario['usuario'];
+                $_SESSION['usuario_perfil'] = (string)($usuario['perfil'] ?? 'Administrador');
+
+                // Compatibilidade com arquivos antigos.
+                $_SESSION['id_usuario'] = $_SESSION['usuario_id'];
+                $_SESSION['nome'] = $_SESSION['usuario_nome'];
+                $_SESSION['usuario'] = $_SESSION['usuario_login'];
+                $_SESSION['perfil'] = $_SESSION['usuario_perfil'];
+
+                header('Location: ../index.php');
+                exit;
+            }
+        } catch (Throwable $e) {
+            $erro = 'Erro ao validar login: ' . $e->getMessage();
+        }
+    }
+}
 ?>
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - Sistema SGL</title>
+    <title>Login - SGL Advocacia</title>
+    <link rel="stylesheet" href="../assets/css/style.css">
     <style>
-        body { font-family: Arial, sans-serif; background: #f4f6f8; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .container { background: #fff; padding: 32px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.08); width: 360px; text-align: center; }
-        .logo { max-width: 180px; max-height: 90px; object-fit: contain; margin-bottom: 18px; }
-        h2 { color: #1a3c5e; margin-bottom: 20px; }
-        .form-group { margin-bottom: 15px; text-align: left; }
-        label { display: block; margin-bottom: 6px; color: #444; font-weight: 600; }
-        input[type="text"], input[type="password"] { width: 100%; padding: 11px; border: 1px solid #d7dce1; border-radius: 6px; box-sizing: border-box; }
-        button { width: 100%; padding: 11px; background: #2c6fad; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: 700; margin-top: 8px; }
-        button:hover { background: #1a3c5e; }
-        .mensagem-erro { color: #842029; background: #f8d7da; border: 1px solid #f5c2c7; padding: 10px; border-radius: 6px; margin-bottom: 15px; text-align: center; }
-        .ajuda { margin-top: 18px; color: #6c757d; font-size: 12px; }
+        body {
+            min-height: 100vh;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #f4f6f9;
+            font-family: Arial, Helvetica, sans-serif;
+        }
+        .login-container {
+            width: 100%;
+            max-width: 420px;
+            background: #fff;
+            border-radius: 14px;
+            box-shadow: 0 10px 35px rgba(0,0,0,.10);
+            padding: 34px;
+        }
+        .login-title {
+            margin: 0 0 6px;
+            text-align: center;
+            color: #1f2937;
+            font-size: 26px;
+        }
+        .login-subtitle {
+            margin: 0 0 28px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 14px;
+        }
+        .form-group { margin-bottom: 18px; }
+        .form-group label {
+            display: block;
+            margin-bottom: 7px;
+            color: #374151;
+            font-weight: 600;
+        }
+        .form-control {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 12px 14px;
+            border: 1px solid #d1d5db;
+            border-radius: 9px;
+            font-size: 15px;
+        }
+        .btn-login {
+            width: 100%;
+            border: 0;
+            border-radius: 9px;
+            padding: 13px 16px;
+            background: #1f4e79;
+            color: #fff;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .btn-login:hover { filter: brightness(.95); }
+        .alert-error {
+            background: #fee2e2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
+            border-radius: 9px;
+            padding: 11px 13px;
+            margin-bottom: 18px;
+            font-size: 14px;
+        }
+        .login-help {
+            margin-top: 18px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <img src="../assets/img/logo_custom.png" alt="SGL Advocacia" class="logo">
-        <h2>Sistema SGL</h2>
-        <?php if ($mensagem_erro): ?>
-            <div class="mensagem-erro"><?= htmlspecialchars($mensagem_erro, ENT_QUOTES, 'UTF-8') ?></div>
+    <main class="login-container">
+        <h1 class="login-title">SGL Advocacia</h1>
+        <p class="login-subtitle">Acesso ao sistema</p>
+
+        <?php if ($erro !== ''): ?>
+            <div class="alert-error"><?= htmlspecialchars($erro, ENT_QUOTES, 'UTF-8') ?></div>
         <?php endif; ?>
-        <form action="login.php" method="POST" autocomplete="off">
-            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
+
+        <form method="post" autocomplete="off">
             <div class="form-group">
                 <label for="usuario">Usuário</label>
-                <input type="text" id="usuario" name="usuario" required autofocus>
+                <input class="form-control" type="text" id="usuario" name="usuario" value="<?= htmlspecialchars($usuarioInformado, ENT_QUOTES, 'UTF-8') ?>" required autofocus>
             </div>
+
             <div class="form-group">
                 <label for="senha">Senha</label>
-                <input type="password" id="senha" name="senha" required>
+                <input class="form-control" type="password" id="senha" name="senha" required>
             </div>
-            <button type="submit">Entrar</button>
+
+            <button class="btn-login" type="submit">Entrar</button>
         </form>
-    </div>
+
+        <div class="login-help">Usuário padrão recuperado: admin</div>
+    </main>
 </body>
 </html>

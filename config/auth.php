@@ -1,55 +1,61 @@
 <?php
 /**
- * config/auth.php
- * Funções básicas de sessão/autenticação do Sistema SGL Advocacia.
+ * SGL Advocacia - Controle de Autenticação
+ * Compatível com sessões antigas e novas.
  */
 
 declare(strict_types=1);
 
-function iniciarSessaoSegura(): void
-{
-    if (session_status() === PHP_SESSION_ACTIVE) {
-        return;
-    }
-
-    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') === '443');
-
-    session_set_cookie_params([
-        'lifetime' => 0,
-        'path' => '/',
-        'domain' => '',
-        'secure' => $https,
-        'httponly' => true,
-        'samesite' => 'Lax',
-    ]);
-
+if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-function usuarioLogado(): bool
+function sgl_usuario_logado(): bool
 {
-    return !empty($_SESSION['user_id']);
+    return !empty($_SESSION['usuario_id']) || !empty($_SESSION['logado']);
 }
 
-function exigirLogin(string $redirect = 'auth/login.php'): void
+function verificarLogin(): bool
 {
-    if (!usuarioLogado()) {
-        header('Location: ' . $redirect);
-        exit();
+    return sgl_usuario_logado();
+}
+
+function estaLogado(): bool
+{
+    return sgl_usuario_logado();
+}
+
+function protegerPagina(): void
+{
+    if (!sgl_usuario_logado()) {
+        header('Location: ' . sgl_login_url());
+        exit;
     }
 }
 
-function gerarTokenCsrf(): string
+function requireLogin(): void
 {
-    if (empty($_SESSION['csrf_token'])) {
-        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
-    }
-    return $_SESSION['csrf_token'];
+    protegerPagina();
 }
 
-function validarTokenCsrf(?string $token): bool
+function sgl_login_url(): string
 {
-    return is_string($token)
-        && isset($_SESSION['csrf_token'])
-        && hash_equals($_SESSION['csrf_token'], $token);
+    $script = str_replace('\\', '/', $_SERVER['SCRIPT_NAME'] ?? '');
+    if (strpos($script, '/modules/') !== false) {
+        return '../auth/login.php';
+    }
+    if (strpos($script, '/auth/') !== false) {
+        return 'login.php';
+    }
+    return 'auth/login.php';
+}
+
+function usuarioAtual(): array
+{
+    return [
+        'id' => $_SESSION['usuario_id'] ?? null,
+        'nome' => $_SESSION['usuario_nome'] ?? ($_SESSION['nome'] ?? ''),
+        'usuario' => $_SESSION['usuario_login'] ?? ($_SESSION['usuario'] ?? ''),
+        'perfil' => $_SESSION['usuario_perfil'] ?? ($_SESSION['perfil'] ?? ''),
+    ];
 }

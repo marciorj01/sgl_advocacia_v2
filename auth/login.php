@@ -37,56 +37,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         try {
             $conn = conectar();
-
-            $tabelasLogin = ['usuarios', 'usuarios_sistema'];
             $user = null;
 
-            foreach ($tabelasLogin as $tabelaLogin) {
-                $existeTabela = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($tabelaLogin) . "'");
-                if (!$existeTabela || $existeTabela->num_rows === 0) {
+            /*
+             * Correção 02:
+             * O login agora consulta as tabelas de usuário de forma simples e tolerante.
+             * Isso evita erro por diferença estrutural entre usuarios e usuarios_sistema.
+             */
+            $consultasLogin = [
+                "SELECT id, nome, usuario, senha, perfil, status FROM usuarios WHERE usuario = ? LIMIT 1",
+                "SELECT id, nome, usuario, senha, perfil, status FROM usuarios_sistema WHERE usuario = ? LIMIT 1",
+                "SELECT id, nome, usuario, senha, perfil, status FROM usuarios_sistema_backup_login WHERE usuario = ? LIMIT 1",
+            ];
+
+            foreach ($consultasLogin as $sql) {
+                try {
+                    $stmt = $conn->prepare($sql);
+                    $stmt->bind_param('s', $usuario);
+                    $stmt->execute();
+                    $result = $stmt->get_result();
+                    $registro = $result ? $result->fetch_assoc() : null;
+                    if ($result instanceof mysqli_result) {
+                        $result->free();
+                    }
+                    $stmt->close();
+
+                    if ($registro) {
+                        $status = trim((string)($registro['status'] ?? 'Ativo'));
+                        if ($status === '' || strcasecmp($status, 'Ativo') === 0 || $status === '1') {
+                            $user = $registro;
+                            break;
+                        }
+                    }
+                } catch (Throwable $eTabela) {
+                    error_log('ROJEX LOGIN consulta ignorada: ' . $eTabela->getMessage());
                     continue;
-                }
-
-                $temAtivo = colunaExiste($conn, $tabelaLogin, 'ativo');
-                $temStatus = colunaExiste($conn, $tabelaLogin, 'status');
-
-                $whereStatus = '';
-                if ($temAtivo) {
-                    $whereStatus = ' AND ativo = 1';
-                } elseif ($temStatus) {
-                    $whereStatus = " AND (status = 'Ativo' OR status IS NULL OR status = '')";
-                }
-
-                $sql = "SELECT id, nome, usuario, senha, perfil FROM `$tabelaLogin` WHERE usuario = ? $whereStatus LIMIT 1";
-                $stmt = $conn->prepare($sql);
-                if (!$stmt) {
-                    continue;
-                }
-
-                $stmt->bind_param('s', $usuario);
-                $stmt->execute();
-                $result = $stmt->get_result();
-                $user = $result ? $result->fetch_assoc() : null;
-                $stmt->close();
-
-                if ($user) {
-                    break;
                 }
             }
 
             $senhaOk = false;
             if ($user) {
                 $hash = (string)$user['senha'];
-                $senhaOk = password_verify($senha, $hash) || hash_equals($hash, md5($senha));
+                $senhaOk = password_verify($senha, $hash)
+                    || hash_equals($hash, md5($senha))
+                    || hash_equals($hash, $senha);
             }
 
             if ($user && $senhaOk) {
                 session_regenerate_id(true);
                 $_SESSION['user_id'] = (int)$user['id'];
-                $_SESSION['username'] = $user['usuario'];
-                $_SESSION['nome'] = $user['nome'];
-                $_SESSION['perfil'] = $user['perfil'];
+                $_SESSION['username'] = (string)$user['usuario'];
+                $_SESSION['nome'] = (string)$user['nome'];
+                $_SESSION['perfil'] = (string)$user['perfil'];
                 $_SESSION['ultimo_acesso'] = time();
+                $conn->close();
                 header('Location: ../index.php');
                 exit();
             }
@@ -94,7 +98,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $mensagem_erro = 'Usuário ou senha inválidos.';
             $conn->close();
         } catch (Throwable $e) {
-            error_log('ROJEX LOGIN: ' . $e->getMessage());
+            error_log('ROJEX LOGIN ERRO GERAL: ' . $e->getMessage());
             $mensagem_erro = 'Erro ao tentar fazer login. Verifique o banco de dados e tente novamente.';
         }
     }

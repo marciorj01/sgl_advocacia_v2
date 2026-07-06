@@ -78,7 +78,7 @@ class Empresa
 
     public function nomeSistema(): string { return 'ROJEX.AI'; }
     public function sloganSistema(): string { return 'Inteligência Artificial para PMEs'; }
-    public function nomeEscritorio(): string { return $this->get('nome_escritorio', 'SGL Advocacia'); }
+    public function nomeEscritorio(): string { return $this->get('nome_escritorio', 'ERP Jurídico Enterprise'); }
     public function razaoSocial(): string { return $this->get('razao_social', $this->nomeEscritorio()); }
     public function logoOficial(): string { return 'assets/img/logo_rojex_ai.png'; }
 

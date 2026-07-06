@@ -105,7 +105,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $csrfToken = gerarTokenCsrf();
-$logoLogin = '../' . $empresa->logoPrincipal();
+$logoLogin = '../' . $empresa->logoOficial();
 ?>
 <!DOCTYPE html>
 <html lang="pt-br">
@@ -148,7 +148,7 @@ $logoLogin = '../' . $empresa->logoPrincipal();
         </section>
         <section class="form-panel">
             <h2>Acessar sistema</h2>
-            <p class="subtitle"><?= htmlspecialchars($empresa->nomeEscritorio(), ENT_QUOTES, 'UTF-8') ?></p>
+            <p class="subtitle">ERP Jurídico Enterprise</p>
             <?php if ($mensagem_erro): ?>
                 <div class="mensagem-erro"><?= htmlspecialchars($mensagem_erro, ENT_QUOTES, 'UTF-8') ?></div>
             <?php endif; ?>

@@ -63,6 +63,27 @@ if ($acao_cfg === 'remover_logo') {
     exit;
 }
 
+// SALVAR DADOS DA EMPRESA
+if ($acao_cfg === 'salvar_empresa') {
+    $campos_empresa = [
+        'nome_escritorio',
+        'razao_social',
+        'cnpj',
+        'telefone',
+        'whatsapp',
+        'email',
+        'site'
+    ];
+
+    foreach ($campos_empresa as $campo) {
+        $valor = trim((string)($_POST[$campo] ?? ''));
+        cfg_set($conn, $campo, $valor);
+    }
+
+    echo "<script>window.location.href = '?mod=configuracoes&msg_sucesso=' + encodeURIComponent('✅ Dados da empresa salvos com sucesso!');</script>";
+    exit;
+}
+
 // SALVAR TEMA
 if ($acao_cfg === 'salvar_tema') {
     $cp = preg_replace('/[^#a-fA-F0-9]/','', $_POST['cor_primaria']   ?? '#1a3c5e');
@@ -134,6 +155,13 @@ function buscar_lixeira(mysqli $conn): array {
 }
 
 $lixeira_itens = buscar_lixeira($conn);
+$nome_escritorio = cfg_get($conn,'nome_escritorio','SGL Advocacia');
+$razao_social = cfg_get($conn,'razao_social','');
+$cnpj = cfg_get($conn,'cnpj','');
+$telefone = cfg_get($conn,'telefone','');
+$whatsapp = cfg_get($conn,'whatsapp','');
+$email = cfg_get($conn,'email','');
+$site = cfg_get($conn,'site','');
 $logo_salva = cfg_get($conn,'logo_arquivo','');
 $logo_exibir = $logo_salva ? 'assets/img/'.htmlspecialchars($logo_salva) : 'assets/img/logo_custom.png';
 $cor_primaria = cfg_get($conn,'cor_primaria','#1a3c5e');
@@ -153,13 +181,58 @@ $cor_accent = cfg_get($conn,'cor_accent','#f0a500');
 <?php endif; ?>
 
 <ul class="nav nav-tabs mb-4" id="cfgTabs" role="tablist">
-    <li class="nav-item"><a class="nav-link active" id="tab-marca-lnk" data-bs-toggle="tab" href="#tab-marca" role="tab"><i class="bi bi-image me-1"></i>Marca</a></li>
+    <li class="nav-item"><a class="nav-link active" id="tab-empresa-lnk" data-bs-toggle="tab" href="#tab-empresa" role="tab"><i class="bi bi-building me-1"></i>Empresa</a></li>
+    <li class="nav-item"><a class="nav-link" id="tab-marca-lnk" data-bs-toggle="tab" href="#tab-marca" role="tab"><i class="bi bi-image me-1"></i>Marca</a></li>
     <li class="nav-item"><a class="nav-link" id="tab-tema-lnk" data-bs-toggle="tab" href="#tab-tema" role="tab"><i class="bi bi-palette me-1"></i>Cores</a></li>
     <li class="nav-item"><a class="nav-link" id="tab-lixeira-lnk" data-bs-toggle="tab" href="#tab-lixeira" role="tab"><i class="bi bi-trash3 me-1"></i>Lixeira <?php if(count($lixeira_itens)>0): ?><span class="badge bg-danger ms-1"><?=count($lixeira_itens)?></span><?php endif; ?></a></li>
 </ul>
 
 <div class="tab-content">
-  <div class="tab-pane fade show active" id="tab-marca">
+  <div class="tab-pane fade show active" id="tab-empresa">
+    <div class="card">
+        <div class="card-header bg-primary text-white"><i class="bi bi-building me-1"></i> Dados da Empresa / Escritório</div>
+        <div class="card-body">
+          <form method="POST">
+            <input type="hidden" name="acao_cfg" value="salvar_empresa">
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label fw-semibold">Nome do Escritório</label>
+                <input type="text" name="nome_escritorio" class="form-control" value="<?=htmlspecialchars($nome_escritorio)?>" placeholder="Ex: SGL Advocacia">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label fw-semibold">Razão Social</label>
+                <input type="text" name="razao_social" class="form-control" value="<?=htmlspecialchars($razao_social)?>" placeholder="Ex: SGL Advocacia LTDA">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label fw-semibold">CNPJ</label>
+                <input type="text" name="cnpj" class="form-control" value="<?=htmlspecialchars($cnpj)?>" placeholder="00.000.000/0000-00">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label fw-semibold">Telefone</label>
+                <input type="text" name="telefone" class="form-control" value="<?=htmlspecialchars($telefone)?>" placeholder="(00) 0000-0000">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label fw-semibold">WhatsApp</label>
+                <input type="text" name="whatsapp" class="form-control" value="<?=htmlspecialchars($whatsapp)?>" placeholder="(00) 00000-0000">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label fw-semibold">E-mail</label>
+                <input type="email" name="email" class="form-control" value="<?=htmlspecialchars($email)?>" placeholder="contato@escritorio.com.br">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label fw-semibold">Site</label>
+                <input type="text" name="site" class="form-control" value="<?=htmlspecialchars($site)?>" placeholder="https://www.escritorio.com.br">
+              </div>
+            </div>
+            <div class="mt-4">
+              <button type="submit" class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Salvar Dados da Empresa</button>
+            </div>
+          </form>
+        </div>
+    </div>
+  </div>
+
+  <div class="tab-pane fade" id="tab-marca">
     <div class="card">
         <div class="card-header bg-primary text-white"><i class="bi bi-image me-1"></i> Logomarca (White Label)</div>
         <div class="card-body">

@@ -9,6 +9,37 @@ $conn->query("CREATE TABLE IF NOT EXISTS configuracoes (
     PRIMARY KEY (chave)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+$conn->query("CREATE TABLE IF NOT EXISTS empresa (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nome_fantasia VARCHAR(150) NOT NULL DEFAULT '',
+    razao_social VARCHAR(180) DEFAULT '',
+    cnpj VARCHAR(30) DEFAULT '',
+    inscricao_estadual VARCHAR(50) DEFAULT '',
+    inscricao_municipal VARCHAR(50) DEFAULT '',
+    telefone VARCHAR(30) DEFAULT '',
+    celular VARCHAR(30) DEFAULT '',
+    whatsapp VARCHAR(30) DEFAULT '',
+    email VARCHAR(150) DEFAULT '',
+    site VARCHAR(150) DEFAULT '',
+    cep VARCHAR(20) DEFAULT '',
+    endereco VARCHAR(180) DEFAULT '',
+    numero VARCHAR(30) DEFAULT '',
+    complemento VARCHAR(100) DEFAULT '',
+    bairro VARCHAR(100) DEFAULT '',
+    cidade VARCHAR(100) DEFAULT '',
+    estado VARCHAR(50) DEFAULT '',
+    pais VARCHAR(60) DEFAULT 'Brasil',
+    advogado_responsavel VARCHAR(150) DEFAULT '',
+    oab VARCHAR(50) DEFAULT '',
+    cpf_responsavel VARCHAR(30) DEFAULT '',
+    instagram VARCHAR(150) DEFAULT '',
+    facebook VARCHAR(150) DEFAULT '',
+    linkedin VARCHAR(150) DEFAULT '',
+    observacoes TEXT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 function cfg_get(mysqli $conn, string $chave, string $default = ''): string {
     $s = @$conn->prepare("SELECT valor FROM configuracoes WHERE chave = ? LIMIT 1");
     if (!$s) { return $default; }
@@ -25,6 +56,67 @@ function cfg_set(mysqli $conn, string $chave, string $valor): void {
     $s->bind_param('ss', $chave, $valor);
     $s->execute();
     $s->close();
+}
+
+function empresa_obter(mysqli $conn): array {
+    $dados = [];
+    $res = @$conn->query("SELECT * FROM empresa WHERE id = 1 LIMIT 1");
+    if ($res instanceof mysqli_result) {
+        $dados = $res->fetch_assoc() ?: [];
+        $res->free();
+    }
+
+    if (!$dados) {
+        $nome = cfg_get($conn, 'nome_escritorio', 'SGL Advocacia');
+        $razao = cfg_get($conn, 'razao_social', '');
+        $cnpj = cfg_get($conn, 'cnpj', '');
+        $telefone = cfg_get($conn, 'telefone', '');
+        $whatsapp = cfg_get($conn, 'whatsapp', '');
+        $email = cfg_get($conn, 'email', '');
+        $site = cfg_get($conn, 'site', '');
+
+        $stmt = @$conn->prepare("INSERT INTO empresa (id, nome_fantasia, razao_social, cnpj, telefone, whatsapp, email, site, pais) VALUES (1, ?, ?, ?, ?, ?, ?, ?, 'Brasil')");
+        if ($stmt) {
+            $stmt->bind_param('sssssss', $nome, $razao, $cnpj, $telefone, $whatsapp, $email, $site);
+            $stmt->execute();
+            $stmt->close();
+        }
+
+        $dados = [
+            'id' => 1,
+            'nome_fantasia' => $nome,
+            'razao_social' => $razao,
+            'cnpj' => $cnpj,
+            'inscricao_estadual' => '',
+            'inscricao_municipal' => '',
+            'telefone' => $telefone,
+            'celular' => '',
+            'whatsapp' => $whatsapp,
+            'email' => $email,
+            'site' => $site,
+            'cep' => '',
+            'endereco' => '',
+            'numero' => '',
+            'complemento' => '',
+            'bairro' => '',
+            'cidade' => '',
+            'estado' => '',
+            'pais' => 'Brasil',
+            'advogado_responsavel' => '',
+            'oab' => '',
+            'cpf_responsavel' => '',
+            'instagram' => '',
+            'facebook' => '',
+            'linkedin' => '',
+            'observacoes' => ''
+        ];
+    }
+
+    return $dados;
+}
+
+function empresa_valor(array $empresa, string $campo, string $default = ''): string {
+    return trim((string)($empresa[$campo] ?? $default));
 }
 
 $msg = ''; $msg_tipo = 'success';
@@ -66,19 +158,56 @@ if ($acao_cfg === 'remover_logo') {
 // SALVAR DADOS DA EMPRESA
 if ($acao_cfg === 'salvar_empresa') {
     $campos_empresa = [
-        'nome_escritorio',
-        'razao_social',
-        'cnpj',
-        'telefone',
-        'whatsapp',
-        'email',
-        'site'
+        'nome_fantasia','razao_social','cnpj','inscricao_estadual','inscricao_municipal',
+        'telefone','celular','whatsapp','email','site','cep','endereco','numero','complemento',
+        'bairro','cidade','estado','pais','advogado_responsavel','oab','cpf_responsavel',
+        'instagram','facebook','linkedin','observacoes'
     ];
 
+    $dados = [];
     foreach ($campos_empresa as $campo) {
-        $valor = trim((string)($_POST[$campo] ?? ''));
-        cfg_set($conn, $campo, $valor);
+        $dados[$campo] = trim((string)($_POST[$campo] ?? ''));
     }
+
+    $sql = "INSERT INTO empresa (
+        id, nome_fantasia, razao_social, cnpj, inscricao_estadual, inscricao_municipal,
+        telefone, celular, whatsapp, email, site, cep, endereco, numero, complemento,
+        bairro, cidade, estado, pais, advogado_responsavel, oab, cpf_responsavel,
+        instagram, facebook, linkedin, observacoes
+    ) VALUES (
+        1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ) ON DUPLICATE KEY UPDATE
+        nome_fantasia = VALUES(nome_fantasia), razao_social = VALUES(razao_social),
+        cnpj = VALUES(cnpj), inscricao_estadual = VALUES(inscricao_estadual),
+        inscricao_municipal = VALUES(inscricao_municipal), telefone = VALUES(telefone),
+        celular = VALUES(celular), whatsapp = VALUES(whatsapp), email = VALUES(email),
+        site = VALUES(site), cep = VALUES(cep), endereco = VALUES(endereco),
+        numero = VALUES(numero), complemento = VALUES(complemento), bairro = VALUES(bairro),
+        cidade = VALUES(cidade), estado = VALUES(estado), pais = VALUES(pais),
+        advogado_responsavel = VALUES(advogado_responsavel), oab = VALUES(oab),
+        cpf_responsavel = VALUES(cpf_responsavel), instagram = VALUES(instagram),
+        facebook = VALUES(facebook), linkedin = VALUES(linkedin), observacoes = VALUES(observacoes)";
+
+    $stmt = @$conn->prepare($sql);
+    if ($stmt) {
+        $stmt->bind_param(str_repeat('s', 25),
+            $dados['nome_fantasia'],$dados['razao_social'],$dados['cnpj'],$dados['inscricao_estadual'],$dados['inscricao_municipal'],
+            $dados['telefone'],$dados['celular'],$dados['whatsapp'],$dados['email'],$dados['site'],$dados['cep'],$dados['endereco'],
+            $dados['numero'],$dados['complemento'],$dados['bairro'],$dados['cidade'],$dados['estado'],$dados['pais'],
+            $dados['advogado_responsavel'],$dados['oab'],$dados['cpf_responsavel'],$dados['instagram'],$dados['facebook'],$dados['linkedin'],$dados['observacoes']
+        );
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    // Compatibilidade com telas antigas que ainda leem a tabela configuracoes.
+    cfg_set($conn, 'nome_escritorio', $dados['nome_fantasia']);
+    cfg_set($conn, 'razao_social', $dados['razao_social']);
+    cfg_set($conn, 'cnpj', $dados['cnpj']);
+    cfg_set($conn, 'telefone', $dados['telefone']);
+    cfg_set($conn, 'whatsapp', $dados['whatsapp']);
+    cfg_set($conn, 'email', $dados['email']);
+    cfg_set($conn, 'site', $dados['site']);
 
     echo "<script>window.location.href = '?mod=configuracoes&msg_sucesso=' + encodeURIComponent('✅ Dados da empresa salvos com sucesso!');</script>";
     exit;
@@ -155,13 +284,32 @@ function buscar_lixeira(mysqli $conn): array {
 }
 
 $lixeira_itens = buscar_lixeira($conn);
-$nome_escritorio = cfg_get($conn,'nome_escritorio','SGL Advocacia');
-$razao_social = cfg_get($conn,'razao_social','');
-$cnpj = cfg_get($conn,'cnpj','');
-$telefone = cfg_get($conn,'telefone','');
-$whatsapp = cfg_get($conn,'whatsapp','');
-$email = cfg_get($conn,'email','');
-$site = cfg_get($conn,'site','');
+$empresa = empresa_obter($conn);
+$nome_fantasia = empresa_valor($empresa, 'nome_fantasia', 'SGL Advocacia');
+$razao_social = empresa_valor($empresa, 'razao_social');
+$cnpj = empresa_valor($empresa, 'cnpj');
+$inscricao_estadual = empresa_valor($empresa, 'inscricao_estadual');
+$inscricao_municipal = empresa_valor($empresa, 'inscricao_municipal');
+$telefone = empresa_valor($empresa, 'telefone');
+$celular = empresa_valor($empresa, 'celular');
+$whatsapp = empresa_valor($empresa, 'whatsapp');
+$email = empresa_valor($empresa, 'email');
+$site = empresa_valor($empresa, 'site');
+$cep = empresa_valor($empresa, 'cep');
+$endereco = empresa_valor($empresa, 'endereco');
+$numero = empresa_valor($empresa, 'numero');
+$complemento = empresa_valor($empresa, 'complemento');
+$bairro = empresa_valor($empresa, 'bairro');
+$cidade = empresa_valor($empresa, 'cidade');
+$estado = empresa_valor($empresa, 'estado');
+$pais = empresa_valor($empresa, 'pais', 'Brasil');
+$advogado_responsavel = empresa_valor($empresa, 'advogado_responsavel');
+$oab = empresa_valor($empresa, 'oab');
+$cpf_responsavel = empresa_valor($empresa, 'cpf_responsavel');
+$instagram = empresa_valor($empresa, 'instagram');
+$facebook = empresa_valor($empresa, 'facebook');
+$linkedin = empresa_valor($empresa, 'linkedin');
+$observacoes = empresa_valor($empresa, 'observacoes');
 $logo_salva = cfg_get($conn,'logo_arquivo','');
 $logo_exibir = $logo_salva ? 'assets/img/'.htmlspecialchars($logo_salva) : 'assets/img/logo_custom.png';
 $cor_primaria = cfg_get($conn,'cor_primaria','#1a3c5e');
@@ -189,47 +337,56 @@ $cor_accent = cfg_get($conn,'cor_accent','#f0a500');
 
 <div class="tab-content">
   <div class="tab-pane fade show active" id="tab-empresa">
-    <div class="card">
-        <div class="card-header bg-primary text-white"><i class="bi bi-building me-1"></i> Dados da Empresa / Escritório</div>
+    <form method="POST">
+      <input type="hidden" name="acao_cfg" value="salvar_empresa">
+
+      <div class="card mb-4">
+        <div class="card-header bg-primary text-white"><i class="bi bi-building me-1"></i> Dados Institucionais</div>
         <div class="card-body">
-          <form method="POST">
-            <input type="hidden" name="acao_cfg" value="salvar_empresa">
-            <div class="row g-3">
-              <div class="col-md-6">
-                <label class="form-label fw-semibold">Nome do Escritório</label>
-                <input type="text" name="nome_escritorio" class="form-control" value="<?=htmlspecialchars($nome_escritorio)?>" placeholder="Ex: SGL Advocacia">
-              </div>
-              <div class="col-md-6">
-                <label class="form-label fw-semibold">Razão Social</label>
-                <input type="text" name="razao_social" class="form-control" value="<?=htmlspecialchars($razao_social)?>" placeholder="Ex: SGL Advocacia LTDA">
-              </div>
-              <div class="col-md-4">
-                <label class="form-label fw-semibold">CNPJ</label>
-                <input type="text" name="cnpj" class="form-control" value="<?=htmlspecialchars($cnpj)?>" placeholder="00.000.000/0000-00">
-              </div>
-              <div class="col-md-4">
-                <label class="form-label fw-semibold">Telefone</label>
-                <input type="text" name="telefone" class="form-control" value="<?=htmlspecialchars($telefone)?>" placeholder="(00) 0000-0000">
-              </div>
-              <div class="col-md-4">
-                <label class="form-label fw-semibold">WhatsApp</label>
-                <input type="text" name="whatsapp" class="form-control" value="<?=htmlspecialchars($whatsapp)?>" placeholder="(00) 00000-0000">
-              </div>
-              <div class="col-md-6">
-                <label class="form-label fw-semibold">E-mail</label>
-                <input type="email" name="email" class="form-control" value="<?=htmlspecialchars($email)?>" placeholder="contato@escritorio.com.br">
-              </div>
-              <div class="col-md-6">
-                <label class="form-label fw-semibold">Site</label>
-                <input type="text" name="site" class="form-control" value="<?=htmlspecialchars($site)?>" placeholder="https://www.escritorio.com.br">
-              </div>
-            </div>
-            <div class="mt-4">
-              <button type="submit" class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Salvar Dados da Empresa</button>
-            </div>
-          </form>
+          <div class="row g-3">
+            <div class="col-md-6"><label class="form-label fw-semibold">Nome Fantasia / Escritório</label><input type="text" name="nome_fantasia" class="form-control" value="<?=htmlspecialchars($nome_fantasia)?>" placeholder="Ex: SGL Advocacia"></div>
+            <div class="col-md-6"><label class="form-label fw-semibold">Razão Social</label><input type="text" name="razao_social" class="form-control" value="<?=htmlspecialchars($razao_social)?>" placeholder="Ex: SGL Advocacia LTDA"></div>
+            <div class="col-md-4"><label class="form-label fw-semibold">CNPJ</label><input type="text" name="cnpj" class="form-control" value="<?=htmlspecialchars($cnpj)?>" placeholder="00.000.000/0000-00"></div>
+            <div class="col-md-4"><label class="form-label fw-semibold">Inscrição Estadual</label><input type="text" name="inscricao_estadual" class="form-control" value="<?=htmlspecialchars($inscricao_estadual)?>"></div>
+            <div class="col-md-4"><label class="form-label fw-semibold">Inscrição Municipal</label><input type="text" name="inscricao_municipal" class="form-control" value="<?=htmlspecialchars($inscricao_municipal)?>"></div>
+          </div>
         </div>
-    </div>
+      </div>
+
+      <div class="card mb-4"><div class="card-header bg-primary text-white"><i class="bi bi-person-badge me-1"></i> Responsável Jurídico</div><div class="card-body"><div class="row g-3">
+        <div class="col-md-5"><label class="form-label fw-semibold">Advogado Responsável</label><input type="text" name="advogado_responsavel" class="form-control" value="<?=htmlspecialchars($advogado_responsavel)?>"></div>
+        <div class="col-md-3"><label class="form-label fw-semibold">OAB</label><input type="text" name="oab" class="form-control" value="<?=htmlspecialchars($oab)?>" placeholder="Ex: OAB/SP 000000"></div>
+        <div class="col-md-4"><label class="form-label fw-semibold">CPF do Responsável</label><input type="text" name="cpf_responsavel" class="form-control" value="<?=htmlspecialchars($cpf_responsavel)?>" placeholder="000.000.000-00"></div>
+      </div></div></div>
+
+      <div class="card mb-4"><div class="card-header bg-primary text-white"><i class="bi bi-telephone me-1"></i> Contato</div><div class="card-body"><div class="row g-3">
+        <div class="col-md-3"><label class="form-label fw-semibold">Telefone</label><input type="text" name="telefone" class="form-control" value="<?=htmlspecialchars($telefone)?>" placeholder="(00) 0000-0000"></div>
+        <div class="col-md-3"><label class="form-label fw-semibold">Celular</label><input type="text" name="celular" class="form-control" value="<?=htmlspecialchars($celular)?>" placeholder="(00) 00000-0000"></div>
+        <div class="col-md-3"><label class="form-label fw-semibold">WhatsApp</label><input type="text" name="whatsapp" class="form-control" value="<?=htmlspecialchars($whatsapp)?>" placeholder="(00) 00000-0000"></div>
+        <div class="col-md-3"><label class="form-label fw-semibold">E-mail</label><input type="email" name="email" class="form-control" value="<?=htmlspecialchars($email)?>" placeholder="contato@escritorio.com.br"></div>
+        <div class="col-md-6"><label class="form-label fw-semibold">Site</label><input type="text" name="site" class="form-control" value="<?=htmlspecialchars($site)?>" placeholder="https://www.escritorio.com.br"></div>
+      </div></div></div>
+
+      <div class="card mb-4"><div class="card-header bg-primary text-white"><i class="bi bi-geo-alt me-1"></i> Endereço</div><div class="card-body"><div class="row g-3">
+        <div class="col-md-2"><label class="form-label fw-semibold">CEP</label><input type="text" name="cep" class="form-control" value="<?=htmlspecialchars($cep)?>" placeholder="00000-000"></div>
+        <div class="col-md-6"><label class="form-label fw-semibold">Endereço</label><input type="text" name="endereco" class="form-control" value="<?=htmlspecialchars($endereco)?>"></div>
+        <div class="col-md-2"><label class="form-label fw-semibold">Número</label><input type="text" name="numero" class="form-control" value="<?=htmlspecialchars($numero)?>"></div>
+        <div class="col-md-2"><label class="form-label fw-semibold">Complemento</label><input type="text" name="complemento" class="form-control" value="<?=htmlspecialchars($complemento)?>"></div>
+        <div class="col-md-3"><label class="form-label fw-semibold">Bairro</label><input type="text" name="bairro" class="form-control" value="<?=htmlspecialchars($bairro)?>"></div>
+        <div class="col-md-3"><label class="form-label fw-semibold">Cidade</label><input type="text" name="cidade" class="form-control" value="<?=htmlspecialchars($cidade)?>"></div>
+        <div class="col-md-3"><label class="form-label fw-semibold">Estado</label><input type="text" name="estado" class="form-control" value="<?=htmlspecialchars($estado)?>" placeholder="Ex: SP"></div>
+        <div class="col-md-3"><label class="form-label fw-semibold">País</label><input type="text" name="pais" class="form-control" value="<?=htmlspecialchars($pais)?>"></div>
+      </div></div></div>
+
+      <div class="card mb-4"><div class="card-header bg-primary text-white"><i class="bi bi-share me-1"></i> Redes Sociais</div><div class="card-body"><div class="row g-3">
+        <div class="col-md-4"><label class="form-label fw-semibold">Instagram</label><input type="text" name="instagram" class="form-control" value="<?=htmlspecialchars($instagram)?>"></div>
+        <div class="col-md-4"><label class="form-label fw-semibold">Facebook</label><input type="text" name="facebook" class="form-control" value="<?=htmlspecialchars($facebook)?>"></div>
+        <div class="col-md-4"><label class="form-label fw-semibold">LinkedIn</label><input type="text" name="linkedin" class="form-control" value="<?=htmlspecialchars($linkedin)?>"></div>
+        <div class="col-12"><label class="form-label fw-semibold">Observações Institucionais</label><textarea name="observacoes" class="form-control" rows="3"><?=htmlspecialchars($observacoes)?></textarea></div>
+      </div></div></div>
+
+      <div class="mb-4"><button type="submit" class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Salvar Dados da Empresa</button></div>
+    </form>
   </div>
 
   <div class="tab-pane fade" id="tab-marca">

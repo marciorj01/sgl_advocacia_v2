@@ -9,7 +9,7 @@ exigirLogin('auth/login.php');
 $modulo = isset($_GET['mod']) ? trim($_GET['mod']) : 'dashboard';
 $modulos_validos = [
     'dashboard', 'advogados', 'clientes', 'processos', 'honorarios', 'agenda',
-    'financeiro', 'recibos', 'documentos', 'modelos', 'configuracoes'
+    'financeiro', 'recibos', 'documentos', 'modelos', 'configuracoes', 'busca'
 ];
 if (!in_array($modulo, $modulos_validos, true)) { $modulo = 'dashboard'; }
 
@@ -25,6 +25,7 @@ $titulos = [
     'documentos' => 'Documentos',
     'modelos' => 'Modelos Jurídicos',
     'configuracoes' => 'Configurações',
+    'busca' => 'Busca Global',
 ];
 $tituloPagina = $titulos[$modulo] ?? 'SGL';
 
@@ -34,13 +35,87 @@ function sgl_menu_active(string $atual, array $itens): string {
 function sgl_link_active(string $atual, string $item): string {
     return $atual === $item ? 'active' : '';
 }
+
+function sgl_table_exists(mysqli $conn, string $tabela): bool {
+    if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela)) { return false; }
+    $stmt = $conn->prepare("SELECT COUNT(*) AS total FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+    $stmt->bind_param('s', $tabela);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return ((int)($row['total'] ?? 0)) > 0;
+}
+
+function sgl_table_columns(mysqli $conn, string $tabela): array {
+    if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela)) { return []; }
+    $stmt = $conn->prepare("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+    $stmt->bind_param('s', $tabela);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $cols = [];
+    while ($row = $res->fetch_assoc()) { $cols[] = $row['COLUMN_NAME']; }
+    $stmt->close();
+    return $cols;
+}
+
+function sgl_busca_global(mysqli $conn, string $termo): array {
+    $termo = trim($termo);
+    if ($termo === '') { return []; }
+
+    $config = [
+        'clientes' => ['titulo' => 'Clientes', 'mod' => 'clientes', 'campos' => ['nome','cpf','cnpj','email','telefone']],
+        'processos' => ['titulo' => 'Processos', 'mod' => 'processos', 'campos' => ['numero_processo','titulo','cliente','vara','status']],
+        'advogados' => ['titulo' => 'Advogados', 'mod' => 'advogados', 'campos' => ['nome','oab','email','telefone']],
+        'agenda' => ['titulo' => 'Agenda', 'mod' => 'agenda', 'campos' => ['titulo','descricao','cliente','data']],
+        'honorarios' => ['titulo' => 'Honorários', 'mod' => 'honorarios', 'campos' => ['cliente','descricao','status']],
+        'documentos_arquivos' => ['titulo' => 'Documentos', 'mod' => 'documentos', 'campos' => ['nome_arquivo','titulo','descricao']],
+        'modelos_documentos' => ['titulo' => 'Modelos', 'mod' => 'modelos', 'campos' => ['titulo','nome','descricao']],
+    ];
+
+    $saida = [];
+    $like = '%' . $termo . '%';
+
+    foreach ($config as $tabela => $cfg) {
+        if (!sgl_table_exists($conn, $tabela)) { continue; }
+        $cols = sgl_table_columns($conn, $tabela);
+        $campos = array_values(array_intersect($cfg['campos'], $cols));
+        if (!$campos || !in_array('id', $cols, true)) { continue; }
+
+        $wheres = array_map(fn($c) => "`$c` LIKE ?", $campos);
+        $selectNome = $campos[0];
+        $sql = "SELECT id, `$selectNome` AS principal FROM `$tabela` WHERE " . implode(' OR ', $wheres) . " ORDER BY id DESC LIMIT 10";
+
+        try {
+            $stmt = $conn->prepare($sql);
+            $params = array_fill(0, count($campos), $like);
+            $types = str_repeat('s', count($params));
+            $stmt->bind_param($types, ...$params);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            while ($row = $res->fetch_assoc()) {
+                $saida[] = [
+                    'modulo' => $cfg['titulo'],
+                    'mod' => $cfg['mod'],
+                    'id' => (string)$row['id'],
+                    'texto' => (string)($row['principal'] ?: 'Registro sem descrição'),
+                ];
+            }
+            $stmt->close();
+        } catch (Throwable $e) {
+            continue;
+        }
+    }
+
+    return $saida;
+}
+
 ?>
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SGL - <?= htmlspecialchars($tituloPagina) ?> | Escritório de Advocacia</title>
+    <title>ROJEX.AI - <?= htmlspecialchars($tituloPagina) ?> | ERP Jurídico Enterprise</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
     <link href="assets/css/style.css" rel="stylesheet">
@@ -113,6 +188,22 @@ function sgl_link_active(string $atual, string $item): string {
             border-top: 1px solid rgba(255,255,255,.12);
         }
         .sgl-main { min-width:0; background:#f5f7fa; }
+
+        .sgl-topbar {
+            display:flex;
+            justify-content:space-between;
+            align-items:center;
+            gap:12px;
+            margin-bottom:18px;
+        }
+        .sgl-global-search {
+            max-width:520px;
+            width:100%;
+        }
+        @media (max-width: 991px) {
+            .sgl-topbar { display:block; }
+            .sgl-global-search { max-width:100%; margin-top:10px; }
+        }
         @media (max-width: 991px) {
             .sgl-layout { display:block!important; }
             .sgl-sidebar { position:relative; width:100%; min-width:100%; height:auto; min-height:auto; }
@@ -135,6 +226,7 @@ function sgl_link_active(string $atual, string $item): string {
 
         <div class="sgl-menu">
             <a href="?mod=dashboard" class="nav-link <?= sgl_link_active($modulo, 'dashboard') ?>"><i class="bi bi-speedometer2"></i> Dashboard</a>
+            <a href="?mod=busca" class="nav-link <?= sgl_link_active($modulo, 'busca') ?>"><i class="bi bi-search"></i> Busca Global</a>
 
             <div class="sgl-menu-title">Cadastros</div>
             <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuCadastros" aria-expanded="<?= sgl_menu_active($modulo, ['advogados','clientes']) ? 'true' : 'false' ?>">
@@ -186,12 +278,58 @@ function sgl_link_active(string $atual, string $item): string {
     </nav>
 
     <main class="flex-grow-1 p-4 sgl-main">
+        <div class="sgl-topbar">
+            <div></div>
+            <form class="sgl-global-search" method="GET" action="">
+                <input type="hidden" name="mod" value="busca">
+                <div class="input-group shadow-sm">
+                    <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                    <input type="search" name="q" class="form-control" value="<?= htmlspecialchars($_GET['q'] ?? '', ENT_QUOTES, 'UTF-8') ?>" placeholder="Busca global: cliente, processo, documento, agenda...">
+                    <button class="btn btn-primary" type="submit">Buscar</button>
+                </div>
+            </form>
+        </div>
+
         <?php
-        $arquivo = __DIR__ . "/modules/{$modulo}.php";
-        if (file_exists($arquivo)) {
-            include $arquivo;
+        if ($modulo === 'busca') {
+            $q = trim((string)($_GET['q'] ?? ''));
+            echo "<div class='mb-4'><h3 class='text-primary mb-1'><i class='bi bi-search me-2'></i>Busca Global</h3><p class='text-muted mb-0'>Pesquise clientes, processos, advogados, agenda, documentos e modelos em um único lugar.</p></div>";
+
+            if ($q === '') {
+                echo "<div class='alert alert-info'>Digite um termo na barra de busca para iniciar a pesquisa.</div>";
+            } else {
+                try {
+                    $connBusca = conectar();
+                    $resultados = sgl_busca_global($connBusca, $q);
+                    $connBusca->close();
+
+                    echo "<div class='card shadow-sm border-0'><div class='card-header bg-dark text-white d-flex justify-content-between'><span><i class='bi bi-list-search me-1'></i>Resultados para: " . htmlspecialchars($q, ENT_QUOTES, 'UTF-8') . "</span><span>" . count($resultados) . " resultado(s)</span></div><div class='card-body'>";
+                    if (!$resultados) {
+                        echo "<div class='text-center py-4 text-muted'><i class='bi bi-search fs-1 d-block mb-3 opacity-25'></i>Nenhum resultado encontrado.</div>";
+                    } else {
+                        echo "<div class='table-responsive'><table class='table table-hover align-middle mb-0'><thead class='table-light'><tr><th>Módulo</th><th>ID</th><th>Registro</th><th class='text-end'>Ação</th></tr></thead><tbody>";
+                        foreach ($resultados as $r) {
+                            echo "<tr>";
+                            echo "<td><span class='badge bg-secondary'>" . htmlspecialchars($r['modulo'], ENT_QUOTES, 'UTF-8') . "</span></td>";
+                            echo "<td><code>" . htmlspecialchars($r['id'], ENT_QUOTES, 'UTF-8') . "</code></td>";
+                            echo "<td><strong>" . htmlspecialchars($r['texto'], ENT_QUOTES, 'UTF-8') . "</strong></td>";
+                            echo "<td class='text-end'><a class='btn btn-sm btn-outline-primary' href='?mod=" . htmlspecialchars($r['mod'], ENT_QUOTES, 'UTF-8') . "'>Abrir módulo</a></td>";
+                            echo "</tr>";
+                        }
+                        echo "</tbody></table></div>";
+                    }
+                    echo "</div></div>";
+                } catch (Throwable $e) {
+                    echo "<div class='alert alert-danger'>Não foi possível executar a busca global.</div>";
+                }
+            }
         } else {
-            echo "<div class='alert alert-danger'><strong>Módulo não encontrado:</strong> " . htmlspecialchars($modulo) . "</div>";
+            $arquivo = __DIR__ . "/modules/{$modulo}.php";
+            if (file_exists($arquivo)) {
+                include $arquivo;
+            } else {
+                echo "<div class='alert alert-danger'><strong>Módulo não encontrado:</strong> " . htmlspecialchars($modulo) . "</div>";
+            }
         }
         ?>
     </main>

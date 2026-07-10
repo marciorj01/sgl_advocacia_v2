@@ -298,6 +298,228 @@ if (!function_exists('rojex_kb_filtro_deletado')) {
     }
 }
 
+
+
+if (!function_exists('rojex_kb_cliente_por_documento')) {
+    /**
+     * Localiza um cliente ativo por CPF ou CNPJ, com ou sem máscara.
+     */
+    function rojex_kb_cliente_por_documento(mysqli $conn, string $documento): ?array
+    {
+        $documento = rojex_kb_somente_digitos($documento);
+
+        if (
+            $documento === '' ||
+            !in_array(strlen($documento), [11, 14], true) ||
+            !rojex_kb_tabela_existe($conn, 'clientes')
+        ) {
+            return null;
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'clientes');
+        if (!in_array('cpf_cnpj', $colunas, true)) {
+            return null;
+        }
+
+        $camposDesejados = [
+            'id', 'nome', 'cpf_cnpj', 'tipo_pessoa', 'telefone',
+            'celular', 'whatsapp', 'email', 'cidade', 'estado', 'status'
+        ];
+        $campos = array_values(array_intersect($camposDesejados, $colunas));
+
+        if ($campos === []) {
+            return null;
+        }
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        $sql = 'SELECT ' . implode(', ', array_map(
+            static fn(string $campo): string => "`{$campo}`",
+            $campos
+        )) . '
+                FROM clientes
+                WHERE ' . rojex_kb_sql_only_digits('COALESCE(cpf_cnpj, \'\')') . ' = ?'
+                . $filtroLixeira . '
+                LIMIT 1';
+
+        return rojex_kb_consultar_um($conn, $sql, 's', [$documento]);
+    }
+}
+
+if (!function_exists('rojex_kb_sql_only_digits')) {
+    /**
+     * Monta uma expressão SQL para normalizar números armazenados com máscara.
+     *
+     * Use apenas com expressões internas e controladas pelo sistema.
+     */
+    function rojex_kb_sql_only_digits(string $expressao): string
+    {
+        return "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE("
+            . $expressao
+            . ", '.', ''), '-', ''), '/', ''), '(', ''), ')', ''), ' ', ''), '+', '')";
+    }
+}
+
+if (!function_exists('rojex_kb_limpar_termo_cliente')) {
+    /**
+     * Remove palavras de comando comuns antes da pesquisa por cliente.
+     */
+    function rojex_kb_limpar_termo_cliente(string $termo): string
+    {
+        $limpo = mb_strtolower(trim($termo), 'UTF-8');
+
+        if ($limpo === '') {
+            return '';
+        }
+
+        $limpo = preg_replace(
+            '/\b(cliente|clientes|localizar|buscar|pesquisar|procure|encontre|cadastro|cpf|cnpj|nome|rojex|ai)\b/iu',
+            ' ',
+            $limpo
+        );
+
+        return trim(preg_replace('/\s+/', ' ', (string)$limpo));
+    }
+}
+
+if (!function_exists('rojex_kb_clientes_por_termo')) {
+    /**
+     * Pesquisa clientes ativos por nome, e-mail ou cidade.
+     */
+    function rojex_kb_clientes_por_termo(
+        mysqli $conn,
+        string $termo,
+        int $limite = 5
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'clientes')) {
+            return [];
+        }
+
+        $termoOriginal = trim($termo);
+        if ($termoOriginal === '' || mb_strlen($termoOriginal, 'UTF-8') < 3) {
+            return [];
+        }
+
+        $termoLimpo = rojex_kb_limpar_termo_cliente($termoOriginal);
+        if ($termoLimpo === '' || mb_strlen($termoLimpo, 'UTF-8') < 3) {
+            $termoLimpo = $termoOriginal;
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'clientes');
+        $camposPesquisa = array_values(array_intersect(
+            ['nome', 'email', 'cidade'],
+            $colunas
+        ));
+
+        if ($camposPesquisa === []) {
+            return [];
+        }
+
+        $camposDesejados = [
+            'id', 'nome', 'cpf_cnpj', 'tipo_pessoa', 'telefone',
+            'celular', 'whatsapp', 'email', 'cidade', 'estado', 'status'
+        ];
+        $camposRetorno = array_values(array_intersect($camposDesejados, $colunas));
+
+        if ($camposRetorno === []) {
+            return [];
+        }
+
+        $where = [];
+        $params = [];
+        $types = '';
+        $like = '%' . $termoLimpo . '%';
+
+        foreach ($camposPesquisa as $campo) {
+            $where[] = "`{$campo}` LIKE ?";
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        $ordem = in_array('nome', $colunas, true)
+            ? 'nome ASC'
+            : 'id DESC';
+
+        $limiteSeguro = rojex_kb_limite($limite, 5, 50);
+
+        $sql = 'SELECT ' . implode(', ', array_map(
+            static fn(string $campo): string => "`{$campo}`",
+            $camposRetorno
+        )) . '
+                FROM clientes
+                WHERE (' . implode(' OR ', $where) . ')'
+                . $filtroLixeira . '
+                ORDER BY ' . $ordem . '
+                LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_resumo_clientes')) {
+    /**
+     * Retorna indicadores básicos de clientes para CIJ e demais módulos.
+     */
+    function rojex_kb_resumo_clientes(
+        mysqli $conn,
+        ?string $inicio = null,
+        ?string $fim = null
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'clientes')) {
+            return [
+                'ativos' => 0,
+                'novos_periodo' => 0,
+            ];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'clientes');
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' WHERE COALESCE(deletado, 0) = 0'
+            : ' WHERE 1 = 1';
+
+        $sqlAtivos = 'SELECT COUNT(*) AS total
+                      FROM clientes'
+                      . $filtroLixeira;
+
+        if (in_array('status', $colunas, true)) {
+            $sqlAtivos .= " AND status = 'Ativo'";
+        }
+
+        $ativos = (int)(rojex_kb_total($conn, $sqlAtivos) ?? 0);
+
+        $novos = 0;
+        if (
+            $inicio !== null &&
+            $fim !== null &&
+            in_array('data_cadastro', $colunas, true)
+        ) {
+            $sqlNovos = 'SELECT COUNT(*) AS total
+                         FROM clientes'
+                         . $filtroLixeira
+                         . ' AND data_cadastro BETWEEN ? AND ?';
+
+            $novos = (int)(rojex_kb_total(
+                $conn,
+                $sqlNovos,
+                'ss',
+                [$inicio, $fim]
+            ) ?? 0);
+        }
+
+        return [
+            'ativos' => $ativos,
+            'novos_periodo' => $novos,
+        ];
+    }
+}
+
+
 if (!function_exists('rojex_kb_status')) {
     /**
      * Retorna informações básicas da Base de Conhecimento.

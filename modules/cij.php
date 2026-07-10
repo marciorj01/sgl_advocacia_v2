@@ -10,6 +10,11 @@
 
 $conn = conectar();
 
+$arquivoBaseConhecimento = __DIR__ . '/../config/base_conhecimento.php';
+if (is_file($arquivoBaseConhecimento)) {
+    require_once $arquivoBaseConhecimento;
+}
+
 function cij_h($valor): string
 {
     return htmlspecialchars((string)($valor ?? ''), ENT_QUOTES, 'UTF-8');
@@ -112,65 +117,21 @@ function cij_only_digits(?string $valor): string
 
 function cij_cliente_por_documento(mysqli $conn, string $documento): ?array
 {
-    $doc = cij_only_digits($documento);
-    if ($doc === '' || !in_array(strlen($doc), [11, 14], true) || !cij_table_exists($conn, 'clientes')) {
+    if (!function_exists('rojex_kb_cliente_por_documento')) {
         return null;
     }
 
-    $sql = "SELECT id, nome, cpf_cnpj, tipo_pessoa, telefone, celular, whatsapp, email, cidade, estado, status
-            FROM clientes
-            WHERE COALESCE(deletado,0)=0
-              AND REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(cpf_cnpj,''), '.', ''), '-', ''), '/', ''), ' ', '') = ?
-            LIMIT 1";
-    $stmt = @$conn->prepare($sql);
-    if (!$stmt) {
-        return null;
-    }
-
-    $stmt->bind_param('s', $doc);
-    $stmt->execute();
-    $res = $stmt->get_result();
-    $cliente = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
-    $stmt->close();
-
-    return $cliente ?: null;
+    return rojex_kb_cliente_por_documento($conn, $documento);
 }
 
 
 function cij_cliente_por_nome(mysqli $conn, string $nome): array
 {
-    $nome = trim($nome);
-    if ($nome === '' || mb_strlen($nome, 'UTF-8') < 3 || !cij_table_exists($conn, 'clientes')) {
+    if (!function_exists('rojex_kb_clientes_por_termo')) {
         return [];
     }
 
-    // Remove palavras de comando comuns para permitir perguntas como "localizar cliente Marcio".
-    $limpo = mb_strtolower($nome, 'UTF-8');
-    $limpo = preg_replace('/\b(cliente|clientes|localizar|buscar|pesquisar|procure|encontre|cadastro|cpf|cnpj|nome|rojex|ai)\b/iu', ' ', $limpo);
-    $limpo = trim(preg_replace('/\s+/', ' ', (string)$limpo));
-    if ($limpo === '' || mb_strlen($limpo, 'UTF-8') < 3) {
-        $limpo = trim($nome);
-    }
-
-    $like = '%' . $limpo . '%';
-    $sql = "SELECT id, nome, cpf_cnpj, tipo_pessoa, telefone, celular, whatsapp, email, cidade, estado, status
-            FROM clientes
-            WHERE COALESCE(deletado,0)=0
-              AND (nome LIKE ? OR email LIKE ? OR cidade LIKE ?)
-            ORDER BY nome ASC
-            LIMIT 5";
-    $stmt = @$conn->prepare($sql);
-    if (!$stmt) {
-        return [];
-    }
-
-    $stmt->bind_param('sss', $like, $like, $like);
-    $stmt->execute();
-    $res = $stmt->get_result();
-    $clientes = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
-    $stmt->close();
-
-    return $clientes;
+    return rojex_kb_clientes_por_termo($conn, $nome, 5);
 }
 
 

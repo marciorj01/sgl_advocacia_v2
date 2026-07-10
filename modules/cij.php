@@ -193,12 +193,6 @@ function cij_busca_livre_base(mysqli $conn, string $consulta): array
         }
     }
 
-    if (function_exists('rojex_kb_agenda_por_termo')) {
-        foreach (rojex_kb_agenda_por_termo($conn, $consulta, 5) as $compromisso) {
-            $resultados[] = ['tipo' => 'agenda', 'dados' => $compromisso];
-        }
-    }
-
     return $resultados;
 }
 
@@ -410,76 +404,18 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
     }
 
     if ($atalho === 'agenda' || str_contains($perguntaNormalizada, 'agenda') || str_contains($perguntaNormalizada, 'audiência') || str_contains($perguntaNormalizada, 'audiencia')) {
-        $compromissos = [];
+        $total = cij_table_exists($conn, 'agenda') ? cij_count($conn, "SELECT COUNT(*) AS total FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado'") : 0;
+        $audiencias = cij_table_exists($conn, 'agenda') ? cij_count($conn, "SELECT COUNT(*) AS total FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado' AND (tipo_compromisso LIKE '%Audiência%' OR tipo_compromisso LIKE '%Audiencia%')") : 0;
+        $linhas = cij_table_exists($conn, 'agenda') ? cij_rows($conn, "SELECT horario, tipo_compromisso, nome_cliente, local_evento, local FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado' ORDER BY horario IS NULL, horario ASC LIMIT 5") : [];
 
-        if ($atalho === 'agenda' && function_exists('rojex_kb_agenda_hoje')) {
-            $compromissos = rojex_kb_agenda_hoje($conn, $hoje, 10);
-        } elseif (function_exists('rojex_kb_agenda_por_termo')) {
-            $compromissos = rojex_kb_agenda_por_termo($conn, $pergunta, 10);
+        $resposta['titulo'] = 'Agenda de Hoje';
+        $resposta['texto'] = "Hoje existem {$total} compromisso(s) na agenda, sendo {$audiencias} audiência(s).";
+        foreach ($linhas as $l) {
+            $hora = $l['horario'] ? date('H:i', strtotime($l['horario'])) : 'Sem horário';
+            $local = $l['local_evento'] ?: ($l['local'] ?? '-');
+            $resposta['itens'][] = "{$hora} — " . ($l['tipo_compromisso'] ?: 'Compromisso') . " — " . ($l['nome_cliente'] ?: 'Cliente não informado') . " — {$local}";
         }
-
-        if ($atalho === 'agenda') {
-            $total = count($compromissos);
-            $audiencias = 0;
-            foreach ($compromissos as $compromisso) {
-                $tipoCompromisso = mb_strtolower((string)($compromisso['tipo_compromisso'] ?? ''), 'UTF-8');
-                if (str_contains($tipoCompromisso, 'audiência') || str_contains($tipoCompromisso, 'audiencia')) {
-                    $audiencias++;
-                }
-            }
-            $resposta['titulo'] = 'Agenda de Hoje';
-            $resposta['texto'] = "Hoje existem {$total} compromisso(s) na agenda, sendo {$audiencias} audiência(s).";
-        } else {
-            $resposta['titulo'] = count($compromissos) === 1 ? 'Compromisso localizado' : 'Compromissos localizados';
-            $resposta['texto'] = !empty($compromissos)
-                ? 'Encontrei compromisso(s) compatíveis com a pesquisa informada.'
-                : 'Não encontrei compromisso compatível com a pesquisa informada.';
-        }
-
-        foreach ($compromissos as $compromisso) {
-            $data = !empty($compromisso['data_evento'])
-                ? date('d/m/Y', strtotime((string)$compromisso['data_evento']))
-                : '-';
-            $hora = !empty($compromisso['horario'])
-                ? date('H:i', strtotime((string)$compromisso['horario']))
-                : 'Sem horário';
-
-            $resposta['itens'][] = $data . ' ' . $hora
-                . ' | ' . (($compromisso['tipo_compromisso'] ?? '') ?: 'Compromisso')
-                . ' | Cliente: ' . (($compromisso['cliente_nome'] ?? '') ?: '-')
-                . ' | Processo: ' . (($compromisso['numero_processo'] ?? '') ?: '-')
-                . ' | Advogado: ' . (($compromisso['advogado_nome'] ?? '') ?: '-')
-                . ' | Local: ' . (($compromisso['local'] ?? '') ?: '-')
-                . ' | Status: ' . (($compromisso['status'] ?? '') ?: '-');
-        }
-
-        if (!empty($compromissos)) {
-            $primeiro = $compromissos[0];
-            $resposta['tipo'] = 'primary';
-            $resposta['alerta'] = 'Consulta realizada pela Base de Conhecimento da Agenda do ROJEX.AI.';
-            $resposta['acoes'][] = [
-                'label' => 'Abrir compromisso',
-                'url' => '?mod=agenda&acao=editar&id=' . urlencode((string)($primeiro['id'] ?? '')),
-                'class' => 'btn-primary',
-                'icon' => 'bi-calendar-event'
-            ];
-            $resposta['acoes'][] = [
-                'label' => 'Ver agenda completa',
-                'url' => '?mod=agenda',
-                'class' => 'btn-outline-secondary',
-                'icon' => 'bi-calendar3'
-            ];
-        } else {
-            $resposta['tipo'] = 'success';
-            $resposta['alerta'] = 'Nenhum compromisso ativo foi encontrado para esta consulta.';
-            $resposta['acoes'][] = [
-                'label' => 'Abrir agenda',
-                'url' => '?mod=agenda',
-                'class' => 'btn-outline-primary',
-                'icon' => 'bi-calendar3'
-            ];
-        }
-
+        $resposta['tipo'] = $total > 0 ? 'primary' : 'success';
         return $resposta;
     }
 
@@ -544,7 +480,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
             $resposta['titulo'] = 'Resultados encontrados';
             $resposta['texto'] = 'A Base de Conhecimento encontrou registros compatíveis em diferentes áreas do ROJEX.AI.';
             $resposta['tipo'] = 'success';
-            $resposta['alerta'] = 'Consulta livre realizada em clientes, advogados, processos e agenda.';
+            $resposta['alerta'] = 'Consulta livre realizada em clientes, advogados e processos.';
 
             foreach ($achados as $achado) {
                 $tipo = $achado['tipo'] ?? '';
@@ -562,15 +498,6 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
                 } elseif ($tipo === 'processo') {
                     $resposta['itens'][] = 'Processo: '
                         . (($dados['numero_processo'] ?? '') ?: '-')
-                        . ' | Cliente: ' . (($dados['cliente_nome'] ?? '') ?: '-')
-                        . ' | Status: ' . (($dados['status'] ?? '') ?: '-');
-                } elseif ($tipo === 'agenda') {
-                    $dataAgenda = !empty($dados['data_evento'])
-                        ? date('d/m/Y', strtotime((string)$dados['data_evento']))
-                        : '-';
-                    $resposta['itens'][] = 'Agenda: '
-                        . $dataAgenda
-                        . ' | ' . (($dados['tipo_compromisso'] ?? '') ?: 'Compromisso')
                         . ' | Cliente: ' . (($dados['cliente_nome'] ?? '') ?: '-')
                         . ' | Status: ' . (($dados['status'] ?? '') ?: '-');
                 }
@@ -601,13 +528,6 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
                     'url' => '?mod=processos&acao=editar&id=' . urlencode($id),
                     'class' => 'btn-primary',
                     'icon' => 'bi-folder2-open'
-                ];
-            } elseif ($tipo === 'agenda') {
-                $resposta['acoes'][] = [
-                    'label' => 'Abrir compromisso',
-                    'url' => '?mod=agenda&acao=editar&id=' . urlencode($id),
-                    'class' => 'btn-primary',
-                    'icon' => 'bi-calendar-event'
                 ];
             }
 
@@ -774,4 +694,4 @@ if ($ferramentaCij === 'gerador') {
 
 <?php
 $conn->close();
-?>
+?>2

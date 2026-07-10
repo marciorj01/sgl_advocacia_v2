@@ -1005,6 +1005,320 @@ if (!function_exists('rojex_kb_resumo_processos')) {
 }
 
 
+
+
+if (!function_exists('rojex_kb_limpar_termo_agenda')) {
+    /**
+     * Remove palavras de comando comuns antes da pesquisa na agenda.
+     */
+    function rojex_kb_limpar_termo_agenda(string $termo): string
+    {
+        $limpo = mb_strtolower(trim($termo), 'UTF-8');
+
+        if ($limpo === '') {
+            return '';
+        }
+
+        $limpo = preg_replace(
+            '/\b(agenda|compromisso|compromissos|evento|eventos|localizar|buscar|pesquisar|procure|encontre|mostrar|mostre|qual|quais|rojex|ai)\b/iu',
+            ' ',
+            $limpo
+        );
+
+        return trim((string)preg_replace('/\s+/u', ' ', (string)$limpo));
+    }
+}
+
+if (!function_exists('rojex_kb_agenda_por_termo')) {
+    /**
+     * Pesquisa compromissos por ID, cliente, processo, advogado,
+     * tipo, local, status, prazo fatal ou observações.
+     */
+    function rojex_kb_agenda_por_termo(
+        mysqli $conn,
+        string $termo,
+        int $limite = 10
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'agenda')) {
+            return [];
+        }
+
+        $termoOriginal = trim($termo);
+        if ($termoOriginal === '') {
+            return [];
+        }
+
+        $termoLimpo = rojex_kb_limpar_termo_agenda($termoOriginal);
+        if ($termoLimpo === '') {
+            $termoLimpo = $termoOriginal;
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'agenda');
+        if (!in_array('id', $colunas, true)) {
+            return [];
+        }
+
+        $temClientes = rojex_kb_tabela_existe($conn, 'clientes')
+            && in_array('cliente_id', $colunas, true);
+
+        $temAdvogados = rojex_kb_tabela_existe($conn, 'advogados')
+            && in_array('advogado_id', $colunas, true);
+
+        $joins = [];
+        if ($temClientes) {
+            $joins[] = 'LEFT JOIN clientes c ON c.id = ag.cliente_id';
+        }
+        if ($temAdvogados) {
+            $joins[] = 'LEFT JOIN advogados adv ON adv.id = ag.advogado_id';
+        }
+
+        $where = [];
+        $params = [];
+        $types = '';
+        $like = '%' . $termoLimpo . '%';
+
+        foreach ([
+            'id',
+            'nome_cliente',
+            'numero_processo',
+            'tipo_compromisso',
+            'local',
+            'status',
+            'prazo_fatal',
+            'observacoes'
+        ] as $campo) {
+            if (!in_array($campo, $colunas, true)) {
+                continue;
+            }
+
+            $where[] = "ag.`{$campo}` LIKE ?";
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($temClientes) {
+            $where[] = 'c.nome LIKE ?';
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($temAdvogados) {
+            $where[] = 'adv.nome LIKE ?';
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($where === []) {
+            return [];
+        }
+
+        $select = [
+            'ag.id',
+            in_array('data_evento', $colunas, true) ? 'ag.data_evento' : "NULL AS data_evento",
+            in_array('horario', $colunas, true) ? 'ag.horario' : "NULL AS horario",
+            in_array('tipo_compromisso', $colunas, true) ? 'ag.tipo_compromisso' : "'' AS tipo_compromisso",
+            in_array('cliente_id', $colunas, true) ? 'ag.cliente_id' : "NULL AS cliente_id",
+            $temClientes ? "COALESCE(NULLIF(ag.nome_cliente,''), c.nome, '') AS cliente_nome" : (in_array('nome_cliente', $colunas, true) ? "COALESCE(ag.nome_cliente,'') AS cliente_nome" : "'' AS cliente_nome"),
+            in_array('numero_processo', $colunas, true) ? 'ag.numero_processo' : "'' AS numero_processo",
+            in_array('local', $colunas, true) ? 'ag.`local` AS local' : "'' AS local",
+            in_array('advogado_id', $colunas, true) ? 'ag.advogado_id' : "NULL AS advogado_id",
+            $temAdvogados ? "COALESCE(adv.nome, '') AS advogado_nome" : "'' AS advogado_nome",
+            in_array('status', $colunas, true) ? 'ag.status' : "'' AS status",
+            in_array('prazo_fatal', $colunas, true) ? 'ag.prazo_fatal' : "'' AS prazo_fatal",
+            in_array('observacoes', $colunas, true) ? 'ag.observacoes' : "'' AS observacoes",
+        ];
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(ag.deletado, 0) = 0'
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 10, 100);
+
+        $ordem = [];
+        if (in_array('data_evento', $colunas, true)) {
+            $ordem[] = "COALESCE(ag.data_evento, '2999-12-31') ASC";
+        }
+        if (in_array('horario', $colunas, true)) {
+            $ordem[] = "COALESCE(ag.horario, '23:59:59') ASC";
+        }
+        $ordem[] = 'ag.id DESC';
+
+        $sql = 'SELECT ' . implode(', ', $select)
+            . ' FROM agenda ag '
+            . implode(' ', $joins)
+            . ' WHERE (' . implode(' OR ', $where) . ')'
+            . $filtroLixeira
+            . ' ORDER BY ' . implode(', ', $ordem)
+            . ' LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_agenda_por_periodo')) {
+    /**
+     * Retorna compromissos dentro de um período.
+     */
+    function rojex_kb_agenda_por_periodo(
+        mysqli $conn,
+        string $dataInicio,
+        string $dataFim,
+        int $limite = 50
+    ): array {
+        if (
+            !rojex_kb_tabela_existe($conn, 'agenda')
+            || !rojex_kb_coluna_existe($conn, 'agenda', 'data_evento')
+        ) {
+            return [];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'agenda');
+        $temAdvogados = rojex_kb_tabela_existe($conn, 'advogados')
+            && in_array('advogado_id', $colunas, true);
+
+        $joinAdvogado = $temAdvogados
+            ? 'LEFT JOIN advogados adv ON adv.id = ag.advogado_id'
+            : '';
+
+        $advogadoNome = $temAdvogados
+            ? "COALESCE(adv.nome, '') AS advogado_nome"
+            : "'' AS advogado_nome";
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(ag.deletado, 0) = 0'
+            : '';
+
+        $filtroCancelado = in_array('status', $colunas, true)
+            ? " AND COALESCE(ag.status, '') <> 'Cancelado'"
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 50, 200);
+
+        $sql = "SELECT
+                    ag.id,
+                    ag.data_evento,
+                    ag.horario,
+                    ag.tipo_compromisso,
+                    ag.nome_cliente AS cliente_nome,
+                    ag.numero_processo,
+                    ag.`local` AS local,
+                    {$advogadoNome},
+                    ag.status,
+                    ag.prazo_fatal,
+                    ag.observacoes
+                FROM agenda ag
+                {$joinAdvogado}
+                WHERE ag.data_evento BETWEEN ? AND ?
+                {$filtroLixeira}
+                {$filtroCancelado}
+                ORDER BY ag.data_evento ASC, ag.horario ASC, ag.id DESC
+                LIMIT {$limiteSeguro}";
+
+        return rojex_kb_consultar(
+            $conn,
+            $sql,
+            'ss',
+            [$dataInicio, $dataFim]
+        );
+    }
+}
+
+if (!function_exists('rojex_kb_agenda_hoje')) {
+    /**
+     * Retorna compromissos ativos do dia informado.
+     */
+    function rojex_kb_agenda_hoje(
+        mysqli $conn,
+        ?string $data = null,
+        int $limite = 50
+    ): array {
+        $dataConsulta = $data ?: date('Y-m-d');
+
+        return rojex_kb_agenda_por_periodo(
+            $conn,
+            $dataConsulta,
+            $dataConsulta,
+            $limite
+        );
+    }
+}
+
+if (!function_exists('rojex_kb_resumo_agenda')) {
+    /**
+     * Retorna indicadores básicos da agenda.
+     */
+    function rojex_kb_resumo_agenda(
+        mysqli $conn,
+        ?string $dataReferencia = null
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'agenda')) {
+            return [
+                'total' => 0,
+                'hoje' => 0,
+                'proximos_7_dias' => 0,
+                'prazos_fatais' => 0,
+            ];
+        }
+
+        $dataReferencia = $dataReferencia ?: date('Y-m-d');
+        $dataFim = date('Y-m-d', strtotime($dataReferencia . ' +7 days'));
+        $colunas = rojex_kb_colunas_tabela($conn, 'agenda');
+
+        $whereBase = in_array('deletado', $colunas, true)
+            ? ' WHERE COALESCE(deletado, 0) = 0'
+            : ' WHERE 1 = 1';
+
+        $total = (int)rojex_kb_total(
+            $conn,
+            'SELECT COUNT(*) AS total FROM agenda' . $whereBase
+        );
+
+        $hoje = 0;
+        $proximos = 0;
+
+        if (in_array('data_evento', $colunas, true)) {
+            $hoje = (int)rojex_kb_total(
+                $conn,
+                'SELECT COUNT(*) AS total FROM agenda'
+                . $whereBase
+                . ' AND data_evento = ?',
+                's',
+                [$dataReferencia]
+            );
+
+            $proximos = (int)rojex_kb_total(
+                $conn,
+                'SELECT COUNT(*) AS total FROM agenda'
+                . $whereBase
+                . ' AND data_evento BETWEEN ? AND ?',
+                'ss',
+                [$dataReferencia, $dataFim]
+            );
+        }
+
+        $prazosFatais = 0;
+        if (in_array('prazo_fatal', $colunas, true)) {
+            $sqlFatal = 'SELECT COUNT(*) AS total FROM agenda'
+                . $whereBase
+                . " AND prazo_fatal = 'Sim'";
+
+            if (in_array('status', $colunas, true)) {
+                $sqlFatal .= " AND status IN ('Pendente','Confirmado')";
+            }
+
+            $prazosFatais = (int)rojex_kb_total($conn, $sqlFatal);
+        }
+
+        return [
+            'total' => $total,
+            'hoje' => $hoje,
+            'proximos_7_dias' => $proximos,
+            'prazos_fatais' => $prazosFatais,
+        ];
+    }
+}
+
+
 if (!function_exists('rojex_kb_status')) {
     /**
      * Retorna informações básicas da Base de Conhecimento.

@@ -158,60 +158,42 @@ function cij_advogados_buscar(mysqli $conn, string $consulta): array
 
 function cij_processos_buscar_numero(mysqli $conn, string $consulta): array
 {
-    if (!cij_table_exists($conn, 'processos')) {
+    if (!function_exists('rojex_kb_processos_por_termo')) {
         return [];
     }
 
-    $numero = cij_limpar_termo_consulta($consulta, [
-        'processo', 'processos', 'número', 'numero', 'nº', 'localizar', 'buscar',
-        'pesquisar', 'procure', 'encontre', 'cadastro', 'rojex', 'ai'
-    ]);
-    $digitos = cij_only_digits($numero);
-    if ($numero === '' || ($digitos === '' && mb_strlen($numero, 'UTF-8') < 5)) {
+    return rojex_kb_processos_por_termo($conn, $consulta, 5);
+}
+
+
+function cij_busca_livre_base(mysqli $conn, string $consulta): array
+{
+    $consulta = trim($consulta);
+    if ($consulta === '') {
         return [];
     }
 
-    $camposNumero = [];
-    foreach (['numero_processo', 'num_processo', 'processo_numero'] as $campo) {
-        if (cij_column_exists($conn, 'processos', $campo)) {
-            $camposNumero[] = $campo;
-        }
-    }
-    if (!$camposNumero) {
-        return [];
-    }
+    $resultados = [];
 
-    $wheres = [];
-    $params = [];
-    $types = '';
-    foreach ($camposNumero as $campo) {
-        $wheres[] = "`{$campo}` LIKE ?";
-        $params[] = '%' . $numero . '%';
-        $types .= 's';
-        if ($digitos !== '') {
-            $wheres[] = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(`{$campo}`,''), '.', ''), '-', ''), '/', ''), ' ', ''), '_', '') LIKE ?";
-            $params[] = '%' . $digitos . '%';
-            $types .= 's';
+    if (function_exists('rojex_kb_clientes_por_termo')) {
+        foreach (rojex_kb_clientes_por_termo($conn, $consulta, 5) as $cliente) {
+            $resultados[] = ['tipo' => 'cliente', 'dados' => $cliente];
         }
     }
 
-    $filtroLixeira = cij_column_exists($conn, 'processos', 'deletado') ? ' AND COALESCE(`deletado`,0)=0' : '';
-    $sql = "SELECT * FROM processos WHERE (" . implode(' OR ', $wheres) . "){$filtroLixeira} ORDER BY id DESC LIMIT 5";
-
-    try {
-        $stmt = $conn->prepare($sql);
-        if (!$stmt) {
-            return [];
+    if (function_exists('rojex_kb_advogados_por_termo')) {
+        foreach (rojex_kb_advogados_por_termo($conn, $consulta, 5) as $advogado) {
+            $resultados[] = ['tipo' => 'advogado', 'dados' => $advogado];
         }
-        $stmt->bind_param($types, ...$params);
-        $stmt->execute();
-        $res = $stmt->get_result();
-        $dados = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
-        $stmt->close();
-        return $dados;
-    } catch (Throwable $e) {
-        return [];
     }
+
+    if (function_exists('rojex_kb_processos_por_termo')) {
+        foreach (rojex_kb_processos_por_termo($conn, $consulta, 5) as $processo) {
+            $resultados[] = ['tipo' => 'processo', 'dados' => $processo];
+        }
+    }
+
+    return $resultados;
 }
 
 function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho): array
@@ -335,50 +317,68 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         return $resposta;
     }
 
-    // Aceita o número do processo digitado sozinho. A OAB direta é excluída
-    // desta regra para evitar que algo como 85561/PR seja tratado como processo.
-    $quantidadeDigitosProcesso = strlen(cij_only_digits($pergunta));
-    $pareceNumeroProcesso = $atalho === ''
-        && !$pareceOabDireta
-        && $quantidadeDigitosProcesso >= 6
-        && (
-            str_contains($perguntaNormalizada, 'processo')
-            || preg_match('/^[\s\d.\-\/_]+$/u', trim($pergunta)) === 1
-        );
-    if ($pareceNumeroProcesso) {
+
+    // Consulta ampla de processos: aceita número curto, ID interno, número CNJ,
+    // nome do cliente, advogado, tipo, comarca, fase ou status.
+    $consultaProcesso = $atalho === '' && (
+        str_contains($perguntaNormalizada, 'processo') ||
+        str_contains($perguntaNormalizada, 'processos') ||
+        preg_match('/^\s*PRC\d+\s*$/iu', trim($pergunta)) === 1 ||
+        preg_match('/^[\s\d.\-\/_]+$/u', trim($pergunta)) === 1
+    );
+
+    if ($consultaProcesso) {
         $processos = cij_processos_buscar_numero($conn, $pergunta);
+
         if (!empty($processos)) {
-            $resposta['titulo'] = count($processos) === 1 ? 'Processo localizado pelo número' : 'Processos localizados pelo número';
-            $resposta['texto'] = 'Encontrei processo(s) compatíveis com o número informado.';
+            $resposta['titulo'] = count($processos) === 1 ? 'Processo localizado' : 'Processos localizados';
+            $resposta['texto'] = 'Encontrei processo(s) compatíveis com a pesquisa informada.';
             $resposta['tipo'] = 'success';
-            $resposta['alerta'] = 'Consulta realizada no cadastro interno de processos do ROJEX.AI.';
+            $resposta['alerta'] = 'Consulta realizada pela Base de Conhecimento do ROJEX.AI.';
 
             foreach ($processos as $proc) {
-                $numero = ($proc['numero_processo'] ?? '') ?: (($proc['num_processo'] ?? '') ?: (($proc['processo_numero'] ?? '') ?: '-'));
-                $cliente = ($proc['nome_cliente'] ?? '') ?: (($proc['cliente'] ?? '') ?: '-');
+                $numero = ($proc['numero_processo'] ?? '') ?: '-';
+                $cliente = ($proc['cliente_nome'] ?? '') ?: '-';
+                $advogado = ($proc['advogado_nome'] ?? '') ?: '-';
+
                 $resposta['itens'][] = $numero
                     . ' | ID: ' . (($proc['id'] ?? '') ?: '-')
                     . ' | Cliente: ' . $cliente
+                    . ' | Advogado: ' . $advogado
                     . ' | Tipo: ' . (($proc['tipo_processo'] ?? '') ?: '-')
                     . ' | Fase: ' . (($proc['fase_atual'] ?? '') ?: '-')
                     . ' | Status: ' . (($proc['status'] ?? '') ?: '-');
             }
 
             $primeiro = $processos[0];
-            $resposta['acoes'][] = ['label' => 'Abrir processo', 'url' => '?mod=processos&acao=editar&id=' . urlencode((string)($primeiro['id'] ?? '')), 'class' => 'btn-primary', 'icon' => 'bi-folder2-open'];
-            $resposta['acoes'][] = ['label' => 'Ver processos cadastrados', 'url' => '?mod=processos', 'class' => 'btn-outline-secondary', 'icon' => 'bi-briefcase'];
+            $resposta['acoes'][] = [
+                'label' => 'Abrir processo',
+                'url' => '?mod=processos&acao=editar&id=' . urlencode((string)($primeiro['id'] ?? '')),
+                'class' => 'btn-primary',
+                'icon' => 'bi-folder2-open'
+            ];
+            $resposta['acoes'][] = [
+                'label' => 'Ver processos cadastrados',
+                'url' => '?mod=processos',
+                'class' => 'btn-outline-secondary',
+                'icon' => 'bi-briefcase'
+            ];
             return $resposta;
         }
 
         $resposta['titulo'] = 'Processo não localizado';
-        $resposta['texto'] = 'Não encontrei processo compatível com o número informado.';
-        $resposta['itens'][] = 'Número pesquisado: ' . trim($pergunta);
-        $resposta['alerta'] = 'Confira a numeração e se o processo está ativo e fora da lixeira.';
+        $resposta['texto'] = 'Não encontrei processo compatível com a pesquisa informada.';
+        $resposta['itens'][] = 'Pesquisa: ' . trim($pergunta);
+        $resposta['alerta'] = 'Tente informar número, ID, cliente, advogado, tipo, comarca, fase ou status.';
         $resposta['tipo'] = 'warning';
-        $resposta['acoes'][] = ['label' => 'Ver processos cadastrados', 'url' => '?mod=processos', 'class' => 'btn-outline-primary', 'icon' => 'bi-briefcase'];
+        $resposta['acoes'][] = [
+            'label' => 'Ver processos cadastrados',
+            'url' => '?mod=processos',
+            'class' => 'btn-outline-primary',
+            'icon' => 'bi-briefcase'
+        ];
         return $resposta;
     }
-
 
     // Busca direta por nome do cliente quando não for CPF/CNPJ nem atalho específico.
     if ($atalho === '' && $perguntaNormalizada !== '') {
@@ -469,6 +469,70 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         $resposta['itens'][] = "Novos clientes no mês: {$novos}";
         $resposta['tipo'] = 'primary';
         return $resposta;
+    }
+
+
+    // Fallback universal para consultas livres.
+    if ($atalho === '' && trim($pergunta) !== '') {
+        $achados = cij_busca_livre_base($conn, $pergunta);
+
+        if (!empty($achados)) {
+            $resposta['titulo'] = 'Resultados encontrados';
+            $resposta['texto'] = 'A Base de Conhecimento encontrou registros compatíveis em diferentes áreas do ROJEX.AI.';
+            $resposta['tipo'] = 'success';
+            $resposta['alerta'] = 'Consulta livre realizada em clientes, advogados e processos.';
+
+            foreach ($achados as $achado) {
+                $tipo = $achado['tipo'] ?? '';
+                $dados = $achado['dados'] ?? [];
+
+                if ($tipo === 'cliente') {
+                    $resposta['itens'][] = 'Cliente: '
+                        . (($dados['nome'] ?? '') ?: '-')
+                        . ' | CPF/CNPJ: ' . (($dados['cpf_cnpj'] ?? '') ?: '-');
+                } elseif ($tipo === 'advogado') {
+                    $resposta['itens'][] = 'Advogado: '
+                        . (($dados['nome'] ?? '') ?: '-')
+                        . ' | OAB: ' . (($dados['oab'] ?? '') ?: '-')
+                        . (($dados['oab_uf'] ?? '') ? '/' . $dados['oab_uf'] : '');
+                } elseif ($tipo === 'processo') {
+                    $resposta['itens'][] = 'Processo: '
+                        . (($dados['numero_processo'] ?? '') ?: '-')
+                        . ' | Cliente: ' . (($dados['cliente_nome'] ?? '') ?: '-')
+                        . ' | Status: ' . (($dados['status'] ?? '') ?: '-');
+                }
+            }
+
+            $primeiro = $achados[0];
+            $tipo = $primeiro['tipo'] ?? '';
+            $dados = $primeiro['dados'] ?? [];
+            $id = (string)($dados['id'] ?? '');
+
+            if ($tipo === 'cliente') {
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir cliente',
+                    'url' => '?mod=clientes&acao=editar&id=' . urlencode($id),
+                    'class' => 'btn-primary',
+                    'icon' => 'bi-person-lines-fill'
+                ];
+            } elseif ($tipo === 'advogado') {
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir advogado',
+                    'url' => '?mod=advogados&acao=editar&id=' . urlencode($id),
+                    'class' => 'btn-primary',
+                    'icon' => 'bi-person-badge'
+                ];
+            } elseif ($tipo === 'processo') {
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir processo',
+                    'url' => '?mod=processos&acao=editar&id=' . urlencode($id),
+                    'class' => 'btn-primary',
+                    'icon' => 'bi-folder2-open'
+                ];
+            }
+
+            return $resposta;
+        }
     }
 
     return $resposta;

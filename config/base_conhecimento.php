@@ -716,6 +716,295 @@ if (!function_exists('rojex_kb_resumo_advogados')) {
 }
 
 
+
+
+if (!function_exists('rojex_kb_limpar_termo_processo')) {
+    function rojex_kb_limpar_termo_processo(string $termo): string
+    {
+        $limpo = mb_strtolower(trim($termo), 'UTF-8');
+        if ($limpo === '') {
+            return '';
+        }
+
+        $limpo = preg_replace(
+            '/\b(processo|processos|número|numero|nº|localizar|buscar|pesquisar|procure|encontre|cadastro|mostrar|mostre|qual|quais|rojex|ai)\b/iu',
+            ' ',
+            $limpo
+        );
+
+        return trim((string)preg_replace('/\s+/u', ' ', (string)$limpo));
+    }
+}
+
+if (!function_exists('rojex_kb_processos_por_termo')) {
+    function rojex_kb_processos_por_termo(
+        mysqli $conn,
+        string $termo,
+        int $limite = 5
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'processos')) {
+            return [];
+        }
+
+        $termoOriginal = trim($termo);
+        if ($termoOriginal === '') {
+            return [];
+        }
+
+        $termoLimpo = rojex_kb_limpar_termo_processo($termoOriginal);
+        if ($termoLimpo === '') {
+            $termoLimpo = $termoOriginal;
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'processos');
+        if (!in_array('id', $colunas, true)) {
+            return [];
+        }
+
+        $temClientes = rojex_kb_tabela_existe($conn, 'clientes')
+            && in_array('cliente_id', $colunas, true);
+
+        $temAdvogados = rojex_kb_tabela_existe($conn, 'advogados')
+            && in_array('advogado_id', $colunas, true);
+
+        $joins = [];
+        if ($temClientes) {
+            $joins[] = 'LEFT JOIN clientes c ON c.id = p.cliente_id';
+        }
+        if ($temAdvogados) {
+            $joins[] = 'LEFT JOIN advogados a ON a.id = p.advogado_id';
+        }
+
+        $where = [];
+        $params = [];
+        $types = '';
+        $likeTexto = '%' . $termoLimpo . '%';
+        $digitos = rojex_kb_somente_digitos($termoOriginal);
+
+        foreach ([
+            'id',
+            'numero_processo',
+            'tipo_processo',
+            'vara',
+            'comarca',
+            'fase_atual',
+            'status',
+            'observacoes'
+        ] as $campo) {
+            if (!in_array($campo, $colunas, true)) {
+                continue;
+            }
+
+            $where[] = "p.`{$campo}` LIKE ?";
+            $params[] = $likeTexto;
+            $types .= 's';
+
+            if ($digitos !== '' && in_array($campo, ['id', 'numero_processo'], true)) {
+                $where[] = rojex_kb_sql_only_digits("COALESCE(p.`{$campo}`, '')") . ' LIKE ?';
+                $params[] = '%' . $digitos . '%';
+                $types .= 's';
+            }
+        }
+
+        if ($temClientes) {
+            $where[] = 'c.nome LIKE ?';
+            $params[] = $likeTexto;
+            $types .= 's';
+        }
+
+        if ($temAdvogados) {
+            $where[] = 'a.nome LIKE ?';
+            $params[] = $likeTexto;
+            $types .= 's';
+        }
+
+        if ($where === []) {
+            return [];
+        }
+
+        $select = [
+            'p.id',
+            in_array('numero_processo', $colunas, true) ? 'p.numero_processo' : "'' AS numero_processo",
+            in_array('cliente_id', $colunas, true) ? 'p.cliente_id' : "NULL AS cliente_id",
+            $temClientes ? "COALESCE(c.nome, '') AS cliente_nome" : "'' AS cliente_nome",
+            in_array('advogado_id', $colunas, true) ? 'p.advogado_id' : "NULL AS advogado_id",
+            $temAdvogados ? "COALESCE(a.nome, '') AS advogado_nome" : "'' AS advogado_nome",
+            in_array('tipo_processo', $colunas, true) ? 'p.tipo_processo' : "'' AS tipo_processo",
+            in_array('vara', $colunas, true) ? 'p.vara' : "'' AS vara",
+            in_array('comarca', $colunas, true) ? 'p.comarca' : "'' AS comarca",
+            in_array('data_distribuicao', $colunas, true) ? 'p.data_distribuicao' : "NULL AS data_distribuicao",
+            in_array('fase_atual', $colunas, true) ? 'p.fase_atual' : "'' AS fase_atual",
+            in_array('valor_causa', $colunas, true) ? 'p.valor_causa' : '0 AS valor_causa',
+            in_array('proximo_prazo', $colunas, true) ? 'p.proximo_prazo' : "NULL AS proximo_prazo",
+            in_array('status', $colunas, true) ? 'p.status' : "'' AS status",
+            in_array('observacoes', $colunas, true) ? 'p.observacoes' : "'' AS observacoes",
+        ];
+
+        $filtroExcluido = in_array('status', $colunas, true)
+            ? " AND COALESCE(p.status, '') <> 'Excluído'"
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 5, 50);
+
+        $sql = 'SELECT ' . implode(', ', $select)
+            . ' FROM processos p '
+            . implode(' ', $joins)
+            . ' WHERE (' . implode(' OR ', $where) . ')'
+            . $filtroExcluido
+            . ' ORDER BY '
+            . (in_array('proximo_prazo', $colunas, true)
+                ? "COALESCE(p.proximo_prazo, '2999-12-31') ASC, "
+                : '')
+            . 'p.id DESC'
+            . ' LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_processo_por_numero')) {
+    function rojex_kb_processo_por_numero(
+        mysqli $conn,
+        string $numero
+    ): ?array {
+        $resultados = rojex_kb_processos_por_termo($conn, $numero, 1);
+        return $resultados[0] ?? null;
+    }
+}
+
+if (!function_exists('rojex_kb_processos_por_prazo')) {
+    function rojex_kb_processos_por_prazo(
+        mysqli $conn,
+        string $dataInicio,
+        string $dataFim,
+        int $limite = 20
+    ): array {
+        if (
+            !rojex_kb_tabela_existe($conn, 'processos')
+            || !rojex_kb_coluna_existe($conn, 'processos', 'proximo_prazo')
+        ) {
+            return [];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'processos');
+        $temClientes = rojex_kb_tabela_existe($conn, 'clientes')
+            && in_array('cliente_id', $colunas, true);
+
+        $joinCliente = $temClientes
+            ? 'LEFT JOIN clientes c ON c.id = p.cliente_id'
+            : '';
+
+        $clienteNome = $temClientes
+            ? "COALESCE(c.nome, '') AS cliente_nome"
+            : "'' AS cliente_nome";
+
+        $filtroStatus = in_array('status', $colunas, true)
+            ? " AND p.status = 'Em Andamento'"
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 20, 100);
+
+        $sql = "SELECT
+                    p.id,
+                    p.numero_processo,
+                    {$clienteNome},
+                    p.tipo_processo,
+                    p.fase_atual,
+                    p.proximo_prazo,
+                    p.status
+                FROM processos p
+                {$joinCliente}
+                WHERE p.proximo_prazo BETWEEN ? AND ?
+                {$filtroStatus}
+                ORDER BY p.proximo_prazo ASC, p.id DESC
+                LIMIT {$limiteSeguro}";
+
+        return rojex_kb_consultar(
+            $conn,
+            $sql,
+            'ss',
+            [$dataInicio, $dataFim]
+        );
+    }
+}
+
+if (!function_exists('rojex_kb_resumo_processos')) {
+    function rojex_kb_resumo_processos(
+        mysqli $conn,
+        ?string $dataInicioPrazo = null,
+        ?string $dataFimPrazo = null
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'processos')) {
+            return [
+                'total' => 0,
+                'em_andamento' => 0,
+                'prazos_periodo' => 0,
+                'valor_causas' => 0.0,
+            ];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'processos');
+        $whereBase = in_array('status', $colunas, true)
+            ? " WHERE status <> 'Excluído'"
+            : ' WHERE 1 = 1';
+
+        $total = (int)rojex_kb_total(
+            $conn,
+            'SELECT COUNT(*) AS total FROM processos' . $whereBase
+        );
+
+        $emAndamento = 0;
+        if (in_array('status', $colunas, true)) {
+            $emAndamento = (int)rojex_kb_total(
+                $conn,
+                "SELECT COUNT(*) AS total
+                 FROM processos
+                 WHERE status = 'Em Andamento'"
+            );
+        }
+
+        $prazosPeriodo = 0;
+        if (
+            $dataInicioPrazo !== null
+            && $dataFimPrazo !== null
+            && in_array('proximo_prazo', $colunas, true)
+        ) {
+            $sqlPrazo = 'SELECT COUNT(*) AS total
+                         FROM processos
+                         WHERE proximo_prazo BETWEEN ? AND ?';
+
+            if (in_array('status', $colunas, true)) {
+                $sqlPrazo .= " AND status = 'Em Andamento'";
+            }
+
+            $prazosPeriodo = (int)rojex_kb_total(
+                $conn,
+                $sqlPrazo,
+                'ss',
+                [$dataInicioPrazo, $dataFimPrazo]
+            );
+        }
+
+        $valorCausas = 0.0;
+        if (in_array('valor_causa', $colunas, true)) {
+            $valorCausas = rojex_kb_total(
+                $conn,
+                'SELECT COALESCE(SUM(valor_causa), 0) AS total
+                 FROM processos'
+                 . $whereBase
+            );
+        }
+
+        return [
+            'total' => $total,
+            'em_andamento' => $emAndamento,
+            'prazos_periodo' => $prazosPeriodo,
+            'valor_causas' => $valorCausas,
+        ];
+    }
+}
+
+
 if (!function_exists('rojex_kb_status')) {
     /**
      * Retorna informações básicas da Base de Conhecimento.

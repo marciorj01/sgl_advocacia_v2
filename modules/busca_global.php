@@ -61,13 +61,78 @@ function sgl_bg_fetch(mysqli_stmt $stmt): array {
     return $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
 }
 
-$q = trim((string)($_GET['q'] ?? ''));
+
+function sgl_bg_cliente_item(array $r, string $q): array {
+    return [
+        'icone'=>'bi-person-lines-fill','cor'=>'primary','titulo'=>$r['nome'] ?: $r['id'],
+        'subtitulo'=>'Cliente • ' . (($r['cpf_cnpj'] ?? '') ?: 'CPF/CNPJ não informado'),
+        'detalhe'=>trim((($r['cidade'] ?? '') . '/' . ($r['estado'] ?? '')), '/') . ' • ' . (($r['telefone'] ?? '') ?: ($r['celular'] ?? '') ?: ($r['whatsapp'] ?? '') ?: ($r['email'] ?? '') ?: 'Sem contato'),
+        'link'=>'?mod=clientes&busca=' . urlencode(($r['nome'] ?? '') ?: (($r['cpf_cnpj'] ?? '') ?: (($r['id'] ?? '') ?: $q))),
+        'badge'=>$r['status'] ?? 'Cliente'
+    ];
+}
+
+function sgl_bg_norm_php(?string $valor): string {
+    return preg_replace('/\D+/', '', (string)$valor);
+}
+
+$q = trim((string)(
+    $_GET['q'] ??
+    $_GET['busca'] ??
+    $_GET['pesquisa'] ??
+    $_GET['termo'] ??
+    $_POST['q'] ??
+    $_POST['busca'] ??
+    $_POST['pesquisa'] ??
+    $_POST['termo'] ??
+    ''
+));
 $like = sgl_bg_like($q);
 $digits = sgl_bg_digits($q);
 $resultados = [];
 $totalGeral = 0;
 
 if ($q !== '') {
+
+    // Busca direta por CPF/CNPJ/telefone antes da busca comum.
+    // Motivo: alguns cadastros armazenam CPF/CNPJ com máscara e o MySQL pode falhar na comparação dependendo do formato enviado pelo campo global.
+    if ($digits !== '' && strlen($digits) >= 5 && sgl_bg_table_exists($conn, 'clientes')) {
+        $sqlCpfDireto = "SELECT c.id, c.nome, c.cpf_cnpj, c.telefone, c.celular, c.whatsapp, c.email, c.cidade, c.estado, c.status
+                         FROM clientes c
+                         WHERE 1=1" . sgl_bg_and_deletado($conn, 'c', 'clientes') . "
+                         ORDER BY c.nome ASC
+                         LIMIT 5000";
+        $resCpfDireto = $conn->query($sqlCpfDireto);
+        $idsClientesJaAdicionados = [];
+        if ($resCpfDireto) {
+            while ($rCpf = $resCpfDireto->fetch_assoc()) {
+                $cpfBanco = sgl_bg_norm_php($rCpf['cpf_cnpj'] ?? '');
+                $telBanco = sgl_bg_norm_php($rCpf['telefone'] ?? '');
+                $celBanco = sgl_bg_norm_php($rCpf['celular'] ?? '');
+                $zapBanco = sgl_bg_norm_php($rCpf['whatsapp'] ?? '');
+
+                $achouCpf = (
+                    ($cpfBanco !== '' && (str_contains($cpfBanco, $digits) || str_contains($digits, $cpfBanco))) ||
+                    ($telBanco !== '' && str_contains($telBanco, $digits)) ||
+                    ($celBanco !== '' && str_contains($celBanco, $digits)) ||
+                    ($zapBanco !== '' && str_contains($zapBanco, $digits))
+                );
+
+                if ($achouCpf) {
+                    $idClienteBusca = (string)($rCpf['id'] ?? '');
+                    if ($idClienteBusca !== '' && !isset($idsClientesJaAdicionados[$idClienteBusca])) {
+                        $resultados['Clientes'][] = sgl_bg_cliente_item($rCpf, $q);
+                        $idsClientesJaAdicionados[$idClienteBusca] = true;
+                        $totalGeral++;
+                    }
+                }
+
+                if (!empty($resultados['Clientes']) && count($resultados['Clientes']) >= sgl_bg_limit()) {
+                    break;
+                }
+            }
+        }
+    }
     // Clientes
     if (sgl_bg_table_exists($conn, 'clientes')) {
         $where = "(c.id LIKE ? OR c.nome LIKE ?";
@@ -82,13 +147,37 @@ if ($q !== '') {
         $stmt = $conn->prepare($sql); sgl_bg_bind_like($stmt, $types, $params);
         $rows = sgl_bg_fetch($stmt);
         foreach ($rows as $r) {
-            $resultados['Clientes'][] = [
-                'icone'=>'bi-person-lines-fill','cor'=>'primary','titulo'=>$r['nome'] ?: $r['id'],
-                'subtitulo'=>'Cliente • ' . ($r['cpf_cnpj'] ?: 'CPF/CNPJ não informado'),
-                'detalhe'=>trim(($r['cidade'] ?? '') . '/' . ($r['estado'] ?? ''), '/') . ' • ' . ($r['telefone'] ?: $r['celular'] ?: $r['whatsapp'] ?: $r['email'] ?: 'Sem contato'),
-                'link'=>'?mod=clientes&busca=' . urlencode($r['nome'] ?: $r['id']),
-                'badge'=>$r['status'] ?? 'Cliente'
-            ]; $totalGeral++;
+            $resultados['Clientes'][] = sgl_bg_cliente_item($r, $q);
+            $totalGeral++;
+        }
+
+        // Reforço para CPF/CNPJ/telefone: filtra também pelo PHP, evitando falhas por máscara, pontos, barras ou formato salvo no banco.
+        if ($digits !== '' && strlen($digits) >= 5 && empty($resultados['Clientes'])) {
+            $sqlFallback = "SELECT c.id, c.nome, c.cpf_cnpj, c.telefone, c.celular, c.whatsapp, c.email, c.cidade, c.estado, c.status
+                            FROM clientes c
+                            WHERE 1=1" . sgl_bg_and_deletado($conn, 'c', 'clientes') . "
+                            ORDER BY c.nome ASC LIMIT 1000";
+            $resFallback = $conn->query($sqlFallback);
+            if ($resFallback) {
+                while ($r = $resFallback->fetch_assoc()) {
+                    $camposNumericos = [
+                        sgl_bg_norm_php($r['cpf_cnpj'] ?? ''),
+                        sgl_bg_norm_php($r['telefone'] ?? ''),
+                        sgl_bg_norm_php($r['celular'] ?? ''),
+                        sgl_bg_norm_php($r['whatsapp'] ?? ''),
+                    ];
+                    foreach ($camposNumericos as $campoNum) {
+                        if ($campoNum !== '' && str_contains($campoNum, $digits)) {
+                            $resultados['Clientes'][] = sgl_bg_cliente_item($r, $q);
+                            $totalGeral++;
+                            break;
+                        }
+                    }
+                    if (count($resultados['Clientes']) >= sgl_bg_limit()) {
+                        break;
+                    }
+                }
+            }
         }
     }
 

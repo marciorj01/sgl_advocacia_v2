@@ -482,6 +482,129 @@ if ($compromissosHoje > 0) {
         <span class="badge bg-dark px-3 py-2">📅 Hoje: <?= date('d/m/Y') ?></span>
     </div>
 
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-stars me-2"></i>Central Inteligente ROJEX.AI</span>
+            <span class="badge bg-primary">Painel estratégico</span>
+        </div>
+        <div class="card-body">
+            <div class="row g-3 align-items-stretch">
+                <div class="col-xl-3 col-md-6">
+                    <div class="border rounded-3 p-3 h-100 bg-light">
+                        <div class="small text-muted text-uppercase mb-1">Agenda de hoje</div>
+                        <div class="fs-4 fw-bold <?= $compromissosHoje > 0 ? 'text-primary' : 'text-muted' ?>"><?= (int)$compromissosHoje ?></div>
+                        <div class="small text-muted"><?= (int)$audienciasHoje ?> audiência(s) hoje</div>
+                        <a href="?mod=agenda" class="btn btn-sm btn-outline-primary mt-2"><i class="bi bi-calendar-event me-1"></i>Abrir agenda</a>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="border rounded-3 p-3 h-100 bg-light">
+                        <div class="small text-muted text-uppercase mb-1">Prazos críticos</div>
+                        <div class="fs-4 fw-bold <?= $prazos7Dias > 0 ? 'text-warning' : 'text-success' ?>"><?= (int)$prazos7Dias ?></div>
+                        <div class="small text-muted">Processuais nos próximos 7 dias</div>
+                        <a href="?mod=processos" class="btn btn-sm btn-outline-warning mt-2"><i class="bi bi-folder2-open me-1"></i>Ver processos</a>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="border rounded-3 p-3 h-100 bg-light">
+                        <div class="small text-muted text-uppercase mb-1">Financeiro em atenção</div>
+                        <div class="fs-4 fw-bold <?= ($contasPagarVencidas + $honorariosVencidos) > 0 ? 'text-danger' : 'text-success' ?>"><?= (int)($contasPagarVencidas + $honorariosVencidos) ?></div>
+                        <div class="small text-muted">Pendências vencidas identificadas</div>
+                        <a href="?mod=financeiro" class="btn btn-sm btn-outline-danger mt-2"><i class="bi bi-cash-coin me-1"></i>Abrir financeiro</a>
+                    </div>
+                </div>
+                <div class="col-xl-3 col-md-6">
+                    <div class="border rounded-3 p-3 h-100 bg-light">
+                        <div class="small text-muted text-uppercase mb-1">Busca global</div>
+                        <div class="fs-6 fw-bold text-dark">Localizar dados rápido</div>
+                        <div class="small text-muted">Clientes, processos, documentos e financeiro</div>
+                        <form method="GET" action="index.php" class="mt-2">
+                            <input type="hidden" name="mod" value="dashboard">
+                            <div class="input-group input-group-sm">
+                                <input type="text" name="busca" class="form-control" placeholder="Pesquisar..." value="<?= h($_GET['busca'] ?? '') ?>">
+                                <button class="btn btn-primary" type="submit"><i class="bi bi-search"></i></button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            <div class="alert alert-info mt-3 mb-0">
+                <i class="bi bi-lightbulb me-1"></i>
+                A Central Inteligente consolida agenda, prazos, financeiro e busca global para orientar as próximas ações do escritório.
+            </div>
+        </div>
+    </div>
+
+    <?php
+    $iaPergunta = trim((string)($_GET['ia_pergunta'] ?? ''));
+    $iaAcao = trim((string)($_GET['ia_acao'] ?? ''));
+    $iaResposta = '';
+
+    if ($iaAcao !== '' || $iaPergunta !== '') {
+        switch ($iaAcao) {
+            case 'agenda_hoje':
+                $iaResposta = 'Hoje existem ' . (int)$compromissosHoje . ' compromisso(s) cadastrados, sendo ' . (int)$audienciasHoje . ' audiência(s).';
+                break;
+            case 'prazos':
+                $iaResposta = 'Foram identificados ' . (int)$prazos7Dias . ' prazo(s) processual(is) nos próximos 7 dias. Use o módulo Processos para revisar os detalhes.';
+                break;
+            case 'financeiro':
+                $iaResposta = 'Resumo financeiro: recebido no mês ' . moeda($recebidoMes) . ', total a receber ' . moeda($totalAReceber) . ', despesas em aberto ' . moeda($despesasAbertas) . ' e saldo estimado ' . moeda($saldoEstimado) . '.';
+                break;
+            case 'honorarios':
+                $iaResposta = 'Há ' . (int)$honorariosVencidos . ' parcela(s) de honorários vencida(s). A lista de honorários pendentes aparece mais abaixo no Dashboard.';
+                break;
+            default:
+                $iaResposta = 'A interface da IA Jurídica está pronta. Nesta etapa ela já interpreta comandos rápidos do Dashboard. A próxima etapa conectará a IA à Busca Global e aos dados internos do ROJEX.AI.';
+                if ($iaPergunta !== '') {
+                    $iaResposta .= ' Pergunta recebida: "' . $iaPergunta . '".';
+                }
+                break;
+        }
+    }
+    ?>
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-robot me-2"></i>IA Jurídica ROJEX.AI</span>
+            <span class="badge bg-success">Estrutura preparada</span>
+        </div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-lg-7">
+                    <form method="GET" action="index.php">
+                        <input type="hidden" name="mod" value="dashboard">
+                        <label class="form-label fw-semibold">Pergunte ao assistente jurídico</label>
+                        <div class="input-group">
+                            <input type="text" name="ia_pergunta" class="form-control" placeholder="Ex.: Quais processos vencem esta semana?" value="<?= h($iaPergunta) ?>">
+                            <button class="btn btn-primary" type="submit"><i class="bi bi-send me-1"></i>Consultar</button>
+                        </div>
+                        <div class="form-text">Nesta versão, a IA está preparada para consultas internas e futura integração com modelo externo.</div>
+                    </form>
+
+                    <div class="d-flex flex-wrap gap-2 mt-3">
+                        <a href="?mod=dashboard&ia_acao=agenda_hoje" class="btn btn-sm btn-outline-primary"><i class="bi bi-calendar-check me-1"></i>Agenda de hoje</a>
+                        <a href="?mod=dashboard&ia_acao=prazos" class="btn btn-sm btn-outline-warning"><i class="bi bi-clock-history me-1"></i>Prazos próximos</a>
+                        <a href="?mod=dashboard&ia_acao=financeiro" class="btn btn-sm btn-outline-success"><i class="bi bi-cash-coin me-1"></i>Resumo financeiro</a>
+                        <a href="?mod=dashboard&ia_acao=honorarios" class="btn btn-sm btn-outline-danger"><i class="bi bi-receipt me-1"></i>Honorários vencidos</a>
+                    </div>
+                </div>
+                <div class="col-lg-5">
+                    <div class="border rounded-3 p-3 h-100 bg-light">
+                        <div class="small text-muted text-uppercase mb-2">Resposta da IA</div>
+                        <?php if ($iaResposta !== ''): ?>
+                            <div class="fw-semibold text-dark"><?= h($iaResposta) ?></div>
+                        <?php else: ?>
+                            <div class="text-muted">Use uma consulta rápida ou digite uma pergunta para iniciar. A próxima evolução conectará esta área à Busca Global e aos módulos do sistema.</div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
     <div class="row g-3 mb-4">
         <div class="col-xl-3 col-md-6">
             <div class="card text-white bg-success h-100 shadow-sm position-relative overflow-hidden">

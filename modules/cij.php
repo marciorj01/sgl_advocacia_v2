@@ -1,0 +1,686 @@
+<?php
+/**
+ * modules/cij.php
+ * Centro de Inteligência Jurídica — ROJEX.AI Enterprise
+ * Sprint 3.3.3 — Assistente Jurídico funcional inicial.
+ *
+ * Sem conexão externa de IA e sem alteração de banco.
+ * Esta versão consulta dados internos do ROJEX.AI com segurança e exibe respostas orientativas.
+ */
+
+$conn = conectar();
+
+function cij_h($valor): string
+{
+    return htmlspecialchars((string)($valor ?? ''), ENT_QUOTES, 'UTF-8');
+}
+
+function cij_table_exists(mysqli $conn, string $tabela): bool
+{
+    if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela)) {
+        return false;
+    }
+
+    $stmt = @$conn->prepare("SELECT COUNT(*) AS total FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
+    if (!$stmt) {
+        return false;
+    }
+
+    $stmt->bind_param('s', $tabela);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return ((int)($row['total'] ?? 0)) > 0;
+}
+
+function cij_column_exists(mysqli $conn, string $tabela, string $coluna): bool
+{
+    if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela) || !preg_match('/^[a-zA-Z0-9_]+$/', $coluna)) {
+        return false;
+    }
+
+    $stmt = @$conn->prepare("SELECT COUNT(*) AS total FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?");
+    if (!$stmt) {
+        return false;
+    }
+
+    $stmt->bind_param('ss', $tabela, $coluna);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return ((int)($row['total'] ?? 0)) > 0;
+}
+
+function cij_count(mysqli $conn, string $sql): int
+{
+    try {
+        $res = $conn->query($sql);
+        if (!$res) {
+            return 0;
+        }
+        $row = $res->fetch_assoc();
+        return (int)($row['total'] ?? 0);
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
+
+function cij_money(float $valor): string
+{
+    return 'R$ ' . number_format($valor, 2, ',', '.');
+}
+
+function cij_sum(mysqli $conn, string $sql): float
+{
+    try {
+        $res = $conn->query($sql);
+        if (!$res) {
+            return 0.0;
+        }
+        $row = $res->fetch_assoc();
+        return (float)($row['total'] ?? 0);
+    } catch (Throwable $e) {
+        return 0.0;
+    }
+}
+
+function cij_rows(mysqli $conn, string $sql): array
+{
+    try {
+        $res = $conn->query($sql);
+        if (!$res) {
+            return [];
+        }
+
+        $dados = [];
+        while ($row = $res->fetch_assoc()) {
+            $dados[] = $row;
+        }
+        return $dados;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+
+function cij_only_digits(?string $valor): string
+{
+    return preg_replace('/\D+/', '', (string)($valor ?? ''));
+}
+
+function cij_cliente_por_documento(mysqli $conn, string $documento): ?array
+{
+    $doc = cij_only_digits($documento);
+    if ($doc === '' || !in_array(strlen($doc), [11, 14], true) || !cij_table_exists($conn, 'clientes')) {
+        return null;
+    }
+
+    $sql = "SELECT id, nome, cpf_cnpj, tipo_pessoa, telefone, celular, whatsapp, email, cidade, estado, status
+            FROM clientes
+            WHERE COALESCE(deletado,0)=0
+              AND REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(cpf_cnpj,''), '.', ''), '-', ''), '/', ''), ' ', '') = ?
+            LIMIT 1";
+    $stmt = @$conn->prepare($sql);
+    if (!$stmt) {
+        return null;
+    }
+
+    $stmt->bind_param('s', $doc);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $cliente = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    return $cliente ?: null;
+}
+
+
+function cij_cliente_por_nome(mysqli $conn, string $nome): array
+{
+    $nome = trim($nome);
+    if ($nome === '' || mb_strlen($nome, 'UTF-8') < 3 || !cij_table_exists($conn, 'clientes')) {
+        return [];
+    }
+
+    // Remove palavras de comando comuns para permitir perguntas como "localizar cliente Marcio".
+    $limpo = mb_strtolower($nome, 'UTF-8');
+    $limpo = preg_replace('/\b(cliente|clientes|localizar|buscar|pesquisar|procure|encontre|cadastro|cpf|cnpj|nome|rojex|ai)\b/iu', ' ', $limpo);
+    $limpo = trim(preg_replace('/\s+/', ' ', (string)$limpo));
+    if ($limpo === '' || mb_strlen($limpo, 'UTF-8') < 3) {
+        $limpo = trim($nome);
+    }
+
+    $like = '%' . $limpo . '%';
+    $sql = "SELECT id, nome, cpf_cnpj, tipo_pessoa, telefone, celular, whatsapp, email, cidade, estado, status
+            FROM clientes
+            WHERE COALESCE(deletado,0)=0
+              AND (nome LIKE ? OR email LIKE ? OR cidade LIKE ?)
+            ORDER BY nome ASC
+            LIMIT 5";
+    $stmt = @$conn->prepare($sql);
+    if (!$stmt) {
+        return [];
+    }
+
+    $stmt->bind_param('sss', $like, $like, $like);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $clientes = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
+    $stmt->close();
+
+    return $clientes;
+}
+
+
+function cij_limpar_termo_consulta(string $texto, array $palavras): string
+{
+    $limpo = mb_strtolower(trim($texto), 'UTF-8');
+    if ($limpo === '') {
+        return '';
+    }
+
+    $padrao = '/\b(' . implode('|', array_map(static fn($p) => preg_quote($p, '/'), $palavras)) . ')\b/iu';
+    $limpo = preg_replace($padrao, ' ', $limpo);
+    return trim(preg_replace('/\s+/', ' ', (string)$limpo));
+}
+
+function cij_advogados_buscar(mysqli $conn, string $consulta): array
+{
+    if (!cij_table_exists($conn, 'advogados')) {
+        return [];
+    }
+
+    $termo = cij_limpar_termo_consulta($consulta, [
+        'advogado', 'advogada', 'advogados', 'advogadas', 'localizar', 'buscar',
+        'pesquisar', 'procure', 'encontre', 'cadastro', 'nome', 'oab', 'cpf', 'rojex', 'ai'
+    ]);
+    if ($termo === '') {
+        return [];
+    }
+
+    $camposPossiveis = ['nome', 'oab', 'cpf', 'email', 'telefone', 'celular'];
+    $campos = [];
+    foreach ($camposPossiveis as $campo) {
+        if (cij_column_exists($conn, 'advogados', $campo)) {
+            $campos[] = $campo;
+        }
+    }
+    if (!$campos) {
+        return [];
+    }
+
+    $digitos = cij_only_digits($termo);
+    $wheres = [];
+    $params = [];
+    $types = '';
+    foreach ($campos as $campo) {
+        $wheres[] = "`{$campo}` LIKE ?";
+        $params[] = '%' . $termo . '%';
+        $types .= 's';
+
+        if ($digitos !== '' && in_array($campo, ['oab', 'cpf', 'telefone', 'celular'], true)) {
+            $wheres[] = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(`{$campo}`,''), '.', ''), '-', ''), '/', ''), '(', ''), ')', ''), ' ', '') LIKE ?";
+            $params[] = '%' . $digitos . '%';
+            $types .= 's';
+        }
+    }
+
+    $filtroLixeira = cij_column_exists($conn, 'advogados', 'deletado') ? ' AND COALESCE(`deletado`,0)=0' : '';
+    $ordem = cij_column_exists($conn, 'advogados', 'nome') ? 'nome ASC' : 'id DESC';
+    $sql = "SELECT * FROM advogados WHERE (" . implode(' OR ', $wheres) . "){$filtroLixeira} ORDER BY {$ordem} LIMIT 5";
+
+    try {
+        $stmt = $conn->prepare($sql);
+        if (!$stmt) {
+            return [];
+        }
+        $stmt->bind_param($types, ...$params);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $dados = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
+        $stmt->close();
+        return $dados;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function cij_processos_buscar_numero(mysqli $conn, string $consulta): array
+{
+    if (!cij_table_exists($conn, 'processos')) {
+        return [];
+    }
+
+    $numero = cij_limpar_termo_consulta($consulta, [
+        'processo', 'processos', 'número', 'numero', 'nº', 'localizar', 'buscar',
+        'pesquisar', 'procure', 'encontre', 'cadastro', 'rojex', 'ai'
+    ]);
+    $digitos = cij_only_digits($numero);
+    if ($numero === '' || ($digitos === '' && mb_strlen($numero, 'UTF-8') < 5)) {
+        return [];
+    }
+
+    $camposNumero = [];
+    foreach (['numero_processo', 'num_processo', 'processo_numero'] as $campo) {
+        if (cij_column_exists($conn, 'processos', $campo)) {
+            $camposNumero[] = $campo;
+        }
+    }
+    if (!$camposNumero) {
+        return [];
+    }
+
+    $wheres = [];
+    $params = [];
+    $types = '';
+    foreach ($camposNumero as $campo) {
+        $wheres[] = "`{$campo}` LIKE ?";
+        $params[] = '%' . $numero . '%';
+        $types .= 's';
+        if ($digitos !== '') {
+            $wheres[] = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(`{$campo}`,''), '.', ''), '-', ''), '/', ''), ' ', ''), '_', '') LIKE ?";
+            $params[] = '%' . $digitos . '%';
+            $types .= 's';
+        }
+    }
+
+    $filtroLixeira = cij_column_exists($conn, 'processos', 'deletado') ? ' AND COALESCE(`deletado`,0)=0' : '';
+    $sql = "SELECT * FROM processos WHERE (" . implode(' OR ', $wheres) . "){$filtroLixeira} ORDER BY id DESC LIMIT 5";
+
+    try {
+        $stmt = $conn->prepare($sql);
+        if (!$stmt) {
+            return [];
+        }
+        $stmt->bind_param($types, ...$params);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        $dados = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
+        $stmt->close();
+        return $dados;
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho): array
+{
+    $hoje = date('Y-m-d');
+    $seteDias = date('Y-m-d', strtotime('+7 days'));
+    $inicioMes = date('Y-m-01');
+    $fimMes = date('Y-m-t');
+
+    $perguntaNormalizada = mb_strtolower(trim($pergunta . ' ' . $atalho), 'UTF-8');
+    $resposta = [
+        'titulo' => 'Resposta do Assistente Jurídico',
+        'texto' => 'Ainda não identifiquei uma consulta específica. Use os botões rápidos ou pergunte sobre clientes, processos, agenda, financeiro ou honorários.',
+        'itens' => [],
+        'alerta' => 'Este assistente usa dados internos do sistema e ainda não está conectado a uma IA externa.',
+        'tipo' => 'info',
+        'acoes' => []
+    ];
+
+
+    $documentoDetectado = cij_only_digits($perguntaNormalizada);
+    if (in_array(strlen($documentoDetectado), [11, 14], true)) {
+        $clienteDoc = cij_cliente_por_documento($conn, $documentoDetectado);
+
+        if ($clienteDoc) {
+            $contato = $clienteDoc['whatsapp'] ?: ($clienteDoc['celular'] ?: ($clienteDoc['telefone'] ?: '-'));
+            $cidadeUf = trim(($clienteDoc['cidade'] ?? '') . '/' . ($clienteDoc['estado'] ?? ''), '/');
+
+            $resposta['titulo'] = 'Cliente localizado por CPF/CNPJ';
+            $resposta['texto'] = 'Encontrei um cliente cadastrado com o documento informado.';
+            $resposta['itens'][] = 'ID: ' . ($clienteDoc['id'] ?: '-');
+            $resposta['itens'][] = 'Nome: ' . ($clienteDoc['nome'] ?: '-');
+            $resposta['itens'][] = 'CPF/CNPJ: ' . ($clienteDoc['cpf_cnpj'] ?: '-');
+            $resposta['itens'][] = 'Tipo: ' . ($clienteDoc['tipo_pessoa'] ?: '-');
+            $resposta['itens'][] = 'Status: ' . ($clienteDoc['status'] ?: '-');
+            $resposta['itens'][] = 'Contato: ' . $contato;
+            $resposta['itens'][] = 'E-mail: ' . ($clienteDoc['email'] ?: '-');
+            $resposta['itens'][] = 'Cidade/UF: ' . ($cidadeUf ?: '-');
+            $resposta['alerta'] = 'Consulta realizada no cadastro interno de clientes do ROJEX.AI.';
+            $resposta['tipo'] = 'success';
+            $resposta['acoes'][] = ['label' => 'Abrir cadastro do cliente', 'url' => '?mod=clientes&acao=editar&id=' . urlencode((string)$clienteDoc['id']), 'class' => 'btn-primary', 'icon' => 'bi-person-lines-fill'];
+            $resposta['acoes'][] = ['label' => 'Gerar peça para este cliente', 'url' => '?mod=cij&ferramenta=gerador', 'class' => 'btn-success', 'icon' => 'bi-magic'];
+            $resposta['acoes'][] = ['label' => 'Ver lista de clientes', 'url' => '?mod=clientes&busca=' . urlencode((string)$clienteDoc['cpf_cnpj']), 'class' => 'btn-outline-secondary', 'icon' => 'bi-search'];
+            return $resposta;
+        }
+
+        $resposta['titulo'] = 'Cliente não localizado';
+        $resposta['texto'] = 'Não encontrei cliente ativo com o CPF/CNPJ informado.';
+        $resposta['itens'][] = 'Documento pesquisado: ' . $documentoDetectado;
+        $resposta['alerta'] = 'Confira se o cliente está cadastrado, ativo e fora da lixeira.';
+        $resposta['tipo'] = 'warning';
+        $resposta['acoes'][] = ['label' => 'Cadastrar novo cliente', 'url' => '?mod=clientes&acao=novo', 'class' => 'btn-primary', 'icon' => 'bi-person-plus'];
+        $resposta['acoes'][] = ['label' => 'Pesquisar em clientes', 'url' => '?mod=clientes&busca=' . urlencode($documentoDetectado), 'class' => 'btn-outline-secondary', 'icon' => 'bi-search'];
+        return $resposta;
+    }
+
+
+    $consultaAdvogado = $atalho === '' && (
+        str_contains($perguntaNormalizada, 'advogado') ||
+        str_contains($perguntaNormalizada, 'advogada') ||
+        str_contains($perguntaNormalizada, 'oab')
+    );
+    if ($consultaAdvogado) {
+        $advogados = cij_advogados_buscar($conn, $pergunta);
+        if (!empty($advogados)) {
+            $resposta['titulo'] = count($advogados) === 1 ? 'Advogado localizado' : 'Advogados localizados';
+            $resposta['texto'] = 'Encontrei advogado(s) compatíveis com a pesquisa informada.';
+            $resposta['tipo'] = 'success';
+            $resposta['alerta'] = 'Consulta realizada no cadastro interno de advogados do ROJEX.AI.';
+
+            foreach ($advogados as $adv) {
+                $contato = ($adv['celular'] ?? '') ?: (($adv['telefone'] ?? '') ?: '-');
+                $resposta['itens'][] = (($adv['nome'] ?? '') ?: '-')
+                    . ' | ID: ' . (($adv['id'] ?? '') ?: '-')
+                    . ' | OAB: ' . (($adv['oab'] ?? '') ?: '-')
+                    . ' | CPF: ' . (($adv['cpf'] ?? '') ?: '-')
+                    . ' | Contato: ' . $contato
+                    . ' | E-mail: ' . (($adv['email'] ?? '') ?: '-');
+            }
+
+            $primeiro = $advogados[0];
+            $resposta['acoes'][] = ['label' => 'Abrir cadastro do advogado', 'url' => '?mod=advogados&acao=editar&id=' . urlencode((string)($primeiro['id'] ?? '')), 'class' => 'btn-primary', 'icon' => 'bi-person-badge'];
+            $resposta['acoes'][] = ['label' => 'Ver lista de advogados', 'url' => '?mod=advogados', 'class' => 'btn-outline-secondary', 'icon' => 'bi-people'];
+            return $resposta;
+        }
+
+        $resposta['titulo'] = 'Advogado não localizado';
+        $resposta['texto'] = 'Não encontrei advogado compatível com o nome, OAB ou CPF informado.';
+        $resposta['alerta'] = 'Confira os dados pesquisados e se o cadastro está ativo e fora da lixeira.';
+        $resposta['tipo'] = 'warning';
+        $resposta['acoes'][] = ['label' => 'Ver advogados cadastrados', 'url' => '?mod=advogados', 'class' => 'btn-outline-primary', 'icon' => 'bi-people'];
+        return $resposta;
+    }
+
+    $pareceNumeroProcesso = $atalho === '' && str_contains($perguntaNormalizada, 'processo') && strlen(cij_only_digits($pergunta)) >= 6;
+    if ($pareceNumeroProcesso) {
+        $processos = cij_processos_buscar_numero($conn, $pergunta);
+        if (!empty($processos)) {
+            $resposta['titulo'] = count($processos) === 1 ? 'Processo localizado pelo número' : 'Processos localizados pelo número';
+            $resposta['texto'] = 'Encontrei processo(s) compatíveis com o número informado.';
+            $resposta['tipo'] = 'success';
+            $resposta['alerta'] = 'Consulta realizada no cadastro interno de processos do ROJEX.AI.';
+
+            foreach ($processos as $proc) {
+                $numero = ($proc['numero_processo'] ?? '') ?: (($proc['num_processo'] ?? '') ?: (($proc['processo_numero'] ?? '') ?: '-'));
+                $cliente = ($proc['nome_cliente'] ?? '') ?: (($proc['cliente'] ?? '') ?: '-');
+                $resposta['itens'][] = $numero
+                    . ' | ID: ' . (($proc['id'] ?? '') ?: '-')
+                    . ' | Cliente: ' . $cliente
+                    . ' | Tipo: ' . (($proc['tipo_processo'] ?? '') ?: '-')
+                    . ' | Fase: ' . (($proc['fase_atual'] ?? '') ?: '-')
+                    . ' | Status: ' . (($proc['status'] ?? '') ?: '-');
+            }
+
+            $primeiro = $processos[0];
+            $resposta['acoes'][] = ['label' => 'Abrir processo', 'url' => '?mod=processos&acao=editar&id=' . urlencode((string)($primeiro['id'] ?? '')), 'class' => 'btn-primary', 'icon' => 'bi-folder2-open'];
+            $resposta['acoes'][] = ['label' => 'Ver processos cadastrados', 'url' => '?mod=processos', 'class' => 'btn-outline-secondary', 'icon' => 'bi-briefcase'];
+            return $resposta;
+        }
+
+        $resposta['titulo'] = 'Processo não localizado';
+        $resposta['texto'] = 'Não encontrei processo compatível com o número informado.';
+        $resposta['itens'][] = 'Número pesquisado: ' . trim($pergunta);
+        $resposta['alerta'] = 'Confira a numeração e se o processo está ativo e fora da lixeira.';
+        $resposta['tipo'] = 'warning';
+        $resposta['acoes'][] = ['label' => 'Ver processos cadastrados', 'url' => '?mod=processos', 'class' => 'btn-outline-primary', 'icon' => 'bi-briefcase'];
+        return $resposta;
+    }
+
+
+    // Busca direta por nome do cliente quando não for CPF/CNPJ nem atalho específico.
+    if ($atalho === '' && $perguntaNormalizada !== '') {
+        $clientesNome = cij_cliente_por_nome($conn, $pergunta);
+        if (!empty($clientesNome)) {
+            $resposta['titulo'] = count($clientesNome) === 1 ? 'Cliente localizado por nome' : 'Clientes localizados por nome';
+            $resposta['texto'] = 'Encontrei cliente(s) compatíveis com a pesquisa informada.';
+            $resposta['tipo'] = 'success';
+            $resposta['alerta'] = 'Consulta realizada no cadastro interno de clientes do ROJEX.AI.';
+
+            foreach ($clientesNome as $cli) {
+                $contato = ($cli['whatsapp'] ?? '') ?: (($cli['celular'] ?? '') ?: (($cli['telefone'] ?? '') ?: '-'));
+                $cidadeUf = trim((($cli['cidade'] ?? '') . '/' . ($cli['estado'] ?? '')), '/');
+                $resposta['itens'][] = ($cli['nome'] ?: '-') . ' | ID: ' . ($cli['id'] ?: '-') . ' | CPF/CNPJ: ' . (($cli['cpf_cnpj'] ?? '') ?: '-') . ' | Contato: ' . $contato . ' | Cidade/UF: ' . ($cidadeUf ?: '-');
+            }
+
+            $primeiro = $clientesNome[0];
+            $resposta['acoes'][] = ['label' => 'Abrir cadastro do cliente', 'url' => '?mod=clientes&acao=editar&id=' . urlencode((string)$primeiro['id']), 'class' => 'btn-primary', 'icon' => 'bi-person-lines-fill'];
+            $resposta['acoes'][] = ['label' => 'Gerar peça para cliente', 'url' => '?mod=cij&ferramenta=gerador', 'class' => 'btn-success', 'icon' => 'bi-magic'];
+            $resposta['acoes'][] = ['label' => 'Pesquisar em clientes', 'url' => '?mod=clientes&busca=' . urlencode($pergunta), 'class' => 'btn-outline-secondary', 'icon' => 'bi-search'];
+            return $resposta;
+        }
+    }
+
+    if ($atalho === 'agenda' || str_contains($perguntaNormalizada, 'agenda') || str_contains($perguntaNormalizada, 'audiência') || str_contains($perguntaNormalizada, 'audiencia')) {
+        $total = cij_table_exists($conn, 'agenda') ? cij_count($conn, "SELECT COUNT(*) AS total FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado'") : 0;
+        $audiencias = cij_table_exists($conn, 'agenda') ? cij_count($conn, "SELECT COUNT(*) AS total FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado' AND (tipo_compromisso LIKE '%Audiência%' OR tipo_compromisso LIKE '%Audiencia%')") : 0;
+        $linhas = cij_table_exists($conn, 'agenda') ? cij_rows($conn, "SELECT horario, tipo_compromisso, nome_cliente, local_evento, local FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado' ORDER BY horario IS NULL, horario ASC LIMIT 5") : [];
+
+        $resposta['titulo'] = 'Agenda de Hoje';
+        $resposta['texto'] = "Hoje existem {$total} compromisso(s) na agenda, sendo {$audiencias} audiência(s).";
+        foreach ($linhas as $l) {
+            $hora = $l['horario'] ? date('H:i', strtotime($l['horario'])) : 'Sem horário';
+            $local = $l['local_evento'] ?: ($l['local'] ?? '-');
+            $resposta['itens'][] = "{$hora} — " . ($l['tipo_compromisso'] ?: 'Compromisso') . " — " . ($l['nome_cliente'] ?: 'Cliente não informado') . " — {$local}";
+        }
+        $resposta['tipo'] = $total > 0 ? 'primary' : 'success';
+        return $resposta;
+    }
+
+    if ($atalho === 'prazos' || str_contains($perguntaNormalizada, 'prazo') || str_contains($perguntaNormalizada, 'processo')) {
+        $total = cij_table_exists($conn, 'processos') ? cij_count($conn, "SELECT COUNT(*) AS total FROM processos WHERE status='Em Andamento' AND proximo_prazo BETWEEN '{$hoje}' AND '{$seteDias}'") : 0;
+        $linhas = cij_table_exists($conn, 'processos') ? cij_rows($conn, "SELECT numero_processo, tipo_processo, fase_atual, proximo_prazo FROM processos WHERE status='Em Andamento' AND proximo_prazo BETWEEN '{$hoje}' AND '{$seteDias}' ORDER BY proximo_prazo ASC LIMIT 5") : [];
+
+        $resposta['titulo'] = 'Prazos Processuais Próximos';
+        $resposta['texto'] = "Foram localizado(s) {$total} prazo(s) processual(is) nos próximos 7 dias.";
+        foreach ($linhas as $l) {
+            $data = $l['proximo_prazo'] ? date('d/m/Y', strtotime($l['proximo_prazo'])) : '-';
+            $resposta['itens'][] = ($l['numero_processo'] ?: 'Processo sem número') . " — " . ($l['tipo_processo'] ?: 'Tipo não informado') . " — " . ($l['fase_atual'] ?: 'Fase não informada') . " — Prazo: {$data}";
+        }
+        $resposta['tipo'] = $total > 0 ? 'warning' : 'success';
+        return $resposta;
+    }
+
+    if ($atalho === 'financeiro' || str_contains($perguntaNormalizada, 'financeiro') || str_contains($perguntaNormalizada, 'despesa') || str_contains($perguntaNormalizada, 'receber') || str_contains($perguntaNormalizada, 'inadimpl')) {
+        $despesasVencidas = cij_table_exists($conn, 'contas_pagar') ? cij_count($conn, "SELECT COUNT(*) AS total FROM contas_pagar WHERE COALESCE(deletado,0)=0 AND status IN ('Pendente','Parcial') AND data_vencimento < '{$hoje}'") : 0;
+        $despesasAbertas = cij_table_exists($conn, 'contas_pagar') ? cij_sum($conn, "SELECT COALESCE(SUM(CASE WHEN valor_pendente > 0 THEN valor_pendente ELSE valor END),0) AS total FROM contas_pagar WHERE COALESCE(deletado,0)=0 AND status IN ('Pendente','Parcial')") : 0;
+        $recebidoMes = cij_table_exists($conn, 'contas_receber') ? cij_sum($conn, "SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE COALESCE(deletado,0)=0 AND status IN ('Recebido','Pago','Quitada') AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'") : 0;
+
+        $resposta['titulo'] = 'Análise Financeira Rápida';
+        $resposta['texto'] = "Resumo financeiro do mês: recebido " . cij_money($recebidoMes) . ", despesas abertas " . cij_money($despesasAbertas) . " e {$despesasVencidas} despesa(s) vencida(s).";
+        $resposta['itens'][] = "Recebido no mês: " . cij_money($recebidoMes);
+        $resposta['itens'][] = "Despesas em aberto: " . cij_money($despesasAbertas);
+        $resposta['itens'][] = "Despesas vencidas: {$despesasVencidas}";
+        $resposta['tipo'] = $despesasVencidas > 0 ? 'danger' : 'success';
+        return $resposta;
+    }
+
+    if ($atalho === 'honorarios' || str_contains($perguntaNormalizada, 'honorário') || str_contains($perguntaNormalizada, 'honorario')) {
+        $total = cij_table_exists($conn, 'honorarios_parcelas') ? cij_count($conn, "SELECT COUNT(*) AS total FROM honorarios_parcelas WHERE data_vencimento < '{$hoje}' AND COALESCE(saldo_devedor, valor_parcela, 0) > 0 AND COALESCE(status_pagamento,'Pendente') NOT IN ('Pago','Quitada','Recebido','Cancelado')") : 0;
+        $valor = cij_table_exists($conn, 'honorarios_parcelas') ? cij_sum($conn, "SELECT COALESCE(SUM(CASE WHEN saldo_devedor > 0 THEN saldo_devedor ELSE valor_parcela END),0) AS total FROM honorarios_parcelas WHERE data_vencimento < '{$hoje}' AND COALESCE(saldo_devedor, valor_parcela, 0) > 0 AND COALESCE(status_pagamento,'Pendente') NOT IN ('Pago','Quitada','Recebido','Cancelado')") : 0.0;
+
+        $resposta['titulo'] = 'Honorários em Atenção';
+        $resposta['texto'] = "Existem {$total} parcela(s) de honorários vencida(s), totalizando " . cij_money($valor) . ".";
+        $resposta['itens'][] = "Parcelas vencidas: {$total}";
+        $resposta['itens'][] = "Valor estimado em aberto: " . cij_money($valor);
+        $resposta['tipo'] = $total > 0 ? 'warning' : 'success';
+        return $resposta;
+    }
+
+    if ($atalho === 'clientes' || str_contains($perguntaNormalizada, 'cliente')) {
+        $ativos = cij_table_exists($conn, 'clientes') ? cij_count($conn, "SELECT COUNT(*) AS total FROM clientes WHERE COALESCE(deletado,0)=0 AND status='Ativo'") : 0;
+        $novos = cij_table_exists($conn, 'clientes') ? cij_count($conn, "SELECT COUNT(*) AS total FROM clientes WHERE COALESCE(deletado,0)=0 AND data_cadastro BETWEEN '{$inicioMes}' AND '{$fimMes}'") : 0;
+
+        $resposta['titulo'] = 'Resumo de Clientes';
+        $resposta['texto'] = "O escritório possui {$ativos} cliente(s) ativo(s), com {$novos} novo(s) cadastro(s) neste mês.";
+        $resposta['itens'][] = "Clientes ativos: {$ativos}";
+        $resposta['itens'][] = "Novos clientes no mês: {$novos}";
+        $resposta['tipo'] = 'primary';
+        return $resposta;
+    }
+
+    return $resposta;
+}
+
+$perguntaCij = trim((string)($_POST['pergunta_cij'] ?? ''));
+$atalhoCij = trim((string)($_POST['atalho_cij'] ?? ''));
+$respostaCij = null;
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['acao_cij'] ?? '') === 'assistente')) {
+    $respostaCij = cij_assistente_responder($conn, $perguntaCij, $atalhoCij);
+}
+
+$ferramentaCij = preg_replace('/[^a-zA-Z0-9_\-]/', '', (string)($_GET['ferramenta'] ?? ''));
+if ($ferramentaCij === 'gerador') {
+    $arquivoFerramenta = __DIR__ . '/cij/gerador.php';
+
+    if (is_file($arquivoFerramenta)) {
+        include $arquivoFerramenta;
+    } else {
+        echo "<div class='alert alert-danger'>Ferramenta do CIJ não encontrada: Gerador de Peças.</div>";
+    }
+
+    $conn->close();
+    return;
+}
+?>
+
+<div class="container-fluid">
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+        <div>
+            <h2 class="mb-1 fw-bold text-primary">
+                <i class="bi bi-cpu me-2"></i>Centro de Inteligência Jurídica
+            </h2>
+            <p class="text-muted mb-0">
+                Ambiente inteligente do ROJEX.AI para criação, análise, pesquisa e apoio estratégico jurídico.
+            </p>
+        </div>
+        <span class="badge bg-dark px-3 py-2">ROJEX.AI Enterprise</span>
+    </div>
+
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-chat-dots me-2"></i>Assistente Jurídico ROJEX.AI</span>
+            <span class="badge bg-primary">Consulta interna inicial</span>
+        </div>
+        <div class="card-body">
+            <form method="POST" class="row g-3">
+                <input type="hidden" name="acao_cij" value="assistente">
+                <input type="hidden" name="atalho_cij" id="atalho_cij" value="">
+                <div class="col-lg-9">
+                    <label class="form-label fw-semibold">Pergunte ao ROJEX.AI</label>
+                    <input type="text" name="pergunta_cij" class="form-control form-control-lg" value="<?= cij_h($perguntaCij) ?>" placeholder="Ex.: quais processos vencem esta semana? clientes ativos? honorários vencidos?">
+                    <div class="form-text">Nesta etapa, o assistente responde com base nos dados internos do sistema. A IA externa será integrada em etapa futura.</div>
+                </div>
+                <div class="col-lg-3">
+                    <label class="form-label fw-semibold d-none d-lg-block">&nbsp;</label>
+                    <button class="btn btn-primary btn-lg w-100"><i class="bi bi-send me-1"></i>Consultar</button>
+                </div>
+                <div class="col-12">
+                    <div class="d-flex flex-wrap gap-2">
+                        <button type="submit" class="btn btn-outline-primary btn-sm" onclick="document.getElementById('atalho_cij').value='agenda'"><i class="bi bi-calendar-check me-1"></i>Agenda de hoje</button>
+                        <button type="submit" class="btn btn-outline-warning btn-sm" onclick="document.getElementById('atalho_cij').value='prazos'"><i class="bi bi-clock-history me-1"></i>Prazos próximos</button>
+                        <button type="submit" class="btn btn-outline-danger btn-sm" onclick="document.getElementById('atalho_cij').value='financeiro'"><i class="bi bi-cash-coin me-1"></i>Financeiro em atenção</button>
+                        <button type="submit" class="btn btn-outline-success btn-sm" onclick="document.getElementById('atalho_cij').value='honorarios'"><i class="bi bi-receipt me-1"></i>Honorários vencidos</button>
+                        <button type="submit" class="btn btn-outline-secondary btn-sm" onclick="document.getElementById('atalho_cij').value='clientes'"><i class="bi bi-people me-1"></i>Resumo de clientes</button>
+                    </div>
+                </div>
+            </form>
+
+            <?php if ($respostaCij): ?>
+                <div class="card border-<?= cij_h($respostaCij['tipo']) ?> shadow-sm mt-4 mb-0" id="resultado-cij">
+                    <div class="card-header bg-<?= cij_h($respostaCij['tipo']) ?> <?= in_array(($respostaCij['tipo'] ?? ''), ['warning', 'info', 'light'], true) ? 'text-dark' : 'text-white' ?> d-flex justify-content-between align-items-center flex-wrap gap-2">
+                        <strong><i class="bi bi-pin-angle me-1"></i><?= cij_h($respostaCij['titulo']) ?></strong>
+                        <span class="badge bg-light text-dark border">Resultado fixado na tela</span>
+                    </div>
+                    <div class="card-body">
+                        <p class="mb-2"><?= cij_h($respostaCij['texto']) ?></p>
+                        <?php if (!empty($respostaCij['itens'])): ?>
+                            <ul class="mb-3">
+                                <?php foreach ($respostaCij['itens'] as $item): ?>
+                                    <li><?= cij_h($item) ?></li>
+                                <?php endforeach; ?>
+                            </ul>
+                        <?php endif; ?>
+                        <small class="d-block text-muted mb-3"><i class="bi bi-info-circle me-1"></i><?= cij_h($respostaCij['alerta']) ?></small>
+                        <div class="d-flex flex-wrap gap-2">
+                            <?php if (!empty($respostaCij['acoes'])): ?>
+                                <?php foreach ($respostaCij['acoes'] as $acaoResultado): ?>
+                                    <a class="btn btn-sm <?= cij_h($acaoResultado['class'] ?? 'btn-outline-primary') ?>" href="<?= cij_h($acaoResultado['url'] ?? '#') ?>">
+                                        <i class="bi <?= cij_h($acaoResultado['icon'] ?? 'bi-arrow-right') ?> me-1"></i><?= cij_h($acaoResultado['label'] ?? 'Abrir') ?>
+                                    </a>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                            <a href="?mod=cij" class="btn btn-sm btn-outline-dark"><i class="bi bi-arrow-repeat me-1"></i>Nova consulta</a>
+                        </div>
+                    </div>
+                </div>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <div class="row g-4">
+        <?php
+        $modulosCij = [
+            ['icone' => 'bi-pencil-square', 'titulo' => 'Gerador de Peças', 'descricao' => 'Criar petições, contratos, notificações, procurações e pareceres.'],
+            ['icone' => 'bi-file-earmark-check', 'titulo' => 'Revisor Jurídico', 'descricao' => 'Revisar textos jurídicos, identificar inconsistências e sugerir melhorias.'],
+            ['icone' => 'bi-file-earmark-text', 'titulo' => 'Análise de Contratos', 'descricao' => 'Analisar cláusulas, riscos, obrigações e pontos de atenção em contratos.'],
+            ['icone' => 'bi-folder2-open', 'titulo' => 'Análise de Documentos e Provas', 'descricao' => 'Organizar e analisar PDFs, imagens, peças, provas e documentos do cliente.'],
+            ['icone' => 'bi-bank', 'titulo' => 'Pesquisa Jurídica', 'descricao' => 'Estrutura para legislação, jurisprudência, fundamentos, teses e referências jurídicas.'],
+            ['icone' => 'bi-journal-bookmark', 'titulo' => 'Biblioteca Inteligente', 'descricao' => 'Guardar modelos aprovados, peças geradas, teses e conhecimento do escritório.'],
+            ['icone' => 'bi-cash-coin', 'titulo' => 'IA Financeira', 'descricao' => 'Interpretar honorários, inadimplência, fluxo de caixa e indicadores financeiros.'],
+            ['icone' => 'bi-graph-up-arrow', 'titulo' => 'IA Administrativa', 'descricao' => 'Apoiar produtividade, desempenho da equipe, agenda e gestão operacional.'],
+            ['icone' => 'bi-mortarboard', 'titulo' => 'Academia ROJEX.AI', 'descricao' => 'Espaço para treinamentos, tutoriais, boas práticas e novidades do sistema.'],
+        ];
+        foreach ($modulosCij as $item):
+        ?>
+        <div class="col-xl-4 col-lg-6">
+            <div class="card h-100 border-0 shadow-sm">
+                <div class="card-body p-4">
+                    <div class="d-flex align-items-start gap-3">
+                        <div class="rounded-circle bg-primary bg-opacity-10 text-primary d-flex align-items-center justify-content-center" style="width:48px;height:48px;min-width:48px;">
+                            <i class="bi <?= cij_h($item['icone']) ?> fs-4"></i>
+                        </div>
+                        <div>
+                            <h5 class="fw-bold mb-2"><?= cij_h($item['titulo']) ?></h5>
+                            <p class="text-muted mb-3"><?= cij_h($item['descricao']) ?></p>
+                            <?php if (($item['titulo'] ?? '') === 'Gerador de Peças'): ?>
+                                <a href="?mod=cij&ferramenta=gerador" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php else: ?>
+                                <button type="button" class="btn btn-sm btn-outline-primary" disabled>
+                                    Em preparação
+                                </button>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <?php endforeach; ?>
+    </div>
+
+    <div class="card border-0 shadow-sm mt-4">
+        <div class="card-header bg-dark text-white">
+            <i class="bi bi-shield-check me-2"></i>Próximas etapas do CIJ
+        </div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-3"><div class="border rounded p-3 h-100"><strong>1. Interface</strong><br><small class="text-muted">Estrutura visual do CIJ.</small></div></div>
+                <div class="col-md-3"><div class="border rounded p-3 h-100"><strong>2. Consultas internas</strong><br><small class="text-muted">Integração com clientes, processos e financeiro.</small></div></div>
+                <div class="col-md-3"><div class="border rounded p-3 h-100"><strong>3. Upload/análise</strong><br><small class="text-muted">Contratos, provas e documentos.</small></div></div>
+                <div class="col-md-3"><div class="border rounded p-3 h-100"><strong>4. IA externa</strong><br><small class="text-muted">Preparação futura para API de IA.</small></div></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<?php
+$conn->close();
+?>

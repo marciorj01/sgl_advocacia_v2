@@ -9,7 +9,7 @@ exigirLogin('auth/login.php');
 $modulo = isset($_GET['mod']) ? trim($_GET['mod']) : 'dashboard';
 $modulos_validos = [
     'dashboard', 'advogados', 'clientes', 'processos', 'honorarios', 'agenda',
-    'financeiro', 'recibos', 'documentos', 'modelos', 'configuracoes', 'busca'
+    'financeiro', 'recibos', 'documentos', 'modelos', 'configuracoes', 'busca', 'cij'
 ];
 if (!in_array($modulo, $modulos_validos, true)) { $modulo = 'dashboard'; }
 
@@ -26,6 +26,7 @@ $titulos = [
     'modelos' => 'Modelos Jurídicos',
     'configuracoes' => 'Configurações',
     'busca' => 'Busca Global',
+    'cij' => 'Centro de Inteligência Jurídica',
 ];
 $tituloPagina = $titulos[$modulo] ?? 'SGL';
 
@@ -62,42 +63,128 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
     $termo = trim($termo);
     if ($termo === '') { return []; }
 
+    $digitos = preg_replace('/\D+/', '', $termo);
+    $like = '%' . $termo . '%';
+    $likeDigitos = $digitos !== '' ? '%' . $digitos . '%' : '';
+
     $config = [
-        'clientes' => ['titulo' => 'Clientes', 'mod' => 'clientes', 'campos' => ['nome','cpf','cnpj','email','telefone']],
-        'processos' => ['titulo' => 'Processos', 'mod' => 'processos', 'campos' => ['numero_processo','titulo','cliente','vara','status']],
-        'advogados' => ['titulo' => 'Advogados', 'mod' => 'advogados', 'campos' => ['nome','oab','email','telefone']],
-        'agenda' => ['titulo' => 'Agenda', 'mod' => 'agenda', 'campos' => ['titulo','descricao','cliente','data']],
-        'honorarios' => ['titulo' => 'Honorários', 'mod' => 'honorarios', 'campos' => ['cliente','descricao','status']],
-        'documentos_arquivos' => ['titulo' => 'Documentos', 'mod' => 'documentos', 'campos' => ['nome_arquivo','titulo','descricao']],
-        'modelos_documentos' => ['titulo' => 'Modelos', 'mod' => 'modelos', 'campos' => ['titulo','nome','descricao']],
+        'clientes' => [
+            'titulo' => 'Clientes',
+            'mod' => 'clientes',
+            'campos' => ['id','nome','cpf_cnpj','email','telefone','celular','whatsapp','cidade','estado'],
+            'principal' => ['nome','cpf_cnpj','id'],
+            'numericos' => ['cpf_cnpj','telefone','celular','whatsapp']
+        ],
+        'processos' => [
+            'titulo' => 'Processos',
+            'mod' => 'processos',
+            'campos' => ['id','numero_processo','num_processo','titulo','cliente','tipo_processo','comarca','vara','status'],
+            'principal' => ['numero_processo','num_processo','titulo','id'],
+            'numericos' => ['numero_processo','num_processo']
+        ],
+        'advogados' => [
+            'titulo' => 'Advogados',
+            'mod' => 'advogados',
+            'campos' => ['id','nome','cpf','oab','email','telefone','celular'],
+            'principal' => ['nome','oab','id'],
+            'numericos' => ['cpf','oab','telefone','celular']
+        ],
+        'agenda' => [
+            'titulo' => 'Agenda',
+            'mod' => 'agenda',
+            'campos' => ['id','titulo','descricao','cliente','nome_cliente','data','data_evento','numero_processo','status'],
+            'principal' => ['titulo','descricao','nome_cliente','id'],
+            'numericos' => ['numero_processo']
+        ],
+        'honorarios' => [
+            'titulo' => 'Honorários',
+            'mod' => 'honorarios',
+            'campos' => ['id','cliente','nome_cliente','descricao','status','numero_processo'],
+            'principal' => ['descricao','nome_cliente','cliente','id'],
+            'numericos' => ['numero_processo']
+        ],
+        'documentos_arquivos' => [
+            'titulo' => 'Documentos',
+            'mod' => 'documentos',
+            'campos' => ['id','codigo','nome_arquivo','nome_original','titulo','descricao','categoria'],
+            'principal' => ['titulo','nome_original','nome_arquivo','codigo','id'],
+            'numericos' => ['codigo']
+        ],
+        'modelos_documentos' => [
+            'titulo' => 'Modelos',
+            'mod' => 'modelos',
+            'campos' => ['id','codigo','titulo','nome','descricao','categoria','area_direito'],
+            'principal' => ['titulo','nome','codigo','id'],
+            'numericos' => ['codigo']
+        ],
     ];
 
     $saida = [];
-    $like = '%' . $termo . '%';
+    $vistos = [];
 
     foreach ($config as $tabela => $cfg) {
         if (!sgl_table_exists($conn, $tabela)) { continue; }
-        $cols = sgl_table_columns($conn, $tabela);
-        $campos = array_values(array_intersect($cfg['campos'], $cols));
-        if (!$campos || !in_array('id', $cols, true)) { continue; }
 
-        $wheres = array_map(fn($c) => "`$c` LIKE ?", $campos);
-        $selectNome = $campos[0];
-        $sql = "SELECT id, `$selectNome` AS principal FROM `$tabela` WHERE " . implode(' OR ', $wheres) . " ORDER BY id DESC LIMIT 10";
+        $cols = sgl_table_columns($conn, $tabela);
+        if (!in_array('id', $cols, true)) { continue; }
+
+        $campos = array_values(array_intersect($cfg['campos'], $cols));
+        $camposNumericos = array_values(array_intersect($cfg['numericos'] ?? [], $cols));
+        if (!$campos && !$camposNumericos) { continue; }
+
+        $wheres = [];
+        $params = [];
+        $types = '';
+
+        foreach ($campos as $campo) {
+            $wheres[] = "`{$campo}` LIKE ?";
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($digitos !== '') {
+            foreach ($camposNumericos as $campo) {
+                $expr = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(`{$campo}`, '.', ''), '-', ''), '/', ''), '(', ''), ')', ''), ' ', ''), '+', '')";
+                $wheres[] = "{$expr} LIKE ?";
+                $params[] = $likeDigitos;
+                $types .= 's';
+            }
+        }
+
+        if (!$wheres) { continue; }
+
+        $principal = 'id';
+        foreach (($cfg['principal'] ?? []) as $possivel) {
+            if (in_array($possivel, $cols, true)) { $principal = $possivel; break; }
+        }
+
+        $whereDeletado = in_array('deletado', $cols, true) ? " AND COALESCE(`deletado`,0)=0" : '';
+        $sql = "SELECT * FROM `{$tabela}` WHERE (" . implode(' OR ', $wheres) . "){$whereDeletado} ORDER BY id DESC LIMIT 10";
 
         try {
             $stmt = $conn->prepare($sql);
-            $params = array_fill(0, count($campos), $like);
-            $types = str_repeat('s', count($params));
-            $stmt->bind_param($types, ...$params);
+            if ($types !== '') { $stmt->bind_param($types, ...$params); }
             $stmt->execute();
             $res = $stmt->get_result();
+
             while ($row = $res->fetch_assoc()) {
+                $chave = $tabela . ':' . (string)$row['id'];
+                if (isset($vistos[$chave])) { continue; }
+                $vistos[$chave] = true;
+
+                $texto = (string)($row[$principal] ?? '');
+                if ($texto === '') { $texto = 'Registro sem descrição'; }
+
+                if ($tabela === 'clientes') {
+                    $doc = (string)($row['cpf_cnpj'] ?? '');
+                    if ($doc !== '') { $texto .= ' — ' . $doc; }
+                }
+
                 $saida[] = [
                     'modulo' => $cfg['titulo'],
                     'mod' => $cfg['mod'],
                     'id' => (string)$row['id'],
-                    'texto' => (string)($row['principal'] ?: 'Registro sem descrição'),
+                    'texto' => $texto,
                 ];
             }
             $stmt->close();
@@ -108,6 +195,7 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
 
     return $saida;
 }
+
 
 ?>
 <!DOCTYPE html>
@@ -227,6 +315,7 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
         <div class="sgl-menu">
             <a href="?mod=dashboard" class="nav-link <?= sgl_link_active($modulo, 'dashboard') ?>"><i class="bi bi-speedometer2"></i> Dashboard</a>
             <a href="?mod=busca" class="nav-link <?= sgl_link_active($modulo, 'busca') ?>"><i class="bi bi-search"></i> Busca Global</a>
+            <a href="?mod=cij" class="nav-link <?= sgl_link_active($modulo, 'cij') ?>"><i class="bi bi-cpu"></i> Centro de Inteligência Jurídica</a>
 
             <div class="sgl-menu-title">Cadastros</div>
             <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuCadastros" aria-expanded="<?= sgl_menu_active($modulo, ['advogados','clientes']) ? 'true' : 'false' ?>">

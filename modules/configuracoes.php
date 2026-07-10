@@ -140,17 +140,24 @@ function sgl_select_count(mysqli $conn, string $sql): int {
 
 function sgl_buscar_lixeira(mysqli $conn): array {
     $itens = [];
+
     $mapa = [
-        'advogados' => ['campo' => 'nome', 'cond' => "status='Excluído'"],
-        'clientes' => ['campo' => 'nome', 'cond' => sgl_coluna_existe($conn, 'clientes', 'deletado') ? 'deletado = 1' : "status='Excluído'"],
-        'processos' => ['campo' => 'numero_processo', 'cond' => "status='Excluído'"],
-        'agenda' => ['campo' => 'titulo', 'cond' => sgl_coluna_existe($conn, 'agenda', 'deletado') ? 'deletado = 1' : "status='Cancelado'"],
+        'advogados' => ['campo' => 'nome', 'cond' => "status='Excluído'", 'tipo' => 'Advogados'],
+        'clientes' => ['campo' => 'nome', 'cond' => sgl_coluna_existe($conn, 'clientes', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Clientes'],
+        'processos' => ['campo' => 'numero_processo', 'cond' => "status='Excluído'", 'tipo' => 'Processos'],
+        'agenda' => ['campo' => sgl_coluna_existe($conn, 'agenda', 'titulo') ? 'titulo' : 'tipo_compromisso', 'cond' => sgl_coluna_existe($conn, 'agenda', 'deletado') ? 'deletado = 1' : "status='Cancelado'", 'tipo' => 'Agenda'],
+        'honorarios' => ['campo' => sgl_coluna_existe($conn, 'honorarios', 'nome_cliente') ? 'nome_cliente' : 'id', 'cond' => sgl_coluna_existe($conn, 'honorarios', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Honorários'],
+        'contas_pagar' => ['campo' => sgl_coluna_existe($conn, 'contas_pagar', 'descricao') ? 'descricao' : 'fornecedor', 'cond' => sgl_coluna_existe($conn, 'contas_pagar', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Contas a Pagar'],
+        'contas_receber' => ['campo' => sgl_coluna_existe($conn, 'contas_receber', 'descricao') ? 'descricao' : 'cliente', 'cond' => sgl_coluna_existe($conn, 'contas_receber', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Contas a Receber'],
+        'documentos_arquivos' => ['campo' => sgl_coluna_existe($conn, 'documentos_arquivos', 'titulo') ? 'titulo' : 'nome_arquivo', 'cond' => sgl_coluna_existe($conn, 'documentos_arquivos', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Documentos'],
+        'modelos_documentos' => ['campo' => sgl_coluna_existe($conn, 'modelos_documentos', 'titulo') ? 'titulo' : 'nome', 'cond' => sgl_coluna_existe($conn, 'modelos_documentos', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Modelos'],
     ];
 
     foreach ($mapa as $tabela => $cfg) {
-        if (!sgl_tabela_existe($conn, $tabela) || !sgl_coluna_existe($conn, $tabela, $cfg['campo'])) {
+        if (!sgl_tabela_existe($conn, $tabela) || !sgl_coluna_existe($conn, $tabela, 'id') || !sgl_coluna_existe($conn, $tabela, $cfg['campo'])) {
             continue;
         }
+
         try {
             $sql = "SELECT id, `{$cfg['campo']}` AS nome FROM `$tabela` WHERE {$cfg['cond']} ORDER BY id DESC LIMIT 100";
             $res = $conn->query($sql);
@@ -160,12 +167,13 @@ function sgl_buscar_lixeira(mysqli $conn): array {
                         'tabela' => $tabela,
                         'id' => (string)$row['id'],
                         'nome' => (string)($row['nome'] ?: 'Registro sem descrição'),
-                        'tipo' => ucfirst($tabela),
+                        'tipo' => $cfg['tipo'],
                     ];
                 }
             }
         } catch (Throwable $e) {}
     }
+
     return $itens;
 }
 
@@ -372,42 +380,41 @@ if ($acao_cfg === 'salvar_sistema') {
 if ($acao_cfg === 'restaurar_item_lixeira' && !empty($_POST['tabela']) && !empty($_POST['item_id'])) {
     $tb = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$_POST['tabela']);
     $id = (string)$_POST['item_id'];
-    $permitidas = ['advogados','clientes','processos','agenda'];
-    if (in_array($tb, $permitidas, true) && sgl_tabela_existe($conn, $tb)) {
-        if ($tb === 'clientes' && sgl_coluna_existe($conn, $tb, 'deletado')) {
+    $permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos'];
+
+    if (in_array($tb, $permitidas, true) && sgl_tabela_existe($conn, $tb) && sgl_coluna_existe($conn, $tb, 'id')) {
+        if (sgl_coluna_existe($conn, $tb, 'deletado')) {
             $stmt = $conn->prepare("UPDATE `$tb` SET deletado = 0 WHERE id = ?");
-        } elseif ($tb === 'agenda' && sgl_coluna_existe($conn, $tb, 'deletado')) {
-            $stmt = $conn->prepare("UPDATE `$tb` SET deletado = 0 WHERE id = ?");
-        } else {
+            $stmt->bind_param('s', $id);
+            $stmt->execute();
+            $stmt->close();
+        } elseif (sgl_coluna_existe($conn, $tb, 'status')) {
             $status = ($tb === 'processos') ? 'Em Andamento' : 'Ativo';
             $stmt = $conn->prepare("UPDATE `$tb` SET status = ? WHERE id = ?");
             $stmt->bind_param('ss', $status, $id);
             $stmt->execute();
             $stmt->close();
-            sgl_log($conn, 'Restaurou item da lixeira', $tb, $id);
-            sgl_redirect_cfg('lixeira', 'sucesso', 'Registro restaurado com sucesso.');
         }
-        if (isset($stmt)) {
-            $stmt->bind_param('s', $id);
-            $stmt->execute();
-            $stmt->close();
-            sgl_log($conn, 'Restaurou item da lixeira', $tb, $id);
-        }
+
+        sgl_log($conn, 'Restaurou item da lixeira', $tb, $id);
     }
+
     sgl_redirect_cfg('lixeira', 'sucesso', 'Registro restaurado com sucesso.');
 }
 
 if ($acao_cfg === 'excluir_item_lixeira' && !empty($_POST['tabela']) && !empty($_POST['item_id'])) {
     $tb = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$_POST['tabela']);
     $id = (string)$_POST['item_id'];
-    $permitidas = ['advogados','clientes','processos','agenda'];
-    if (in_array($tb, $permitidas, true) && sgl_tabela_existe($conn, $tb)) {
+    $permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos'];
+
+    if (in_array($tb, $permitidas, true) && sgl_tabela_existe($conn, $tb) && sgl_coluna_existe($conn, $tb, 'id')) {
         $stmt = $conn->prepare("DELETE FROM `$tb` WHERE id = ?");
         $stmt->bind_param('s', $id);
         $stmt->execute();
         $stmt->close();
         sgl_log($conn, 'Excluiu definitivamente item da lixeira', $tb, $id);
     }
+
     sgl_redirect_cfg('lixeira', 'aviso', 'Item excluído permanentemente.');
 }
 
@@ -783,8 +790,11 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 
 <?php if ($tab_ativa === 'lixeira'): ?>
 <div class="card shadow-sm border-0">
-    <div class="card-header bg-danger text-white d-flex justify-content-between align-items-center"><span><i class="bi bi-trash3 me-1"></i> Lixeira Central</span><span><?=count($lixeira_itens)?> item(ns)</span></div>
+    <div class="card-header bg-danger text-white d-flex justify-content-between align-items-center"><span><i class="bi bi-trash3 me-1"></i> Lixeira Enterprise</span><span><?=count($lixeira_itens)?> item(ns)</span></div>
     <div class="card-body">
+        <div class="alert alert-warning border-0 shadow-sm small">
+            <strong>Atenção:</strong> restaurar devolve o registro ao módulo de origem. Excluir remove definitivamente da base de dados e registra a ação nos logs.
+        </div>
         <?php if(empty($lixeira_itens)): ?>
             <div class="text-center py-5 text-muted"><i class="bi bi-trash3 fs-1 d-block mb-3 opacity-25"></i><p class="mb-0">A lixeira está vazia.</p></div>
         <?php else: ?>

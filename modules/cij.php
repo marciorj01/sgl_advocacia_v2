@@ -193,6 +193,24 @@ function cij_busca_livre_base(mysqli $conn, string $consulta): array
         }
     }
 
+    if (function_exists('rojex_kb_agenda_por_termo')) {
+        foreach (rojex_kb_agenda_por_termo($conn, $consulta, 5) as $compromisso) {
+            $resultados[] = ['tipo' => 'agenda', 'dados' => $compromisso];
+        }
+    }
+
+    if (function_exists('rojex_kb_honorarios_por_termo')) {
+        foreach (rojex_kb_honorarios_por_termo($conn, $consulta, 5) as $honorario) {
+            $resultados[] = ['tipo' => 'honorario', 'dados' => $honorario];
+        }
+    }
+
+    if (function_exists('rojex_kb_documentos_por_termo')) {
+        foreach (rojex_kb_documentos_por_termo($conn, $consulta, 5) as $documento) {
+            $resultados[] = ['tipo' => 'documento', 'dados' => $documento];
+        }
+    }
+
     return $resultados;
 }
 
@@ -404,18 +422,76 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
     }
 
     if ($atalho === 'agenda' || str_contains($perguntaNormalizada, 'agenda') || str_contains($perguntaNormalizada, 'audiência') || str_contains($perguntaNormalizada, 'audiencia')) {
-        $total = cij_table_exists($conn, 'agenda') ? cij_count($conn, "SELECT COUNT(*) AS total FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado'") : 0;
-        $audiencias = cij_table_exists($conn, 'agenda') ? cij_count($conn, "SELECT COUNT(*) AS total FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado' AND (tipo_compromisso LIKE '%Audiência%' OR tipo_compromisso LIKE '%Audiencia%')") : 0;
-        $linhas = cij_table_exists($conn, 'agenda') ? cij_rows($conn, "SELECT horario, tipo_compromisso, nome_cliente, local_evento, local FROM agenda WHERE COALESCE(deletado,0)=0 AND data_evento='{$hoje}' AND status <> 'Cancelado' ORDER BY horario IS NULL, horario ASC LIMIT 5") : [];
+        $compromissos = [];
 
-        $resposta['titulo'] = 'Agenda de Hoje';
-        $resposta['texto'] = "Hoje existem {$total} compromisso(s) na agenda, sendo {$audiencias} audiência(s).";
-        foreach ($linhas as $l) {
-            $hora = $l['horario'] ? date('H:i', strtotime($l['horario'])) : 'Sem horário';
-            $local = $l['local_evento'] ?: ($l['local'] ?? '-');
-            $resposta['itens'][] = "{$hora} — " . ($l['tipo_compromisso'] ?: 'Compromisso') . " — " . ($l['nome_cliente'] ?: 'Cliente não informado') . " — {$local}";
+        if ($atalho === 'agenda' && function_exists('rojex_kb_agenda_hoje')) {
+            $compromissos = rojex_kb_agenda_hoje($conn, $hoje, 10);
+        } elseif (function_exists('rojex_kb_agenda_por_termo')) {
+            $compromissos = rojex_kb_agenda_por_termo($conn, $pergunta, 10);
         }
-        $resposta['tipo'] = $total > 0 ? 'primary' : 'success';
+
+        if ($atalho === 'agenda') {
+            $total = count($compromissos);
+            $audiencias = 0;
+            foreach ($compromissos as $compromisso) {
+                $tipoCompromisso = mb_strtolower((string)($compromisso['tipo_compromisso'] ?? ''), 'UTF-8');
+                if (str_contains($tipoCompromisso, 'audiência') || str_contains($tipoCompromisso, 'audiencia')) {
+                    $audiencias++;
+                }
+            }
+            $resposta['titulo'] = 'Agenda de Hoje';
+            $resposta['texto'] = "Hoje existem {$total} compromisso(s) na agenda, sendo {$audiencias} audiência(s).";
+        } else {
+            $resposta['titulo'] = count($compromissos) === 1 ? 'Compromisso localizado' : 'Compromissos localizados';
+            $resposta['texto'] = !empty($compromissos)
+                ? 'Encontrei compromisso(s) compatíveis com a pesquisa informada.'
+                : 'Não encontrei compromisso compatível com a pesquisa informada.';
+        }
+
+        foreach ($compromissos as $compromisso) {
+            $data = !empty($compromisso['data_evento'])
+                ? date('d/m/Y', strtotime((string)$compromisso['data_evento']))
+                : '-';
+            $hora = !empty($compromisso['horario'])
+                ? date('H:i', strtotime((string)$compromisso['horario']))
+                : 'Sem horário';
+
+            $resposta['itens'][] = $data . ' ' . $hora
+                . ' | ' . (($compromisso['tipo_compromisso'] ?? '') ?: 'Compromisso')
+                . ' | Cliente: ' . (($compromisso['cliente_nome'] ?? '') ?: '-')
+                . ' | Processo: ' . (($compromisso['numero_processo'] ?? '') ?: '-')
+                . ' | Advogado: ' . (($compromisso['advogado_nome'] ?? '') ?: '-')
+                . ' | Local: ' . (($compromisso['local'] ?? '') ?: '-')
+                . ' | Status: ' . (($compromisso['status'] ?? '') ?: '-');
+        }
+
+        if (!empty($compromissos)) {
+            $primeiro = $compromissos[0];
+            $resposta['tipo'] = 'primary';
+            $resposta['alerta'] = 'Consulta realizada pela Base de Conhecimento da Agenda do ROJEX.AI.';
+            $resposta['acoes'][] = [
+                'label' => 'Abrir compromisso',
+                'url' => '?mod=agenda&acao=editar&id=' . urlencode((string)($primeiro['id'] ?? '')),
+                'class' => 'btn-primary',
+                'icon' => 'bi-calendar-event'
+            ];
+            $resposta['acoes'][] = [
+                'label' => 'Ver agenda completa',
+                'url' => '?mod=agenda',
+                'class' => 'btn-outline-secondary',
+                'icon' => 'bi-calendar3'
+            ];
+        } else {
+            $resposta['tipo'] = 'success';
+            $resposta['alerta'] = 'Nenhum compromisso ativo foi encontrado para esta consulta.';
+            $resposta['acoes'][] = [
+                'label' => 'Abrir agenda',
+                'url' => '?mod=agenda',
+                'class' => 'btn-outline-primary',
+                'icon' => 'bi-calendar3'
+            ];
+        }
+
         return $resposta;
     }
 
@@ -447,15 +523,219 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         return $resposta;
     }
 
-    if ($atalho === 'honorarios' || str_contains($perguntaNormalizada, 'honorário') || str_contains($perguntaNormalizada, 'honorario')) {
-        $total = cij_table_exists($conn, 'honorarios_parcelas') ? cij_count($conn, "SELECT COUNT(*) AS total FROM honorarios_parcelas WHERE data_vencimento < '{$hoje}' AND COALESCE(saldo_devedor, valor_parcela, 0) > 0 AND COALESCE(status_pagamento,'Pendente') NOT IN ('Pago','Quitada','Recebido','Cancelado')") : 0;
-        $valor = cij_table_exists($conn, 'honorarios_parcelas') ? cij_sum($conn, "SELECT COALESCE(SUM(CASE WHEN saldo_devedor > 0 THEN saldo_devedor ELSE valor_parcela END),0) AS total FROM honorarios_parcelas WHERE data_vencimento < '{$hoje}' AND COALESCE(saldo_devedor, valor_parcela, 0) > 0 AND COALESCE(status_pagamento,'Pendente') NOT IN ('Pago','Quitada','Recebido','Cancelado')") : 0.0;
+    $consultaHonorarios = $atalho === 'honorarios'
+        || str_contains($perguntaNormalizada, 'honorário')
+        || str_contains($perguntaNormalizada, 'honorario')
+        || str_contains($perguntaNormalizada, 'saldo pendente')
+        || str_contains($perguntaNormalizada, 'valor pendente')
+        || str_contains($perguntaNormalizada, 'em aberto')
+        || str_contains($perguntaNormalizada, 'quanto falta receber')
+        || str_contains($perguntaNormalizada, 'parcelas pendentes')
+        || str_contains($perguntaNormalizada, 'parcelas em aberto');
+
+    if ($consultaHonorarios) {
+        $consultaEspecifica = trim($pergunta) !== ''
+            && $atalho === ''
+            && !in_array(
+                trim(mb_strtolower($pergunta, 'UTF-8')),
+                ['honorários', 'honorarios', 'honorários vencidos', 'honorarios vencidos'],
+                true
+            );
+
+        if ($consultaEspecifica && function_exists('rojex_kb_honorarios_por_termo')) {
+            $honorarios = rojex_kb_honorarios_por_termo($conn, $pergunta, 10);
+
+            if (!empty($honorarios)) {
+                $resposta['titulo'] = count($honorarios) === 1
+                    ? 'Honorário localizado'
+                    : 'Honorários localizados';
+                $resposta['texto'] = 'Encontrei honorário(s) compatíveis com a pesquisa informada.';
+                $resposta['tipo'] = 'success';
+                $resposta['alerta'] = 'Consulta realizada pela Base de Conhecimento de Honorários do ROJEX.AI.';
+
+                foreach ($honorarios as $honorario) {
+                    $vencimento = !empty($honorario['data_vencimento'])
+                        ? date('d/m/Y', strtotime((string)$honorario['data_vencimento']))
+                        : '-';
+
+                    $resposta['itens'][] =
+                        'ID: ' . (($honorario['id'] ?? '') ?: '-')
+                        . ' | Cliente: ' . (($honorario['nome_cliente'] ?? '') ?: '-')
+                        . ' | Processo: ' . (($honorario['numero_processo'] ?? '') ?: '-')
+                        . ' | Tipo: ' . (($honorario['tipo_honorario'] ?? '') ?: '-')
+                        . ' | Total: ' . cij_money((float)($honorario['valor_total'] ?? 0))
+                        . ' | Pago: ' . cij_money((float)($honorario['valor_pago'] ?? 0))
+                        . ' | Saldo: ' . cij_money((float)($honorario['valor_pendente'] ?? 0))
+                        . ' | Vencimento: ' . $vencimento
+                        . ' | Status: ' . (($honorario['status'] ?? '') ?: '-');
+                }
+
+                $primeiro = $honorarios[0];
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir honorário',
+                    'url' => '?mod=honorarios&acao=editar&id=' . urlencode((string)($primeiro['id'] ?? '')),
+                    'class' => 'btn-primary',
+                    'icon' => 'bi-cash-stack'
+                ];
+                $resposta['acoes'][] = [
+                    'label' => 'Ver honorários',
+                    'url' => '?mod=honorarios',
+                    'class' => 'btn-outline-secondary',
+                    'icon' => 'bi-receipt'
+                ];
+
+                return $resposta;
+            }
+        }
+
+        $vencidos = function_exists('rojex_kb_honorarios_vencidos')
+            ? rojex_kb_honorarios_vencidos($conn, $hoje, 50)
+            : [];
+
+        $resumo = function_exists('rojex_kb_resumo_honorarios')
+            ? rojex_kb_resumo_honorarios($conn)
+            : [
+                'total' => 0,
+                'pendentes' => 0,
+                'valor_pago' => 0,
+                'saldo_aberto' => 0,
+                'vencidos' => 0,
+            ];
+
+        $valorVencido = 0.0;
+        foreach ($vencidos as $honorario) {
+            $valorVencido += (float)($honorario['valor_pendente'] ?? 0);
+        }
 
         $resposta['titulo'] = 'Honorários em Atenção';
-        $resposta['texto'] = "Existem {$total} parcela(s) de honorários vencida(s), totalizando " . cij_money($valor) . ".";
-        $resposta['itens'][] = "Parcelas vencidas: {$total}";
-        $resposta['itens'][] = "Valor estimado em aberto: " . cij_money($valor);
-        $resposta['tipo'] = $total > 0 ? 'warning' : 'success';
+        $resposta['texto'] = 'Existem '
+            . count($vencidos)
+            . ' honorário(s) vencido(s), totalizando '
+            . cij_money($valorVencido)
+            . ' em saldo pendente vencido.';
+
+        $resposta['itens'][] = 'Honorários cadastrados: ' . (int)($resumo['total'] ?? 0);
+        $resposta['itens'][] = 'Pendentes ou parciais: ' . (int)($resumo['pendentes'] ?? 0);
+        $resposta['itens'][] = 'Valor pago: ' . cij_money((float)($resumo['valor_pago'] ?? 0));
+        $resposta['itens'][] = 'Saldo total em aberto: ' . cij_money((float)($resumo['saldo_aberto'] ?? 0));
+        $resposta['itens'][] = 'Honorários vencidos: ' . count($vencidos);
+
+        foreach (array_slice($vencidos, 0, 5) as $honorario) {
+            $vencimento = !empty($honorario['data_vencimento'])
+                ? date('d/m/Y', strtotime((string)$honorario['data_vencimento']))
+                : '-';
+
+            $resposta['itens'][] =
+                (($honorario['nome_cliente'] ?? '') ?: 'Cliente não informado')
+                . ' | ID: ' . (($honorario['id'] ?? '') ?: '-')
+                . ' | Processo: ' . (($honorario['numero_processo'] ?? '') ?: '-')
+                . ' | Vencimento: ' . $vencimento
+                . ' | Saldo: ' . cij_money((float)($honorario['valor_pendente'] ?? 0));
+        }
+
+        $resposta['tipo'] = !empty($vencidos) ? 'warning' : 'success';
+        $resposta['alerta'] = 'Consulta realizada pela Base de Conhecimento de Honorários do ROJEX.AI.';
+        $resposta['acoes'][] = [
+            'label' => 'Abrir honorários',
+            'url' => '?mod=honorarios',
+            'class' => 'btn-primary',
+            'icon' => 'bi-cash-stack'
+        ];
+
+        if (!empty($vencidos)) {
+            $resposta['acoes'][] = [
+                'label' => 'Abrir primeiro vencido',
+                'url' => '?mod=honorarios&acao=editar&id=' . urlencode((string)($vencidos[0]['id'] ?? '')),
+                'class' => 'btn-outline-warning',
+                'icon' => 'bi-exclamation-triangle'
+            ];
+        }
+
+        return $resposta;
+    }
+
+
+    $consultaDocumentos = $atalho === ''
+        && (
+            str_contains($perguntaNormalizada, 'documento')
+            || str_contains($perguntaNormalizada, 'documentos')
+            || str_contains($perguntaNormalizada, 'arquivo')
+            || str_contains($perguntaNormalizada, 'arquivos')
+            || str_contains($perguntaNormalizada, 'procuração')
+            || str_contains($perguntaNormalizada, 'procuracao')
+            || str_contains($perguntaNormalizada, 'contrato')
+            || str_contains($perguntaNormalizada, 'prova')
+            || str_contains($perguntaNormalizada, 'pdf')
+            || str_contains($perguntaNormalizada, 'word')
+            || str_contains($perguntaNormalizada, 'docx')
+        );
+
+    if ($consultaDocumentos && function_exists('rojex_kb_documentos_por_termo')) {
+        $documentos = rojex_kb_documentos_por_termo($conn, $pergunta, 10);
+
+        if (!empty($documentos)) {
+            $resposta['titulo'] = count($documentos) === 1
+                ? 'Documento localizado'
+                : 'Documentos localizados';
+            $resposta['texto'] = 'Encontrei documento(s) compatíveis com a pesquisa informada.';
+            $resposta['tipo'] = 'success';
+            $resposta['alerta'] = 'Consulta realizada pela Base de Conhecimento de Documentos do ROJEX.AI.';
+
+            foreach ($documentos as $documento) {
+                $dataEnvio = !empty($documento['criado_em'])
+                    ? date('d/m/Y H:i', strtotime((string)$documento['criado_em']))
+                    : '-';
+
+                $resposta['itens'][] =
+                    (($documento['codigo'] ?? '') ?: 'Sem código')
+                    . ' | Título: ' . (($documento['titulo'] ?? '') ?: '-')
+                    . ' | Categoria: ' . (($documento['categoria'] ?? '') ?: '-')
+                    . ' | Cliente: ' . (($documento['cliente_nome'] ?? '') ?: '-')
+                    . ' | Processo: ' . (($documento['numero_processo'] ?? '') ?: '-')
+                    . ' | Arquivo: ' . (($documento['nome_original'] ?? '') ?: '-')
+                    . ' | Extensão: ' . strtoupper((string)(($documento['extensao'] ?? '') ?: '-'))
+                    . ' | Enviado por: ' . (($documento['usuario_nome'] ?? '') ?: '-')
+                    . ' | Data: ' . $dataEnvio;
+            }
+
+            $primeiro = $documentos[0];
+            $idDocumento = (int)($primeiro['id'] ?? 0);
+
+            if ($idDocumento > 0) {
+                $resposta['acoes'][] = [
+                    'label' => 'Visualizar documento',
+                    'url' => 'documento_arquivo.php?id=' . $idDocumento . '&modo=inline',
+                    'class' => 'btn-success',
+                    'icon' => 'bi-eye'
+                ];
+                $resposta['acoes'][] = [
+                    'label' => 'Baixar documento',
+                    'url' => 'documento_arquivo.php?id=' . $idDocumento . '&modo=download',
+                    'class' => 'btn-outline-primary',
+                    'icon' => 'bi-download'
+                ];
+            }
+
+            $resposta['acoes'][] = [
+                'label' => 'Ver documentos',
+                'url' => '?mod=documentos',
+                'class' => 'btn-outline-secondary',
+                'icon' => 'bi-files'
+            ];
+
+            return $resposta;
+        }
+
+        $resposta['titulo'] = 'Documento não localizado';
+        $resposta['texto'] = 'Não encontrei documento compatível com a pesquisa informada.';
+        $resposta['alerta'] = 'Tente informar título, código, cliente, processo, categoria, extensão ou nome do arquivo.';
+        $resposta['tipo'] = 'warning';
+        $resposta['acoes'][] = [
+            'label' => 'Abrir documentos',
+            'url' => '?mod=documentos',
+            'class' => 'btn-outline-primary',
+            'icon' => 'bi-files'
+        ];
         return $resposta;
     }
 
@@ -480,7 +760,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
             $resposta['titulo'] = 'Resultados encontrados';
             $resposta['texto'] = 'A Base de Conhecimento encontrou registros compatíveis em diferentes áreas do ROJEX.AI.';
             $resposta['tipo'] = 'success';
-            $resposta['alerta'] = 'Consulta livre realizada em clientes, advogados e processos.';
+            $resposta['alerta'] = 'Consulta livre realizada em clientes, advogados, processos, agenda, honorários e documentos.';
 
             foreach ($achados as $achado) {
                 $tipo = $achado['tipo'] ?? '';
@@ -500,6 +780,29 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
                         . (($dados['numero_processo'] ?? '') ?: '-')
                         . ' | Cliente: ' . (($dados['cliente_nome'] ?? '') ?: '-')
                         . ' | Status: ' . (($dados['status'] ?? '') ?: '-');
+                } elseif ($tipo === 'agenda') {
+                    $dataAgenda = !empty($dados['data_evento'])
+                        ? date('d/m/Y', strtotime((string)$dados['data_evento']))
+                        : '-';
+                    $resposta['itens'][] = 'Agenda: '
+                        . $dataAgenda
+                        . ' | ' . (($dados['tipo_compromisso'] ?? '') ?: 'Compromisso')
+                        . ' | Cliente: ' . (($dados['cliente_nome'] ?? '') ?: '-')
+                        . ' | Status: ' . (($dados['status'] ?? '') ?: '-');
+                } elseif ($tipo === 'honorario') {
+                    $resposta['itens'][] = 'Honorário: '
+                        . (($dados['id'] ?? '') ?: '-')
+                        . ' | Cliente: ' . (($dados['nome_cliente'] ?? '') ?: '-')
+                        . ' | Processo: ' . (($dados['numero_processo'] ?? '') ?: '-')
+                        . ' | Saldo: ' . cij_money((float)($dados['valor_pendente'] ?? 0))
+                        . ' | Status: ' . (($dados['status'] ?? '') ?: '-');
+                } elseif ($tipo === 'documento') {
+                    $resposta['itens'][] = 'Documento: '
+                        . (($dados['codigo'] ?? '') ?: '-')
+                        . ' | Título: ' . (($dados['titulo'] ?? '') ?: '-')
+                        . ' | Cliente: ' . (($dados['cliente_nome'] ?? '') ?: '-')
+                        . ' | Processo: ' . (($dados['numero_processo'] ?? '') ?: '-')
+                        . ' | Arquivo: ' . (($dados['nome_original'] ?? '') ?: '-');
                 }
             }
 
@@ -529,6 +832,30 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
                     'class' => 'btn-primary',
                     'icon' => 'bi-folder2-open'
                 ];
+            } elseif ($tipo === 'agenda') {
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir compromisso',
+                    'url' => '?mod=agenda&acao=editar&id=' . urlencode($id),
+                    'class' => 'btn-primary',
+                    'icon' => 'bi-calendar-event'
+                ];
+            } elseif ($tipo === 'honorario') {
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir honorário',
+                    'url' => '?mod=honorarios&acao=editar&id=' . urlencode($id),
+                    'class' => 'btn-primary',
+                    'icon' => 'bi-cash-stack'
+                ];
+            } elseif ($tipo === 'documento') {
+                $idDocumento = (int)($dados['id'] ?? 0);
+                if ($idDocumento > 0) {
+                    $resposta['acoes'][] = [
+                        'label' => 'Visualizar documento',
+                        'url' => 'documento_arquivo.php?id=' . $idDocumento . '&modo=inline',
+                        'class' => 'btn-success',
+                        'icon' => 'bi-eye'
+                    ];
+                }
             }
 
             return $resposta;
@@ -694,4 +1021,4 @@ if ($ferramentaCij === 'gerador') {
 
 <?php
 $conn->close();
-?>2
+?>

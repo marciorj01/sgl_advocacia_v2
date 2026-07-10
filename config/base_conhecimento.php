@@ -1667,6 +1667,341 @@ if (!function_exists('rojex_kb_resumo_honorarios')) {
 }
 
 
+
+
+if (!function_exists('rojex_kb_limpar_termo_documento')) {
+    /**
+     * Remove palavras de comando comuns antes da pesquisa de documentos.
+     */
+    function rojex_kb_limpar_termo_documento(string $termo): string
+    {
+        $limpo = mb_strtolower(trim($termo), 'UTF-8');
+
+        if ($limpo === '') {
+            return '';
+        }
+
+        $limpo = preg_replace(
+            '/\b(documento|documentos|arquivo|arquivos|mostrar|mostre|localizar|buscar|pesquisar|procure|encontre|qual|quais|rojex|ai)\b/iu',
+            ' ',
+            $limpo
+        );
+
+        return trim((string)preg_replace('/\s+/u', ' ', (string)$limpo));
+    }
+}
+
+if (!function_exists('rojex_kb_documentos_por_termo')) {
+    /**
+     * Pesquisa documentos por código, título, categoria, cliente, processo,
+     * descrição, nome original, extensão, MIME, usuário ou status.
+     */
+    function rojex_kb_documentos_por_termo(
+        mysqli $conn,
+        string $termo,
+        int $limite = 10
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'documentos_arquivos')) {
+            return [];
+        }
+
+        $termoOriginal = trim($termo);
+        if ($termoOriginal === '') {
+            return [];
+        }
+
+        $termoLimpo = rojex_kb_limpar_termo_documento($termoOriginal);
+        if ($termoLimpo === '') {
+            $termoLimpo = $termoOriginal;
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'documentos_arquivos');
+        if (!in_array('id', $colunas, true)) {
+            return [];
+        }
+
+        $temClientes = rojex_kb_tabela_existe($conn, 'clientes')
+            && in_array('cliente_id', $colunas, true);
+
+        $joinCliente = $temClientes
+            ? 'LEFT JOIN clientes c ON c.id = d.cliente_id'
+            : '';
+
+        $where = [];
+        $params = [];
+        $types = '';
+        $like = '%' . $termoLimpo . '%';
+
+        foreach ([
+            'codigo',
+            'titulo',
+            'categoria',
+            'cliente_id',
+            'processo_id',
+            'numero_processo',
+            'descricao',
+            'nome_original',
+            'nome_arquivo',
+            'extensao',
+            'mime_type',
+            'usuario_nome',
+            'status'
+        ] as $campo) {
+            if (!in_array($campo, $colunas, true)) {
+                continue;
+            }
+
+            $where[] = "d.`{$campo}` LIKE ?";
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($temClientes) {
+            $where[] = 'c.nome LIKE ?';
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($where === []) {
+            return [];
+        }
+
+        $select = [
+            'd.id',
+            in_array('codigo', $colunas, true) ? 'd.codigo' : "'' AS codigo",
+            in_array('titulo', $colunas, true) ? 'd.titulo' : "'' AS titulo",
+            in_array('categoria', $colunas, true) ? 'd.categoria' : "'' AS categoria",
+            in_array('cliente_id', $colunas, true) ? 'd.cliente_id' : "NULL AS cliente_id",
+            $temClientes ? "COALESCE(c.nome, '') AS cliente_nome" : "'' AS cliente_nome",
+            in_array('processo_id', $colunas, true) ? 'd.processo_id' : "NULL AS processo_id",
+            in_array('numero_processo', $colunas, true) ? 'd.numero_processo' : "'' AS numero_processo",
+            in_array('descricao', $colunas, true) ? 'd.descricao' : "'' AS descricao",
+            in_array('nome_original', $colunas, true) ? 'd.nome_original' : "'' AS nome_original",
+            in_array('nome_arquivo', $colunas, true) ? 'd.nome_arquivo' : "'' AS nome_arquivo",
+            in_array('caminho', $colunas, true) ? 'd.caminho' : "'' AS caminho",
+            in_array('extensao', $colunas, true) ? 'd.extensao' : "'' AS extensao",
+            in_array('mime_type', $colunas, true) ? 'd.mime_type' : "'' AS mime_type",
+            in_array('tamanho_bytes', $colunas, true) ? 'd.tamanho_bytes' : '0 AS tamanho_bytes',
+            in_array('usuario_id', $colunas, true) ? 'd.usuario_id' : 'NULL AS usuario_id',
+            in_array('usuario_nome', $colunas, true) ? 'd.usuario_nome' : "'' AS usuario_nome",
+            in_array('status', $colunas, true) ? 'd.status' : "'' AS status",
+            in_array('criado_em', $colunas, true) ? 'd.criado_em' : 'NULL AS criado_em',
+        ];
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(d.deletado, 0) = 0'
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 10, 100);
+
+        $ordem = in_array('criado_em', $colunas, true)
+            ? 'd.criado_em DESC, d.id DESC'
+            : 'd.id DESC';
+
+        $sql = 'SELECT ' . implode(', ', $select)
+            . ' FROM documentos_arquivos d '
+            . $joinCliente
+            . ' WHERE (' . implode(' OR ', $where) . ')'
+            . $filtroLixeira
+            . ' ORDER BY ' . $ordem
+            . ' LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_documento_por_id')) {
+    /**
+     * Localiza um documento pelo ID numérico.
+     */
+    function rojex_kb_documento_por_id(
+        mysqli $conn,
+        int $id
+    ): ?array {
+        if ($id <= 0 || !rojex_kb_tabela_existe($conn, 'documentos_arquivos')) {
+            return null;
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'documentos_arquivos');
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        return rojex_kb_consultar_um(
+            $conn,
+            'SELECT *
+             FROM documentos_arquivos
+             WHERE id = ?'
+             . $filtroLixeira
+             . ' LIMIT 1',
+            'i',
+            [$id]
+        );
+    }
+}
+
+if (!function_exists('rojex_kb_documentos_por_cliente')) {
+    /**
+     * Retorna documentos ativos vinculados a um cliente.
+     */
+    function rojex_kb_documentos_por_cliente(
+        mysqli $conn,
+        string $clienteId,
+        int $limite = 100
+    ): array {
+        if (
+            $clienteId === ''
+            || !rojex_kb_tabela_existe($conn, 'documentos_arquivos')
+            || !rojex_kb_coluna_existe($conn, 'documentos_arquivos', 'cliente_id')
+        ) {
+            return [];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'documentos_arquivos');
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 100, 500);
+
+        return rojex_kb_consultar(
+            $conn,
+            'SELECT *
+             FROM documentos_arquivos
+             WHERE cliente_id = ?'
+             . $filtroLixeira
+             . ' ORDER BY criado_em DESC, id DESC
+                LIMIT ' . $limiteSeguro,
+            's',
+            [$clienteId]
+        );
+    }
+}
+
+if (!function_exists('rojex_kb_documentos_por_processo')) {
+    /**
+     * Retorna documentos ativos vinculados a um processo ou número de processo.
+     */
+    function rojex_kb_documentos_por_processo(
+        mysqli $conn,
+        string $processo,
+        int $limite = 100
+    ): array {
+        if (
+            trim($processo) === ''
+            || !rojex_kb_tabela_existe($conn, 'documentos_arquivos')
+        ) {
+            return [];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'documentos_arquivos');
+        $where = [];
+        $params = [];
+        $types = '';
+
+        if (in_array('processo_id', $colunas, true)) {
+            $where[] = 'processo_id = ?';
+            $params[] = $processo;
+            $types .= 's';
+        }
+
+        if (in_array('numero_processo', $colunas, true)) {
+            $where[] = 'numero_processo LIKE ?';
+            $params[] = '%' . $processo . '%';
+            $types .= 's';
+        }
+
+        if ($where === []) {
+            return [];
+        }
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 100, 500);
+
+        $sql = 'SELECT *
+                FROM documentos_arquivos
+                WHERE (' . implode(' OR ', $where) . ')'
+                . $filtroLixeira
+                . ' ORDER BY criado_em DESC, id DESC
+                    LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_resumo_documentos')) {
+    /**
+     * Retorna indicadores básicos dos documentos.
+     */
+    function rojex_kb_resumo_documentos(mysqli $conn): array
+    {
+        if (!rojex_kb_tabela_existe($conn, 'documentos_arquivos')) {
+            return [
+                'total' => 0,
+                'enviados_mes' => 0,
+                'provas' => 0,
+                'armazenamento_bytes' => 0,
+            ];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'documentos_arquivos');
+        $whereBase = in_array('deletado', $colunas, true)
+            ? ' WHERE COALESCE(deletado, 0) = 0'
+            : ' WHERE 1 = 1';
+
+        $total = (int)rojex_kb_total(
+            $conn,
+            'SELECT COUNT(*) AS total
+             FROM documentos_arquivos'
+             . $whereBase
+        );
+
+        $enviadosMes = 0;
+        if (in_array('criado_em', $colunas, true)) {
+            $enviadosMes = (int)rojex_kb_total(
+                $conn,
+                'SELECT COUNT(*) AS total
+                 FROM documentos_arquivos'
+                 . $whereBase
+                 . ' AND YEAR(criado_em) = YEAR(CURDATE())
+                     AND MONTH(criado_em) = MONTH(CURDATE())'
+            );
+        }
+
+        $provas = 0;
+        if (in_array('categoria', $colunas, true)) {
+            $provas = (int)rojex_kb_total(
+                $conn,
+                'SELECT COUNT(*) AS total
+                 FROM documentos_arquivos'
+                 . $whereBase
+                 . " AND categoria = 'Prova'"
+            );
+        }
+
+        $armazenamento = 0;
+        if (in_array('tamanho_bytes', $colunas, true)) {
+            $armazenamento = (int)rojex_kb_total(
+                $conn,
+                'SELECT COALESCE(SUM(tamanho_bytes), 0) AS total
+                 FROM documentos_arquivos'
+                 . $whereBase
+            );
+        }
+
+        return [
+            'total' => $total,
+            'enviados_mes' => $enviadosMes,
+            'provas' => $provas,
+            'armazenamento_bytes' => $armazenamento,
+        ];
+    }
+}
+
+
 if (!function_exists('rojex_kb_status')) {
     /**
      * Retorna informações básicas da Base de Conhecimento.

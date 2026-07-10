@@ -149,63 +149,11 @@ function cij_limpar_termo_consulta(string $texto, array $palavras): string
 
 function cij_advogados_buscar(mysqli $conn, string $consulta): array
 {
-    if (!cij_table_exists($conn, 'advogados')) {
+    if (!function_exists('rojex_kb_advogados_por_termo')) {
         return [];
     }
 
-    $termo = cij_limpar_termo_consulta($consulta, [
-        'advogado', 'advogada', 'advogados', 'advogadas', 'localizar', 'buscar',
-        'pesquisar', 'procure', 'encontre', 'cadastro', 'nome', 'oab', 'cpf', 'rojex', 'ai'
-    ]);
-    if ($termo === '') {
-        return [];
-    }
-
-    $camposPossiveis = ['nome', 'oab', 'cpf', 'email', 'telefone', 'celular'];
-    $campos = [];
-    foreach ($camposPossiveis as $campo) {
-        if (cij_column_exists($conn, 'advogados', $campo)) {
-            $campos[] = $campo;
-        }
-    }
-    if (!$campos) {
-        return [];
-    }
-
-    $digitos = cij_only_digits($termo);
-    $wheres = [];
-    $params = [];
-    $types = '';
-    foreach ($campos as $campo) {
-        $wheres[] = "`{$campo}` LIKE ?";
-        $params[] = '%' . $termo . '%';
-        $types .= 's';
-
-        if ($digitos !== '' && in_array($campo, ['oab', 'cpf', 'telefone', 'celular'], true)) {
-            $wheres[] = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(`{$campo}`,''), '.', ''), '-', ''), '/', ''), '(', ''), ')', ''), ' ', '') LIKE ?";
-            $params[] = '%' . $digitos . '%';
-            $types .= 's';
-        }
-    }
-
-    $filtroLixeira = cij_column_exists($conn, 'advogados', 'deletado') ? ' AND COALESCE(`deletado`,0)=0' : '';
-    $ordem = cij_column_exists($conn, 'advogados', 'nome') ? 'nome ASC' : 'id DESC';
-    $sql = "SELECT * FROM advogados WHERE (" . implode(' OR ', $wheres) . "){$filtroLixeira} ORDER BY {$ordem} LIMIT 5";
-
-    try {
-        $stmt = $conn->prepare($sql);
-        if (!$stmt) {
-            return [];
-        }
-        $stmt->bind_param($types, ...$params);
-        $stmt->execute();
-        $res = $stmt->get_result();
-        $dados = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
-        $stmt->close();
-        return $dados;
-    } catch (Throwable $e) {
-        return [];
-    }
+    return rojex_kb_advogados_por_termo($conn, $consulta, 5);
 }
 
 function cij_processos_buscar_numero(mysqli $conn, string $consulta): array

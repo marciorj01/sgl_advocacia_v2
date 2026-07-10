@@ -520,6 +520,202 @@ if (!function_exists('rojex_kb_resumo_clientes')) {
 }
 
 
+
+
+if (!function_exists('rojex_kb_limpar_termo_advogado')) {
+    /**
+     * Remove palavras de comando comuns antes da pesquisa por advogado.
+     */
+    function rojex_kb_limpar_termo_advogado(string $termo): string
+    {
+        $limpo = mb_strtolower(trim($termo), 'UTF-8');
+
+        if ($limpo === '') {
+            return '';
+        }
+
+        $limpo = preg_replace(
+            '/\b(advogado|advogada|advogados|advogadas|doutor|doutora|dr|dra|localizar|buscar|pesquisar|procure|encontre|cadastro|nome|oab|cpf|rojex|ai)\b/iu',
+            ' ',
+            $limpo
+        );
+
+        return trim((string)preg_replace('/\s+/u', ' ', (string)$limpo));
+    }
+}
+
+if (!function_exists('rojex_kb_advogados_por_termo')) {
+    /**
+     * Pesquisa advogados ativos por nome, OAB, CPF, contato, e-mail ou especialidade.
+     */
+    function rojex_kb_advogados_por_termo(
+        mysqli $conn,
+        string $termo,
+        int $limite = 5
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'advogados')) {
+            return [];
+        }
+
+        $termoOriginal = trim($termo);
+        if ($termoOriginal === '') {
+            return [];
+        }
+
+        $termoLimpo = rojex_kb_limpar_termo_advogado($termoOriginal);
+        if ($termoLimpo === '') {
+            $termoLimpo = $termoOriginal;
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'advogados');
+
+        $camposPesquisa = array_values(array_intersect(
+            ['nome', 'oab', 'oab_uf', 'cpf', 'telefone', 'celular', 'email', 'especialidade'],
+            $colunas
+        ));
+
+        if ($camposPesquisa === []) {
+            return [];
+        }
+
+        $camposDesejados = [
+            'id', 'nome', 'oab', 'oab_uf', 'cpf', 'telefone',
+            'celular', 'email', 'especialidade', 'status'
+        ];
+        $camposRetorno = array_values(array_intersect($camposDesejados, $colunas));
+
+        if ($camposRetorno === []) {
+            return [];
+        }
+
+        $where = [];
+        $params = [];
+        $types = '';
+        $likeTexto = '%' . $termoLimpo . '%';
+        $digitos = rojex_kb_somente_digitos($termoOriginal);
+
+        foreach ($camposPesquisa as $campo) {
+            $where[] = "`{$campo}` LIKE ?";
+            $params[] = $likeTexto;
+            $types .= 's';
+
+            if (
+                $digitos !== ''
+                && in_array($campo, ['oab', 'cpf', 'telefone', 'celular'], true)
+            ) {
+                $where[] = rojex_kb_sql_only_digits("COALESCE(`{$campo}`, '')") . ' LIKE ?';
+                $params[] = '%' . $digitos . '%';
+                $types .= 's';
+            }
+        }
+
+        if (
+            in_array('oab', $colunas, true)
+            && in_array('oab_uf', $colunas, true)
+            && preg_match('/^\s*(\d{2,8})\s*[\/\-]?\s*([a-z]{2})\s*$/iu', $termoOriginal, $partes)
+        ) {
+            $where[] = '(' . rojex_kb_sql_only_digits("COALESCE(`oab`, '')") . ' LIKE ? AND UPPER(COALESCE(`oab_uf`, \'\')) = ?)';
+            $params[] = '%' . rojex_kb_somente_digitos($partes[1]) . '%';
+            $params[] = mb_strtoupper($partes[2], 'UTF-8');
+            $types .= 'ss';
+        }
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        $ordem = in_array('nome', $colunas, true)
+            ? 'nome ASC'
+            : 'id DESC';
+
+        $limiteSeguro = rojex_kb_limite($limite, 5, 50);
+
+        $sql = 'SELECT ' . implode(', ', array_map(
+            static fn(string $campo): string => "`{$campo}`",
+            $camposRetorno
+        )) . '
+                FROM advogados
+                WHERE (' . implode(' OR ', $where) . ')'
+                . $filtroLixeira . '
+                ORDER BY ' . $ordem . '
+                LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_advogado_por_documento')) {
+    /**
+     * Localiza um advogado por CPF ou OAB, com ou sem máscara.
+     */
+    function rojex_kb_advogado_por_documento(
+        mysqli $conn,
+        string $documento
+    ): ?array {
+        if (!rojex_kb_tabela_existe($conn, 'advogados')) {
+            return null;
+        }
+
+        $documentoOriginal = trim($documento);
+        $digitos = rojex_kb_somente_digitos($documentoOriginal);
+
+        if ($documentoOriginal === '' || $digitos === '') {
+            return null;
+        }
+
+        $resultados = rojex_kb_advogados_por_termo(
+            $conn,
+            $documentoOriginal,
+            1
+        );
+
+        return $resultados[0] ?? null;
+    }
+}
+
+if (!function_exists('rojex_kb_resumo_advogados')) {
+    /**
+     * Retorna indicadores básicos do cadastro de advogados.
+     */
+    function rojex_kb_resumo_advogados(mysqli $conn): array
+    {
+        if (!rojex_kb_tabela_existe($conn, 'advogados')) {
+            return [
+                'total' => 0,
+                'ativos' => 0,
+            ];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'advogados');
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' WHERE COALESCE(deletado, 0) = 0'
+            : ' WHERE 1 = 1';
+
+        $total = (int)rojex_kb_total(
+            $conn,
+            'SELECT COUNT(*) AS total FROM advogados' . $filtroLixeira
+        );
+
+        $ativos = $total;
+        if (in_array('status', $colunas, true)) {
+            $ativos = (int)rojex_kb_total(
+                $conn,
+                "SELECT COUNT(*) AS total
+                 FROM advogados"
+                 . $filtroLixeira
+                 . " AND status = 'Ativo'"
+            );
+        }
+
+        return [
+            'total' => $total,
+            'ativos' => $ativos,
+        ];
+    }
+}
+
+
 if (!function_exists('rojex_kb_status')) {
     /**
      * Retorna informações básicas da Base de Conhecimento.

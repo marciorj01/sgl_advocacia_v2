@@ -128,6 +128,38 @@ function badgeStatus(string $status): string
     return '<span class="badge bg-' . $classe . '">' . h($statusLimpo ?: '-') . '</span>';
 }
 
+
+function dashboardLinkResultadoRapido(array $resultado): string
+{
+    $modulo = (string)($resultado['mod'] ?? '');
+    $id = (string)($resultado['id'] ?? '');
+    $texto = (string)($resultado['texto'] ?? '');
+
+    if ($modulo === '' || $id === '') {
+        return '?mod=dashboard';
+    }
+
+    $idUrl = urlencode($id);
+
+    $rotasDiretas = [
+        'clientes' => '?mod=clientes&acao=editar&id=' . $idUrl,
+        'advogados' => '?mod=advogados&acao=editar&id=' . $idUrl,
+        'processos' => '?mod=processos&acao=editar&id=' . $idUrl,
+        'agenda' => '?mod=agenda&acao=editar&id=' . $idUrl,
+        'honorarios' => '?mod=honorarios&acao=editar&id=' . $idUrl,
+        'recibos' => '?mod=recibos&acao=ver&id=' . $idUrl,
+        'documentos' => '?mod=documentos&acao=visualizar&id=' . $idUrl,
+        'modelos' => '?mod=modelos&acao=editar&id=' . $idUrl,
+        'financeiro' => '?mod=financeiro&q=' . urlencode($texto !== '' ? $texto : $id),
+    ];
+
+    if (isset($rotasDiretas[$modulo])) {
+        return $rotasDiretas[$modulo];
+    }
+
+    return '?mod=' . urlencode($modulo) . '&busca=' . urlencode($texto !== '' ? $texto : $id);
+}
+
 // ========================
 // Indicadores financeiros
 // ========================
@@ -540,8 +572,10 @@ if ($compromissosHoje > 0) {
     $iaPergunta = trim((string)($_GET['ia_pergunta'] ?? ''));
     $iaAcao = trim((string)($_GET['ia_acao'] ?? ''));
     $iaResposta = '';
+    $iaResultadosRapidos = [];
+    $iaLinkCij = '?mod=cij';
 
-    if ($iaAcao !== '' || $iaPergunta !== '') {
+    if ($iaAcao !== '') {
         switch ($iaAcao) {
             case 'agenda_hoje':
                 $iaResposta = 'Hoje existem ' . (int)$compromissosHoje . ' compromisso(s) cadastrados, sendo ' . (int)$audienciasHoje . ' audiência(s).';
@@ -555,13 +589,20 @@ if ($compromissosHoje > 0) {
             case 'honorarios':
                 $iaResposta = 'Há ' . (int)$honorariosVencidos . ' parcela(s) de honorários vencida(s). A lista de honorários pendentes aparece mais abaixo no Dashboard.';
                 break;
-            default:
-                $iaResposta = 'A interface da IA Jurídica está pronta. Nesta etapa ela já interpreta comandos rápidos do Dashboard. A próxima etapa conectará a IA à Busca Global e aos dados internos do ROJEX.AI.';
-                if ($iaPergunta !== '') {
-                    $iaResposta .= ' Pergunta recebida: "' . $iaPergunta . '".';
-                }
-                break;
         }
+    } elseif ($iaPergunta !== '') {
+        if (function_exists('sgl_busca_global')) {
+            $iaResultadosRapidos = array_slice(sgl_busca_global($conn, $iaPergunta), 0, 5);
+        }
+
+        if (!empty($iaResultadosRapidos)) {
+            $quantidade = count($iaResultadosRapidos);
+            $iaResposta = 'Encontrei ' . $quantidade . ' resultado(s) relacionado(s) à sua consulta.';
+        } else {
+            $iaResposta = 'Não encontrei resultado direto na Busca Global. Consulte o CIJ para uma interpretação mais completa da pergunta.';
+        }
+
+        $iaLinkCij = '?mod=cij&pergunta=' . urlencode($iaPergunta);
     }
     ?>
 
@@ -577,10 +618,10 @@ if ($compromissosHoje > 0) {
                         <input type="hidden" name="mod" value="dashboard">
                         <label class="form-label fw-semibold">Pergunte ao assistente jurídico</label>
                         <div class="input-group">
-                            <input type="text" name="ia_pergunta" class="form-control" placeholder="Ex.: Quais processos vencem esta semana?" value="<?= h($iaPergunta) ?>">
+                            <input type="text" name="ia_pergunta" class="form-control" placeholder="Ex.: qual é o processo 1000?" value="<?= h($iaPergunta) ?>" required>
                             <button class="btn btn-primary" type="submit"><i class="bi bi-send me-1"></i>Consultar</button>
                         </div>
-                        <div class="form-text">Nesta versão, a IA está preparada para consultas internas e futura integração com modelo externo.</div>
+                        <div class="form-text">O Dashboard mostra uma resposta rápida. Para análise completa, use o Centro de Inteligência Jurídica.</div>
                     </form>
 
                     <div class="d-flex flex-wrap gap-2 mt-3">
@@ -594,9 +635,30 @@ if ($compromissosHoje > 0) {
                     <div class="border rounded-3 p-3 h-100 bg-light">
                         <div class="small text-muted text-uppercase mb-2">Resposta da IA</div>
                         <?php if ($iaResposta !== ''): ?>
-                            <div class="fw-semibold text-dark"><?= h($iaResposta) ?></div>
+                            <div class="fw-semibold text-dark mb-2"><?= h($iaResposta) ?></div>
+
+                            <?php if (!empty($iaResultadosRapidos)): ?>
+                                <div class="list-group list-group-flush mb-3">
+                                    <?php foreach ($iaResultadosRapidos as $resultadoRapido): ?>
+                                        <a href="<?= h(dashboardLinkResultadoRapido($resultadoRapido)) ?>"
+                                           class="list-group-item list-group-item-action px-0 py-2 bg-transparent">
+                                            <div class="small text-primary fw-bold"><?= h($resultadoRapido['modulo'] ?? 'Resultado') ?></div>
+                                            <div class="small text-dark"><?= h($resultadoRapido['texto'] ?? '') ?></div>
+                                        </a>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+
+                            <?php if ($iaPergunta !== ''): ?>
+                                <a href="<?= h($iaLinkCij) ?>" class="btn btn-sm btn-outline-primary">
+                                    <i class="bi bi-cpu me-1"></i>Ver detalhes no CIJ
+                                </a>
+                                <a href="?mod=dashboard" class="btn btn-sm btn-outline-secondary ms-1">
+                                    <i class="bi bi-x-lg me-1"></i>Limpar
+                                </a>
+                            <?php endif; ?>
                         <?php else: ?>
-                            <div class="text-muted">Use uma consulta rápida ou digite uma pergunta para iniciar. A próxima evolução conectará esta área à Busca Global e aos módulos do sistema.</div>
+                            <div class="text-muted">Use uma consulta rápida ou digite uma pergunta para obter um resumo no Dashboard.</div>
                         <?php endif; ?>
                     </div>
                 </div>

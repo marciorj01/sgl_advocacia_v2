@@ -349,21 +349,50 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
             return $resposta;
         }
 
-        $resposta['titulo'] = 'Cliente não localizado';
-        $resposta['texto'] = 'Não encontrei cliente ativo com o CPF/CNPJ informado.';
+        // O mesmo número pode pertencer ao CPF de um advogado. Antes de informar
+        // que não há cliente, consulta também o cadastro de advogados.
+        $advogadosDocumento = cij_advogados_buscar($conn, $pergunta);
+        if (!empty($advogadosDocumento)) {
+            $resposta['titulo'] = count($advogadosDocumento) === 1 ? 'Advogado localizado por CPF' : 'Advogados localizados por CPF';
+            $resposta['texto'] = 'Encontrei advogado(s) compatíveis com o documento informado.';
+            $resposta['tipo'] = 'success';
+            $resposta['alerta'] = 'Consulta realizada no cadastro interno de advogados do ROJEX.AI.';
+
+            foreach ($advogadosDocumento as $adv) {
+                $contato = ($adv['celular'] ?? '') ?: (($adv['telefone'] ?? '') ?: '-');
+                $resposta['itens'][] = (($adv['nome'] ?? '') ?: '-')
+                    . ' | ID: ' . (($adv['id'] ?? '') ?: '-')
+                    . ' | OAB: ' . (($adv['oab'] ?? '') ?: '-')
+                    . ' | CPF: ' . (($adv['cpf'] ?? '') ?: '-')
+                    . ' | Contato: ' . $contato
+                    . ' | E-mail: ' . (($adv['email'] ?? '') ?: '-');
+            }
+
+            $primeiro = $advogadosDocumento[0];
+            $resposta['acoes'][] = ['label' => 'Abrir cadastro do advogado', 'url' => '?mod=advogados&acao=editar&id=' . urlencode((string)($primeiro['id'] ?? '')), 'class' => 'btn-primary', 'icon' => 'bi-person-badge'];
+            $resposta['acoes'][] = ['label' => 'Ver lista de advogados', 'url' => '?mod=advogados', 'class' => 'btn-outline-secondary', 'icon' => 'bi-people'];
+            return $resposta;
+        }
+
+        $resposta['titulo'] = 'Documento não localizado';
+        $resposta['texto'] = 'Não encontrei cliente ou advogado ativo com o CPF/CNPJ informado.';
         $resposta['itens'][] = 'Documento pesquisado: ' . $documentoDetectado;
-        $resposta['alerta'] = 'Confira se o cliente está cadastrado, ativo e fora da lixeira.';
+        $resposta['alerta'] = 'Confira se o cadastro está ativo e fora da lixeira.';
         $resposta['tipo'] = 'warning';
-        $resposta['acoes'][] = ['label' => 'Cadastrar novo cliente', 'url' => '?mod=clientes&acao=novo', 'class' => 'btn-primary', 'icon' => 'bi-person-plus'];
         $resposta['acoes'][] = ['label' => 'Pesquisar em clientes', 'url' => '?mod=clientes&busca=' . urlencode($documentoDetectado), 'class' => 'btn-outline-secondary', 'icon' => 'bi-search'];
+        $resposta['acoes'][] = ['label' => 'Ver advogados cadastrados', 'url' => '?mod=advogados', 'class' => 'btn-outline-primary', 'icon' => 'bi-people'];
         return $resposta;
     }
 
 
+    // Reconhece também OAB digitada diretamente, por exemplo: 85561/PR,
+    // sem exigir que o usuário escreva a palavra "advogado" ou "OAB".
+    $pareceOabDireta = preg_match('/\b\d{2,8}\s*[\/\-]?\s*[a-z]{2}\b/iu', trim($pergunta)) === 1;
     $consultaAdvogado = $atalho === '' && (
         str_contains($perguntaNormalizada, 'advogado') ||
         str_contains($perguntaNormalizada, 'advogada') ||
-        str_contains($perguntaNormalizada, 'oab')
+        str_contains($perguntaNormalizada, 'oab') ||
+        $pareceOabDireta
     );
     if ($consultaAdvogado) {
         $advogados = cij_advogados_buscar($conn, $pergunta);
@@ -397,7 +426,16 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         return $resposta;
     }
 
-    $pareceNumeroProcesso = $atalho === '' && str_contains($perguntaNormalizada, 'processo') && strlen(cij_only_digits($pergunta)) >= 6;
+    // Aceita o número do processo digitado sozinho. A OAB direta é excluída
+    // desta regra para evitar que algo como 85561/PR seja tratado como processo.
+    $quantidadeDigitosProcesso = strlen(cij_only_digits($pergunta));
+    $pareceNumeroProcesso = $atalho === ''
+        && !$pareceOabDireta
+        && $quantidadeDigitosProcesso >= 6
+        && (
+            str_contains($perguntaNormalizada, 'processo')
+            || preg_match('/^[\s\d.\-\/_]+$/u', trim($pergunta)) === 1
+        );
     if ($pareceNumeroProcesso) {
         $processos = cij_processos_buscar_numero($conn, $pergunta);
         if (!empty($processos)) {

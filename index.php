@@ -392,7 +392,11 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
                     $resultados = sgl_busca_global($connBusca, $q);
                     $connBusca->close();
 
-                    echo "<div class='card shadow-sm border-0'><div class='card-header bg-dark text-white d-flex justify-content-between'><span><i class='bi bi-list-search me-1'></i>Resultados para: " . htmlspecialchars($q, ENT_QUOTES, 'UTF-8') . "</span><span>" . count($resultados) . " resultado(s)</span></div><div class='card-body'>";
+                    echo "<div class='d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3'>";
+                    echo "<div><h5 class='mb-0'>Resultado para: <strong>" . htmlspecialchars($q, ENT_QUOTES, 'UTF-8') . "</strong></h5><div class='text-muted small'>" . count($resultados) . " resultado(s) encontrado(s).</div></div>";
+                    echo "<a href='?mod=busca' class='btn btn-outline-secondary btn-sm'><i class='bi bi-x-lg me-1'></i>LIMPAR PESQUISA</a>";
+                    echo "</div>";
+                    echo "<div class='card shadow-sm border-0'><div class='card-header bg-dark text-white d-flex justify-content-between'><span><i class='bi bi-list-search me-1'></i>Resultados da Busca Global</span><span>" . count($resultados) . " resultado(s)</span></div><div class='card-body'>";
                     if (!$resultados) {
                         echo "<div class='text-center py-4 text-muted'><i class='bi bi-search fs-1 d-block mb-3 opacity-25'></i>Nenhum resultado encontrado.</div>";
                     } else {

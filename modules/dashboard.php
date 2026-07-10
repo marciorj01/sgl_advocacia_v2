@@ -520,10 +520,10 @@ if ($compromissosHoje > 0) {
                         <div class="fs-6 fw-bold text-dark">Localizar dados rápido</div>
                         <div class="small text-muted">Clientes, processos, documentos e financeiro</div>
                         <form method="GET" action="index.php" class="mt-2">
-                            <input type="hidden" name="mod" value="dashboard">
+                            <input type="hidden" name="mod" value="busca">
                             <div class="input-group input-group-sm">
-                                <input type="text" name="busca" class="form-control" placeholder="Pesquisar..." value="<?= h($_GET['busca'] ?? '') ?>">
-                                <button class="btn btn-primary" type="submit"><i class="bi bi-search"></i></button>
+                                <input type="search" name="q" class="form-control" placeholder="Cliente, CPF/CNPJ, advogado, processo, agenda ou documento" value="<?= h($_GET['q'] ?? '') ?>" required>
+                                <button class="btn btn-primary" type="submit" title="Pesquisar na Busca Global Enterprise" aria-label="Pesquisar na Busca Global Enterprise"><i class="bi bi-search"></i></button>
                             </div>
                         </form>
                     </div>

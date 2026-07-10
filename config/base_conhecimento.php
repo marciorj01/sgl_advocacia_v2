@@ -1319,6 +1319,354 @@ if (!function_exists('rojex_kb_resumo_agenda')) {
 }
 
 
+
+
+if (!function_exists('rojex_kb_limpar_termo_honorario')) {
+    /**
+     * Remove palavras de comando comuns antes da pesquisa de honorários.
+     */
+    function rojex_kb_limpar_termo_honorario(string $termo): string
+    {
+        $limpo = mb_strtolower(trim($termo), 'UTF-8');
+
+        if ($limpo === '') {
+            return '';
+        }
+
+        $limpo = preg_replace(
+            '/\b(honorário|honorario|honorários|honorarios|contrato|contratos|parcela|parcelas|localizar|buscar|pesquisar|procure|encontre|mostrar|mostre|qual|quais|rojex|ai)\b/iu',
+            ' ',
+            $limpo
+        );
+
+        return trim((string)preg_replace('/\s+/u', ' ', (string)$limpo));
+    }
+}
+
+if (!function_exists('rojex_kb_honorarios_por_termo')) {
+    /**
+     * Pesquisa honorários por ID, cliente, processo, tipo, status,
+     * forma de pagamento ou observações.
+     */
+    function rojex_kb_honorarios_por_termo(
+        mysqli $conn,
+        string $termo,
+        int $limite = 10
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'honorarios')) {
+            return [];
+        }
+
+        $termoOriginal = trim($termo);
+        if ($termoOriginal === '') {
+            return [];
+        }
+
+        $termoLimpo = rojex_kb_limpar_termo_honorario($termoOriginal);
+        if ($termoLimpo === '') {
+            $termoLimpo = $termoOriginal;
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'honorarios');
+        if (!in_array('id', $colunas, true)) {
+            return [];
+        }
+
+        $where = [];
+        $params = [];
+        $types = '';
+        $like = '%' . $termoLimpo . '%';
+
+        foreach ([
+            'id',
+            'cliente_id',
+            'nome_cliente',
+            'numero_processo',
+            'tipo_honorario',
+            'forma_pagamento',
+            'status',
+            'observacoes'
+        ] as $campo) {
+            if (!in_array($campo, $colunas, true)) {
+                continue;
+            }
+
+            $where[] = "`{$campo}` LIKE ?";
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($where === []) {
+            return [];
+        }
+
+        $camposDesejados = [
+            'id',
+            'cliente_id',
+            'nome_cliente',
+            'numero_processo',
+            'tipo_honorario',
+            'valor_total',
+            'qtd_parcelas',
+            'valor_parcela',
+            'data_vencimento',
+            'forma_pagamento',
+            'status',
+            'valor_pago',
+            'valor_pendente',
+            'observacoes'
+        ];
+
+        $camposRetorno = array_values(array_intersect($camposDesejados, $colunas));
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 10, 100);
+
+        $ordem = in_array('data_vencimento', $colunas, true)
+            ? "COALESCE(data_vencimento, '2999-12-31') ASC, id DESC"
+            : 'id DESC';
+
+        $sql = 'SELECT ' . implode(', ', array_map(
+            static fn(string $campo): string => "`{$campo}`",
+            $camposRetorno
+        )) . '
+                FROM honorarios
+                WHERE (' . implode(' OR ', $where) . ')'
+                . $filtroLixeira . '
+                ORDER BY ' . $ordem . '
+                LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_honorario_por_id')) {
+    /**
+     * Localiza um honorário pelo ID.
+     */
+    function rojex_kb_honorario_por_id(
+        mysqli $conn,
+        string $id
+    ): ?array {
+        $resultados = rojex_kb_honorarios_por_termo($conn, $id, 1);
+        return $resultados[0] ?? null;
+    }
+}
+
+if (!function_exists('rojex_kb_honorarios_vencidos')) {
+    /**
+     * Retorna honorários vencidos e ainda não quitados.
+     */
+    function rojex_kb_honorarios_vencidos(
+        mysqli $conn,
+        ?string $dataReferencia = null,
+        int $limite = 50
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'honorarios')) {
+            return [];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'honorarios');
+
+        if (
+            !in_array('data_vencimento', $colunas, true)
+            || !in_array('status', $colunas, true)
+        ) {
+            return [];
+        }
+
+        $dataReferencia = $dataReferencia ?: date('Y-m-d');
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        $limiteSeguro = rojex_kb_limite($limite, 50, 200);
+
+        $camposDesejados = [
+            'id',
+            'cliente_id',
+            'nome_cliente',
+            'numero_processo',
+            'tipo_honorario',
+            'valor_total',
+            'data_vencimento',
+            'status',
+            'valor_pago',
+            'valor_pendente'
+        ];
+        $camposRetorno = array_values(array_intersect($camposDesejados, $colunas));
+
+        $sql = 'SELECT ' . implode(', ', array_map(
+            static fn(string $campo): string => "`{$campo}`",
+            $camposRetorno
+        )) . "
+                FROM honorarios
+                WHERE data_vencimento < ?
+                  AND status NOT IN ('Pago','Quitada','Cancelado')"
+                . $filtroLixeira . '
+                ORDER BY data_vencimento ASC, id DESC
+                LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar(
+            $conn,
+            $sql,
+            's',
+            [$dataReferencia]
+        );
+    }
+}
+
+if (!function_exists('rojex_kb_parcelas_honorario')) {
+    /**
+     * Retorna as parcelas de um honorário.
+     */
+    function rojex_kb_parcelas_honorario(
+        mysqli $conn,
+        string $honorarioId,
+        int $limite = 120
+    ): array {
+        if (!rojex_kb_tabela_existe($conn, 'honorarios_parcelas')) {
+            return [];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'honorarios_parcelas');
+        if (!in_array('honorario_id', $colunas, true)) {
+            return [];
+        }
+
+        $camposDesejados = [
+            'id',
+            'honorario_id',
+            'cliente_id',
+            'nome_cliente',
+            'numero_processo',
+            'parcela_numero',
+            'valor_parcela',
+            'data_vencimento',
+            'forma_pagamento',
+            'status_pagamento',
+            'valor_pago',
+            'saldo_devedor',
+            'observacoes'
+        ];
+
+        $camposRetorno = array_values(array_intersect($camposDesejados, $colunas));
+        $limiteSeguro = rojex_kb_limite($limite, 120, 500);
+
+        $ordem = in_array('parcela_numero', $colunas, true)
+            ? 'parcela_numero ASC'
+            : 'id ASC';
+
+        $sql = 'SELECT ' . implode(', ', array_map(
+            static fn(string $campo): string => "`{$campo}`",
+            $camposRetorno
+        )) . '
+                FROM honorarios_parcelas
+                WHERE honorario_id = ?
+                ORDER BY ' . $ordem . '
+                LIMIT ' . $limiteSeguro;
+
+        return rojex_kb_consultar(
+            $conn,
+            $sql,
+            's',
+            [$honorarioId]
+        );
+    }
+}
+
+if (!function_exists('rojex_kb_resumo_honorarios')) {
+    /**
+     * Retorna indicadores básicos dos honorários.
+     */
+    function rojex_kb_resumo_honorarios(mysqli $conn): array
+    {
+        if (!rojex_kb_tabela_existe($conn, 'honorarios')) {
+            return [
+                'total' => 0,
+                'pendentes' => 0,
+                'valor_total' => 0.0,
+                'valor_pago' => 0.0,
+                'saldo_aberto' => 0.0,
+                'vencidos' => 0,
+            ];
+        }
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'honorarios');
+        $whereBase = in_array('deletado', $colunas, true)
+            ? ' WHERE COALESCE(deletado, 0) = 0'
+            : ' WHERE 1 = 1';
+
+        $total = (int)rojex_kb_total(
+            $conn,
+            'SELECT COUNT(*) AS total FROM honorarios' . $whereBase
+        );
+
+        $pendentes = 0;
+        if (in_array('status', $colunas, true)) {
+            $pendentes = (int)rojex_kb_total(
+                $conn,
+                'SELECT COUNT(*) AS total
+                 FROM honorarios'
+                . $whereBase
+                . " AND status IN ('Pendente','Parcial')"
+            );
+        }
+
+        $valorTotal = in_array('valor_total', $colunas, true)
+            ? rojex_kb_total(
+                $conn,
+                'SELECT COALESCE(SUM(valor_total), 0) AS total
+                 FROM honorarios' . $whereBase
+            )
+            : 0.0;
+
+        $valorPago = in_array('valor_pago', $colunas, true)
+            ? rojex_kb_total(
+                $conn,
+                'SELECT COALESCE(SUM(valor_pago), 0) AS total
+                 FROM honorarios' . $whereBase
+            )
+            : 0.0;
+
+        $saldoAberto = in_array('valor_pendente', $colunas, true)
+            ? rojex_kb_total(
+                $conn,
+                'SELECT COALESCE(SUM(valor_pendente), 0) AS total
+                 FROM honorarios' . $whereBase
+            )
+            : 0.0;
+
+        $vencidos = 0;
+        if (
+            in_array('data_vencimento', $colunas, true)
+            && in_array('status', $colunas, true)
+        ) {
+            $vencidos = (int)rojex_kb_total(
+                $conn,
+                'SELECT COUNT(*) AS total
+                 FROM honorarios'
+                . $whereBase
+                . " AND data_vencimento < CURDATE()
+                    AND status NOT IN ('Pago','Quitada','Cancelado')"
+            );
+        }
+
+        return [
+            'total' => $total,
+            'pendentes' => $pendentes,
+            'valor_total' => $valorTotal,
+            'valor_pago' => $valorPago,
+            'saldo_aberto' => $saldoAberto,
+            'vencidos' => $vencidos,
+        ];
+    }
+}
+
+
 if (!function_exists('rojex_kb_status')) {
     /**
      * Retorna informações básicas da Base de Conhecimento.

@@ -1,8 +1,8 @@
 <?php
 /**
  * modules/configuracoes.php
- * Fase 2.8 — Configurações profissionais do SGL Advocacia.
- * Mantém arquitetura modular atual, com segurança, CSRF e recursos de administração.
+ * Sprint 4.1.3 — Administração Enterprise do ROJEX.AI (Etapa 9 — Central de Atualizações Enterprise).
+ * Mantém arquitetura modular atual, compatibilidade retroativa, segurança, CSRF e recursos de administração SaaS.
  */
 
 $conn = conectar();
@@ -35,6 +35,191 @@ $conn->query("CREATE TABLE IF NOT EXISTS logs_sistema (
     criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_logs_usuario (usuario_id),
     INDEX idx_logs_acao (acao)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+
+// Complementos compatíveis para a gestão Enterprise de usuários.
+// As colunas são adicionadas somente quando ainda não existem.
+if (sgl_tabela_existe($conn, 'usuarios')) {
+    $colunasUsuarioEnterprise = [
+        'telefone' => "VARCHAR(40) NULL",
+        'cargo' => "VARCHAR(100) NULL",
+        'departamento' => "VARCHAR(100) NULL",
+        'observacoes' => "TEXT NULL",
+        'vinculo_status' => "VARCHAR(30) NOT NULL DEFAULT 'ativo'",
+        'desligado_em' => "DATETIME NULL",
+        'desligado_por' => "INT NULL",
+    ];
+
+    foreach ($colunasUsuarioEnterprise as $colunaUsuario => $definicaoUsuario) {
+        if (!sgl_coluna_existe($conn, 'usuarios', $colunaUsuario)) {
+            try {
+                $conn->query("ALTER TABLE usuarios ADD COLUMN `$colunaUsuario` $definicaoUsuario");
+            } catch (Throwable $e) {
+                // Mantém a tela funcional mesmo em bancos sem permissão de ALTER.
+            }
+        }
+    }
+}
+
+$conn->query("CREATE TABLE IF NOT EXISTS usuarios_historico (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    acao VARCHAR(80) NOT NULL,
+    dados_snapshot LONGTEXT NOT NULL,
+    realizado_por INT NULL,
+    realizado_por_nome VARCHAR(140) NULL,
+    ip VARCHAR(45) NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_uh_usuario (usuario_id),
+    INDEX idx_uh_acao (acao),
+    INDEX idx_uh_criado (criado_em)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+
+// Base da Sprint 4.1.3 — Administração Enterprise.
+// As tabelas centrais são criadas de forma não destrutiva e ainda não executam
+// bloqueios, cobranças, backups ou atualizações automáticas.
+$conn->query("CREATE TABLE IF NOT EXISTS escritorios_saas (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(80) NOT NULL,
+    nome VARCHAR(180) NOT NULL,
+    documento VARCHAR(30) NULL,
+    responsavel VARCHAR(140) NULL,
+    email VARCHAR(140) NULL,
+    subdominio VARCHAR(180) NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'implantacao',
+    plano VARCHAR(30) NOT NULL DEFAULT 'enterprise',
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_escritorios_tenant (tenant_id),
+    INDEX idx_escritorios_status (status),
+    INDEX idx_escritorios_plano (plano)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+// Complementos não destrutivos da Etapa 3 — Gestão de Escritórios.
+foreach ([
+    'telefone' => "VARCHAR(40) NULL",
+    'cidade' => "VARCHAR(100) NULL",
+    'uf' => "VARCHAR(2) NULL",
+    'ultimo_acesso' => "DATETIME NULL",
+    'observacoes' => "TEXT NULL",
+    'encerrado_em' => "DATETIME NULL",
+] as $colunaEscritorio => $definicaoEscritorio) {
+    if (!sgl_coluna_existe($conn, 'escritorios_saas', $colunaEscritorio)) {
+        try {
+            $conn->query("ALTER TABLE escritorios_saas ADD COLUMN `$colunaEscritorio` $definicaoEscritorio");
+        } catch (Throwable $e) {
+            // Compatibilidade com hospedagens sem permissão de ALTER.
+        }
+    }
+}
+
+$conn->query("CREATE TABLE IF NOT EXISTS licencas_saas (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    escritorio_id BIGINT NULL,
+    chave_licenca VARCHAR(120) NOT NULL,
+    plano VARCHAR(30) NOT NULL DEFAULT 'enterprise',
+    status VARCHAR(30) NOT NULL DEFAULT 'teste',
+    limite_usuarios INT NOT NULL DEFAULT 100,
+    limite_armazenamento_gb INT NOT NULL DEFAULT 50,
+    ativada_em DATE NULL,
+    renovacao_em DATE NULL,
+    observacoes TEXT NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_licencas_chave (chave_licenca),
+    INDEX idx_licencas_escritorio (escritorio_id),
+    INDEX idx_licencas_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$conn->query("CREATE TABLE IF NOT EXISTS backups_sistema (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    tipo VARCHAR(40) NOT NULL DEFAULT 'manual',
+    status VARCHAR(30) NOT NULL DEFAULT 'planejado',
+    arquivo VARCHAR(255) NULL,
+    tamanho_bytes BIGINT NULL,
+    hash_arquivo VARCHAR(128) NULL,
+    iniciado_por INT NULL,
+    detalhes TEXT NULL,
+    iniciado_em DATETIME NULL,
+    concluido_em DATETIME NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_backups_status (status),
+    INDEX idx_backups_criado (criado_em)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+// Complementos não destrutivos da Etapa 8 — Backup Enterprise.
+foreach ([
+    'nome_original' => "VARCHAR(255) NULL",
+    'escopo' => "VARCHAR(40) NULL",
+    'quantidade_arquivos' => "INT NOT NULL DEFAULT 0",
+    'verificado_em' => "DATETIME NULL",
+    'verificacao_status' => "VARCHAR(30) NULL",
+    'responsavel_nome' => "VARCHAR(140) NULL",
+] as $colunaBackup => $definicaoBackup) {
+    if (!sgl_coluna_existe($conn, 'backups_sistema', $colunaBackup)) {
+        try {
+            $conn->query("ALTER TABLE backups_sistema ADD COLUMN `$colunaBackup` $definicaoBackup");
+        } catch (Throwable $e) {
+            // Mantém compatibilidade com hospedagens sem permissão de ALTER.
+        }
+    }
+}
+
+$conn->query("CREATE TABLE IF NOT EXISTS atualizacoes_sistema (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    versao VARCHAR(40) NOT NULL,
+    titulo VARCHAR(180) NOT NULL,
+    descricao TEXT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'planejada',
+    obrigatoria TINYINT(1) NOT NULL DEFAULT 0,
+    publicada_em DATETIME NULL,
+    aplicada_em DATETIME NULL,
+    aplicada_por INT NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_atualizacoes_versao (versao),
+    INDEX idx_atualizacoes_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+// Complementos não destrutivos da Etapa 9 — Central de Atualizações.
+foreach ([
+    'tipo' => "VARCHAR(30) NOT NULL DEFAULT 'melhoria'",
+    'changelog' => "LONGTEXT NULL",
+    'requisitos' => "LONGTEXT NULL",
+    'impacto' => "VARCHAR(30) NOT NULL DEFAULT 'baixo'",
+    'versao_php_minima' => "VARCHAR(20) NULL",
+    'versao_banco_minima' => "VARCHAR(30) NULL",
+    'tamanho_estimado_bytes' => "BIGINT NOT NULL DEFAULT 0",
+    'arquivos_estimados' => "INT NOT NULL DEFAULT 0",
+    'responsavel_nome' => "VARCHAR(140) NULL",
+    'verificada_em' => "DATETIME NULL",
+    'compatibilidade_status' => "VARCHAR(30) NULL",
+] as $colunaAtualizacao => $definicaoAtualizacao) {
+    if (!sgl_coluna_existe($conn, 'atualizacoes_sistema', $colunaAtualizacao)) {
+        try {
+            $conn->query("ALTER TABLE atualizacoes_sistema ADD COLUMN `$colunaAtualizacao` $definicaoAtualizacao");
+        } catch (Throwable $e) {
+            // Mantém compatibilidade com hospedagens sem permissão de ALTER.
+        }
+    }
+}
+
+$conn->query("CREATE TABLE IF NOT EXISTS manutencoes_sistema (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    tipo VARCHAR(60) NOT NULL,
+    modo VARCHAR(20) NOT NULL DEFAULT 'execucao',
+    status VARCHAR(30) NOT NULL DEFAULT 'concluida',
+    resumo TEXT NULL,
+    detalhes LONGTEXT NULL,
+    executado_por INT NULL,
+    executado_por_nome VARCHAR(140) NULL,
+    iniciado_em DATETIME NULL,
+    concluido_em DATETIME NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_manutencoes_tipo (tipo),
+    INDEX idx_manutencoes_status (status),
+    INDEX idx_manutencoes_criado (criado_em)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
 // -----------------------------------------------------------------------------
@@ -122,8 +307,22 @@ function sgl_log(mysqli $conn, string $acao, ?string $tabela = null, ?string $re
 }
 
 function sgl_redirect_cfg(string $tab, string $tipo, string $msg): void {
-    $url = '?mod=configuracoes&tab=' . urlencode($tab) . '&msg_' . urlencode($tipo) . '=' . urlencode($msg);
-    echo "<script>window.location.href = '" . htmlspecialchars($url, ENT_QUOTES, 'UTF-8') . "';</script>";
+    $url = '?mod=configuracoes&tab=' . rawurlencode($tab) . '&msg_' . rawurlencode($tipo) . '=' . rawurlencode($msg);
+
+    // A URL será inserida dentro de JavaScript, portanto deve ser codificada
+    // como string JavaScript/JSON. htmlspecialchars() transformava "&" em
+    // "&amp;", fazendo o PHP receber "amp;tab" e retornar para Escritório.
+    $urlJs = json_encode(
+        $url,
+        JSON_UNESCAPED_UNICODE
+        | JSON_UNESCAPED_SLASHES
+        | JSON_HEX_TAG
+        | JSON_HEX_APOS
+        | JSON_HEX_AMP
+        | JSON_HEX_QUOT
+    );
+
+    echo '<script>window.location.href = ' . $urlJs . ';</script>';
     exit;
 }
 
@@ -283,6 +482,64 @@ function sgl_lixeira_excluir(mysqli $conn, string $tabela, string $id): bool {
     }
 }
 
+function sgl_registrar_historico_usuario(mysqli $conn, int $usuarioId, string $acao): bool {
+    try {
+        $stmt = $conn->prepare("SELECT * FROM usuarios WHERE id = ? LIMIT 1");
+        $stmt->bind_param('i', $usuarioId);
+        $stmt->execute();
+        $dados = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$dados) {
+            return false;
+        }
+
+        unset($dados['senha']);
+        $snapshot = json_encode($dados, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $realizadoPor = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
+        $realizadoPorNome = (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Sistema');
+        $ip = $_SERVER['REMOTE_ADDR'] ?? null;
+
+        $stmt = $conn->prepare(
+            "INSERT INTO usuarios_historico
+                (usuario_id, acao, dados_snapshot, realizado_por, realizado_por_nome, ip)
+             VALUES (?, ?, ?, ?, ?, ?)"
+        );
+        $stmt->bind_param('ississ', $usuarioId, $acao, $snapshot, $realizadoPor, $realizadoPorNome, $ip);
+        $ok = $stmt->execute();
+        $stmt->close();
+        return $ok;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function sgl_formatar_bytes(float $bytes): string {
+    if ($bytes < 1024) return number_format($bytes, 0, ',', '.') . ' B';
+    $unidades = ['KB','MB','GB','TB'];
+    $valor = $bytes;
+    foreach ($unidades as $unidade) {
+        $valor /= 1024;
+        if ($valor < 1024 || $unidade === 'TB') {
+            return number_format($valor, $valor >= 100 ? 0 : 2, ',', '.') . ' ' . $unidade;
+        }
+    }
+    return number_format($bytes, 0, ',', '.') . ' B';
+}
+
+function sgl_ini_bytes(string $valor): int {
+    $valor = trim($valor);
+    if ($valor === '') return 0;
+    $ultimo = strtolower(substr($valor, -1));
+    $numero = (float)$valor;
+    return match ($ultimo) {
+        'g' => (int)($numero * 1024 * 1024 * 1024),
+        'm' => (int)($numero * 1024 * 1024),
+        'k' => (int)($numero * 1024),
+        default => (int)$numero,
+    };
+}
+
 function sgl_backup_resumo(mysqli $conn): array {
     $tabelas = ['usuarios','advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','configuracoes','logs_sistema'];
     $saida = [];
@@ -294,11 +551,655 @@ function sgl_backup_resumo(mysqli $conn): array {
     return $saida;
 }
 
+function rojex_relatorio_html_tabela(array $cabecalhos, array $linhas): string {
+    $html = '<table><thead><tr>';
+    foreach ($cabecalhos as $cabecalho) {
+        $html .= '<th>' . htmlspecialchars((string)$cabecalho, ENT_QUOTES, 'UTF-8') . '</th>';
+    }
+    $html .= '</tr></thead><tbody>';
+    if (!$linhas) {
+        $html .= '<tr><td colspan="' . max(1, count($cabecalhos)) . '">Nenhum registro localizado.</td></tr>';
+    } else {
+        foreach ($linhas as $linha) {
+            $html .= '<tr>';
+            foreach ($linha as $valor) {
+                $html .= '<td>' . htmlspecialchars((string)$valor, ENT_QUOTES, 'UTF-8') . '</td>';
+            }
+            $html .= '</tr>';
+        }
+    }
+    return $html . '</tbody></table>';
+}
+
+
+function rojex_manutencao_diretorios_permitidos(): array {
+    $raiz = realpath(__DIR__ . '/..');
+    if ($raiz === false) return [];
+
+    $candidatos = [
+        $raiz . DIRECTORY_SEPARATOR . 'cache',
+        $raiz . DIRECTORY_SEPARATOR . 'tmp',
+        $raiz . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'cache',
+        $raiz . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'tmp',
+        $raiz . DIRECTORY_SEPARATOR . 'uploads' . DIRECTORY_SEPARATOR . 'tmp',
+        $raiz . DIRECTORY_SEPARATOR . 'assets' . DIRECTORY_SEPARATOR . 'tmp',
+    ];
+
+    $permitidos = [];
+    foreach ($candidatos as $diretorio) {
+        $real = realpath($diretorio);
+        if ($real !== false && is_dir($real) && str_starts_with($real, $raiz)) {
+            $permitidos[] = $real;
+        }
+    }
+    return array_values(array_unique($permitidos));
+}
+
+function rojex_manutencao_mapear_temporarios(int $idadeHoras = 24): array {
+    $limite = time() - (max(1, $idadeHoras) * 3600);
+    $extensoes = ['tmp','temp','cache','part','bak'];
+    $arquivos = [];
+    $bytes = 0;
+    $erros = [];
+
+    foreach (rojex_manutencao_diretorios_permitidos() as $diretorio) {
+        try {
+            $iterador = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($diretorio, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::LEAVES_ONLY
+            );
+
+            foreach ($iterador as $arquivo) {
+                if (count($arquivos) >= 5000) break 2;
+                if (!$arquivo->isFile() || $arquivo->isLink()) continue;
+
+                $nome = $arquivo->getFilename();
+                if (in_array(strtolower($nome), ['.htaccess','index.php','index.html','web.config'], true)) continue;
+
+                $extensao = strtolower(pathinfo($nome, PATHINFO_EXTENSION));
+                if (!in_array($extensao, $extensoes, true)) continue;
+                if ($arquivo->getMTime() > $limite) continue;
+
+                $caminho = $arquivo->getRealPath();
+                if ($caminho === false) continue;
+
+                $tamanho = max(0, (int)$arquivo->getSize());
+                $arquivos[] = $caminho;
+                $bytes += $tamanho;
+            }
+        } catch (Throwable $e) {
+            $erros[] = basename($diretorio) . ': ' . $e->getMessage();
+        }
+    }
+
+    return [
+        'arquivos' => $arquivos,
+        'quantidade' => count($arquivos),
+        'bytes' => $bytes,
+        'erros' => $erros,
+    ];
+}
+
+function rojex_manutencao_tabelas(mysqli $conn): array {
+    $tabelas = [];
+    try {
+        $res = $conn->query(
+            "SELECT TABLE_NAME, ENGINE, TABLE_ROWS,
+                    COALESCE(DATA_LENGTH,0) + COALESCE(INDEX_LENGTH,0) AS tamanho_bytes
+               FROM information_schema.TABLES
+              WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_TYPE = 'BASE TABLE'
+              ORDER BY TABLE_NAME"
+        );
+        if ($res) {
+            while ($row = $res->fetch_assoc()) {
+                $nome = (string)($row['TABLE_NAME'] ?? '');
+                if ($nome !== '' && preg_match('/^[a-zA-Z0-9_]+$/', $nome)) {
+                    $tabelas[] = [
+                        'nome' => $nome,
+                        'engine' => (string)($row['ENGINE'] ?? ''),
+                        'linhas' => (int)($row['TABLE_ROWS'] ?? 0),
+                        'bytes' => (int)($row['tamanho_bytes'] ?? 0),
+                    ];
+                }
+            }
+        }
+    } catch (Throwable $e) {}
+    return $tabelas;
+}
+
+function rojex_registrar_manutencao(
+    mysqli $conn,
+    string $tipo,
+    string $modo,
+    string $status,
+    string $resumo,
+    array $detalhes
+): void {
+    try {
+        $usuarioId = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
+        $usuarioNome = (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Sistema');
+        $json = json_encode($detalhes, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        $agora = date('Y-m-d H:i:s');
+
+        $stmt = $conn->prepare(
+            "INSERT INTO manutencoes_sistema
+                (tipo, modo, status, resumo, detalhes, executado_por, executado_por_nome, iniciado_em, concluido_em)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        $stmt->bind_param(
+            'sssssisss',
+            $tipo,
+            $modo,
+            $status,
+            $resumo,
+            $json,
+            $usuarioId,
+            $usuarioNome,
+            $agora,
+            $agora
+        );
+        $stmt->execute();
+        $stmt->close();
+    } catch (Throwable $e) {
+        // O histórico auxiliar nunca deve impedir a manutenção principal.
+    }
+}
+
+
+function rojex_backup_diretorio(): string {
+    $raiz = realpath(__DIR__ . '/..') ?: (__DIR__ . '/..');
+    $diretorio = $raiz . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'backups';
+
+    if (!is_dir($diretorio)) {
+        @mkdir($diretorio, 0750, true);
+    }
+
+    // Impede acesso HTTP direto em Apache. O arquivo permanece disponível
+    // somente pela administração local do servidor.
+    if (is_dir($diretorio)) {
+        $htaccess = $diretorio . DIRECTORY_SEPARATOR . '.htaccess';
+        if (!is_file($htaccess)) {
+            @file_put_contents($htaccess, "Require all denied\nDeny from all\n");
+        }
+
+        $index = $diretorio . DIRECTORY_SEPARATOR . 'index.php';
+        if (!is_file($index)) {
+            @file_put_contents($index, "<?php http_response_code(403); exit;\n");
+        }
+    }
+
+    return $diretorio;
+}
+
+function rojex_backup_nome_seguro(string $tipo, string $extensao): string {
+    $tipo = preg_replace('/[^a-z0-9_-]/i', '', strtolower($tipo));
+    $extensao = preg_replace('/[^a-z0-9]/i', '', strtolower($extensao));
+    try {
+        $sufixo = strtoupper(bin2hex(random_bytes(4)));
+    } catch (Throwable $e) {
+        $sufixo = strtoupper(substr(hash('sha256', uniqid('', true)), 0, 8));
+    }
+
+    return 'rojex_' . $tipo . '_' . date('Ymd_His') . '_' . $sufixo . '.' . $extensao;
+}
+
+function rojex_backup_sql_valor(mysqli $conn, mixed $valor): string {
+    if ($valor === null) return 'NULL';
+    if (is_int($valor) || is_float($valor)) return (string)$valor;
+    return "'" . $conn->real_escape_string((string)$valor) . "'";
+}
+
+function rojex_backup_banco(mysqli $conn, string $arquivoSql): array {
+    $handle = @fopen($arquivoSql, 'wb');
+    if (!$handle) {
+        return ['ok'=>false, 'erro'=>'Não foi possível criar o arquivo SQL.', 'tabelas'=>0, 'registros'=>0];
+    }
+
+    $tabelas = 0;
+    $registros = 0;
+
+    fwrite($handle, "-- ROJEX.AI — Backup Enterprise\n");
+    fwrite($handle, "-- Gerado em: " . date('d/m/Y H:i:s') . "\n");
+    fwrite($handle, "SET NAMES utf8mb4;\nSET FOREIGN_KEY_CHECKS=0;\n\n");
+
+    try {
+        $resTabelas = $conn->query(
+            "SELECT TABLE_NAME
+               FROM information_schema.TABLES
+              WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_TYPE = 'BASE TABLE'
+              ORDER BY TABLE_NAME"
+        );
+
+        while ($resTabelas && ($rowTabela = $resTabelas->fetch_assoc())) {
+            $tabela = (string)$rowTabela['TABLE_NAME'];
+            if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela)) continue;
+
+            $resCreate = $conn->query("SHOW CREATE TABLE `$tabela`");
+            $createRow = $resCreate ? $resCreate->fetch_assoc() : null;
+            $createSql = $createRow['Create Table'] ?? null;
+            if (!$createSql) continue;
+
+            fwrite($handle, "-- --------------------------------------------------------\n");
+            fwrite($handle, "-- Estrutura da tabela `$tabela`\n");
+            fwrite($handle, "DROP TABLE IF EXISTS `$tabela`;\n");
+            fwrite($handle, $createSql . ";\n\n");
+
+            $resDados = $conn->query("SELECT * FROM `$tabela`");
+            if ($resDados) {
+                $campos = [];
+                foreach ($resDados->fetch_fields() as $campo) {
+                    $campos[] = '`' . str_replace('`', '``', $campo->name) . '`';
+                }
+
+                while ($linha = $resDados->fetch_assoc()) {
+                    $valores = [];
+                    foreach ($linha as $valor) {
+                        $valores[] = rojex_backup_sql_valor($conn, $valor);
+                    }
+
+                    fwrite(
+                        $handle,
+                        "INSERT INTO `$tabela` (" . implode(',', $campos) . ") VALUES (" .
+                        implode(',', $valores) . ");\n"
+                    );
+                    $registros++;
+                }
+            }
+
+            fwrite($handle, "\n");
+            $tabelas++;
+        }
+
+        fwrite($handle, "SET FOREIGN_KEY_CHECKS=1;\n");
+        fclose($handle);
+
+        return [
+            'ok'=>is_file($arquivoSql) && filesize($arquivoSql) > 0,
+            'erro'=>'',
+            'tabelas'=>$tabelas,
+            'registros'=>$registros,
+        ];
+    } catch (Throwable $e) {
+        fclose($handle);
+        @unlink($arquivoSql);
+        return ['ok'=>false, 'erro'=>$e->getMessage(), 'tabelas'=>$tabelas, 'registros'=>$registros];
+    }
+}
+
+function rojex_backup_fontes_arquivos(): array {
+    $raiz = realpath(__DIR__ . '/..') ?: (__DIR__ . '/..');
+
+    $candidatos = [
+        'uploads' => $raiz . DIRECTORY_SEPARATOR . 'uploads',
+        'documentos' => $raiz . DIRECTORY_SEPARATOR . 'documentos',
+        'assets_img' => $raiz . DIRECTORY_SEPARATOR . 'assets' . DIRECTORY_SEPARATOR . 'img',
+        'modelos' => $raiz . DIRECTORY_SEPARATOR . 'modelos',
+        'templates' => $raiz . DIRECTORY_SEPARATOR . 'templates',
+    ];
+
+    $fontes = [];
+    foreach ($candidatos as $rotulo => $caminho) {
+        $real = realpath($caminho);
+        if ($real !== false && is_dir($real) && str_starts_with($real, $raiz)) {
+            $fontes[$rotulo] = $real;
+        }
+    }
+
+    return $fontes;
+}
+
+function rojex_backup_mapear_arquivos(): array {
+    $arquivos = [];
+    $bytes = 0;
+
+    foreach (rojex_backup_fontes_arquivos() as $rotulo => $diretorio) {
+        try {
+            $iterador = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($diretorio, FilesystemIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::LEAVES_ONLY
+            );
+
+            foreach ($iterador as $arquivo) {
+                if (!$arquivo->isFile() || $arquivo->isLink()) continue;
+
+                $real = $arquivo->getRealPath();
+                if ($real === false) continue;
+
+                $relativo = $rotulo . '/' . ltrim(str_replace('\\', '/', substr($real, strlen($diretorio))), '/');
+                $arquivos[] = ['origem'=>$real, 'destino'=>$relativo, 'bytes'=>(int)$arquivo->getSize()];
+                $bytes += (int)$arquivo->getSize();
+
+                if (count($arquivos) >= 50000) break 2;
+            }
+        } catch (Throwable $e) {}
+    }
+
+    return ['arquivos'=>$arquivos, 'quantidade'=>count($arquivos), 'bytes'=>$bytes];
+}
+
+function rojex_backup_zip_arquivos(string $arquivoZip, array $arquivos, ?string $sqlArquivo = null): array {
+    if (!class_exists('ZipArchive')) {
+        return ['ok'=>false, 'erro'=>'A extensão ZIP do PHP não está habilitada.', 'quantidade'=>0];
+    }
+
+    $zip = new ZipArchive();
+    $abertura = $zip->open($arquivoZip, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    if ($abertura !== true) {
+        return ['ok'=>false, 'erro'=>'Não foi possível criar o arquivo ZIP.', 'quantidade'=>0];
+    }
+
+    $quantidade = 0;
+
+    if ($sqlArquivo && is_file($sqlArquivo)) {
+        if ($zip->addFile($sqlArquivo, 'banco/backup.sql')) {
+            $quantidade++;
+        }
+    }
+
+    foreach ($arquivos as $arquivo) {
+        if (!is_file($arquivo['origem'])) continue;
+        if ($zip->addFile($arquivo['origem'], $arquivo['destino'])) {
+            $quantidade++;
+        }
+    }
+
+    $manifesto = [
+        'produto' => 'ROJEX.AI ERP Jurídico Enterprise',
+        'gerado_em' => date(DATE_ATOM),
+        'quantidade_arquivos' => $quantidade,
+        'inclui_banco' => $sqlArquivo !== null,
+    ];
+    $zip->addFromString(
+        'manifesto_backup.json',
+        json_encode($manifesto, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+    );
+
+    $zip->close();
+
+    return [
+        'ok'=>is_file($arquivoZip) && filesize($arquivoZip) > 0,
+        'erro'=>'',
+        'quantidade'=>$quantidade,
+    ];
+}
+
+function rojex_backup_registrar(
+    mysqli $conn,
+    string $tipo,
+    string $status,
+    ?string $arquivo,
+    int $tamanho,
+    ?string $hash,
+    string $escopo,
+    int $quantidadeArquivos,
+    string $detalhes,
+    ?string $verificacaoStatus = null
+): int {
+    $usuarioId = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
+    $responsavel = (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Sistema');
+    $agora = date('Y-m-d H:i:s');
+    $nomeOriginal = $arquivo ? basename($arquivo) : null;
+    $verificadoEm = $verificacaoStatus ? $agora : null;
+
+    $stmt = $conn->prepare(
+        "INSERT INTO backups_sistema
+            (tipo,status,arquivo,nome_original,tamanho_bytes,hash_arquivo,iniciado_por,responsavel_nome,
+             escopo,quantidade_arquivos,detalhes,iniciado_em,concluido_em,verificado_em,verificacao_status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    );
+    $stmt->bind_param(
+        'ssssissssisssss',
+        $tipo,
+        $status,
+        $arquivo,
+        $nomeOriginal,
+        $tamanho,
+        $hash,
+        $usuarioId,
+        $responsavel,
+        $escopo,
+        $quantidadeArquivos,
+        $detalhes,
+        $agora,
+        $agora,
+        $verificadoEm,
+        $verificacaoStatus
+    );
+    $stmt->execute();
+    $id = (int)$stmt->insert_id;
+    $stmt->close();
+
+    return $id;
+}
+
+function rojex_backup_validar_arquivo(string $arquivo, ?string $hashEsperado = null): array {
+    if (!is_file($arquivo)) {
+        return ['ok'=>false, 'status'=>'ausente', 'hash'=>null, 'tamanho'=>0];
+    }
+
+    $tamanho = (int)filesize($arquivo);
+    $hash = hash_file('sha256', $arquivo);
+    $ok = $tamanho > 0 && ($hashEsperado === null || hash_equals($hashEsperado, $hash));
+
+    return [
+        'ok'=>$ok,
+        'status'=>$ok ? 'integro' : 'divergente',
+        'hash'=>$hash,
+        'tamanho'=>$tamanho,
+    ];
+}
+
+
+function rojex_atualizacao_versao_atual(mysqli $conn): string {
+    $versao = trim(sgl_cfg_get($conn, 'versao_sistema', ''));
+    if ($versao === '') {
+        $versao = trim(sgl_cfg_get($conn, 'versao', '1.0.0'));
+    }
+    return $versao !== '' ? $versao : '1.0.0';
+}
+
+function rojex_atualizacao_ambiente(mysqli $conn): string {
+    $ambiente = trim(sgl_cfg_get($conn, 'ambiente_sistema', 'desenvolvimento'));
+    return in_array($ambiente, ['desenvolvimento','homologacao','producao'], true)
+        ? $ambiente
+        : 'desenvolvimento';
+}
+
+function rojex_atualizacao_banco_versao(mysqli $conn): string {
+    try {
+        $row = $conn->query("SELECT VERSION() AS versao")->fetch_assoc();
+        return (string)($row['versao'] ?? 'Não identificado');
+    } catch (Throwable $e) {
+        return 'Não identificado';
+    }
+}
+
+function rojex_atualizacao_backup_recente(mysqli $conn, int $dias = 30): array {
+    $resultado = [
+        'ok' => false,
+        'id' => null,
+        'data' => null,
+        'status' => 'ausente',
+        'dias' => null,
+    ];
+
+    if (!sgl_tabela_existe($conn, 'backups_sistema')) {
+        return $resultado;
+    }
+
+    try {
+        $stmt = $conn->prepare(
+            "SELECT id, criado_em, verificacao_status
+               FROM backups_sistema
+              WHERE status = 'concluido'
+                AND verificacao_status = 'integro'
+              ORDER BY id DESC
+              LIMIT 1"
+        );
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$row) return $resultado;
+
+        $timestamp = strtotime((string)$row['criado_em']);
+        $idadeDias = $timestamp ? (int)floor((time() - $timestamp) / 86400) : null;
+
+        return [
+            'ok' => $idadeDias !== null && $idadeDias <= $dias,
+            'id' => (int)$row['id'],
+            'data' => (string)$row['criado_em'],
+            'status' => (string)($row['verificacao_status'] ?? 'não verificado'),
+            'dias' => $idadeDias,
+        ];
+    } catch (Throwable $e) {
+        return $resultado;
+    }
+}
+
+function rojex_atualizacao_diagnostico(mysqli $conn, array $atualizacao): array {
+    $raiz = realpath(__DIR__ . '/..') ?: (__DIR__ . '/..');
+    $phpMinimo = trim((string)($atualizacao['versao_php_minima'] ?? '8.0.0'));
+    if ($phpMinimo === '') $phpMinimo = '8.0.0';
+
+    $bancoMinimo = trim((string)($atualizacao['versao_banco_minima'] ?? ''));
+    $bancoAtual = rojex_atualizacao_banco_versao($conn);
+    $backup = rojex_atualizacao_backup_recente($conn, 30);
+    $espacoLivre = @disk_free_space($raiz);
+    $tamanhoEstimado = max(0, (int)($atualizacao['tamanho_estimado_bytes'] ?? 0));
+    $espacoMinimo = max(50 * 1024 * 1024, $tamanhoEstimado * 3);
+
+    $pastas = [
+        'Raiz do projeto' => $raiz,
+        'Modules' => $raiz . DIRECTORY_SEPARATOR . 'modules',
+        'Config' => $raiz . DIRECTORY_SEPARATOR . 'config',
+        'Storage' => $raiz . DIRECTORY_SEPARATOR . 'storage',
+    ];
+
+    $permissoes = [];
+    $pastasOk = true;
+    foreach ($pastas as $nome => $caminho) {
+        $existe = is_dir($caminho);
+        $gravavel = $existe && is_writable($caminho);
+        $permissoes[$nome] = ['existe'=>$existe, 'gravavel'=>$gravavel];
+        if (!$existe || !$gravavel) $pastasOk = false;
+    }
+
+    $checks = [
+        'php' => [
+            'titulo' => 'Versão do PHP',
+            'ok' => version_compare(PHP_VERSION, $phpMinimo, '>='),
+            'atual' => PHP_VERSION,
+            'requerido' => $phpMinimo,
+            'recomendacao' => "PHP {$phpMinimo} ou superior.",
+        ],
+        'banco' => [
+            'titulo' => 'Banco de dados',
+            'ok' => $bancoAtual !== 'Não identificado',
+            'atual' => $bancoAtual,
+            'requerido' => $bancoMinimo !== '' ? $bancoMinimo : 'Compatível com a instalação atual',
+            'recomendacao' => 'Validar scripts de migração antes de uma atualização real.',
+        ],
+        'backup' => [
+            'titulo' => 'Backup íntegro recente',
+            'ok' => $backup['ok'],
+            'atual' => $backup['data']
+                ? date('d/m/Y H:i', strtotime($backup['data'])) . ' (' . $backup['dias'] . ' dia(s))'
+                : 'Nenhum backup íntegro localizado',
+            'requerido' => 'Backup íntegro com até 30 dias',
+            'recomendacao' => 'Crie e verifique um backup completo antes de atualizar.',
+        ],
+        'disco' => [
+            'titulo' => 'Espaço livre',
+            'ok' => $espacoLivre !== false && $espacoLivre >= $espacoMinimo,
+            'atual' => $espacoLivre !== false ? sgl_formatar_bytes((float)$espacoLivre) : 'Não identificado',
+            'requerido' => sgl_formatar_bytes((float)$espacoMinimo),
+            'recomendacao' => 'Reserve pelo menos três vezes o tamanho estimado do pacote.',
+        ],
+        'permissoes' => [
+            'titulo' => 'Permissões operacionais',
+            'ok' => $pastasOk,
+            'atual' => $pastasOk ? 'Pastas acessíveis e graváveis' : 'Uma ou mais pastas exigem atenção',
+            'requerido' => 'Pastas essenciais graváveis',
+            'recomendacao' => 'Corrija permissões antes de qualquer atualização real.',
+        ],
+    ];
+
+    $aprovados = 0;
+    foreach ($checks as $check) {
+        if ($check['ok']) $aprovados++;
+    }
+
+    $percentual = (int)round(($aprovados / max(1, count($checks))) * 100);
+    $status = $percentual === 100 ? 'compativel' : ($percentual >= 60 ? 'atencao' : 'incompativel');
+
+    return [
+        'checks' => $checks,
+        'permissoes' => $permissoes,
+        'percentual' => $percentual,
+        'status' => $status,
+        'backup' => $backup,
+        'espaco_livre' => $espacoLivre,
+        'espaco_minimo' => $espacoMinimo,
+        'gerado_em' => time(),
+    ];
+}
+// -----------------------------------------------------------------------------
+// Autoridade MASTER
+// -----------------------------------------------------------------------------
+// O primeiro administrador autenticado nesta versão é fixado como MASTER técnico.
+// Isso evita bloquear o administrador atual mesmo que seu perfil antigo ainda seja
+// apenas "Administrador".
+$usuarioSessaoId = (int)($_SESSION['user_id'] ?? 0);
+$perfilSessaoAtual = (string)($_SESSION['perfil'] ?? '');
+$usuarioMasterId = (int)sgl_cfg_get($conn, 'usuario_master_id', '0');
+
+if ($usuarioMasterId <= 0 && $usuarioSessaoId > 0 && in_array($perfilSessaoAtual, ['Administrador', 'Administrador Master'], true)) {
+    $usuarioMasterId = $usuarioSessaoId;
+    sgl_cfg_set($conn, 'usuario_master_id', (string)$usuarioMasterId);
+}
+
+$ehUsuarioMaster = $usuarioSessaoId > 0 && (
+    $usuarioSessaoId === $usuarioMasterId
+    || $perfilSessaoAtual === 'Administrador Master'
+);
+
 $msg = '';
 $msg_tipo = 'success';
 $acao_cfg = $_POST['acao_cfg'] ?? '';
 $csrf = gerarTokenCsrf();
 $tab_ativa = $_GET['tab'] ?? 'escritorio';
+
+$acoesExclusivasMaster = [
+    'novo_usuario',
+    'editar_usuario',
+    'alterar_status_usuario',
+    'resetar_senha_usuario',
+    'encerrar_vinculo_usuario',
+    'salvar_sistema',
+    'salvar_licenca_saas',
+    'alterar_status_licenca_saas',
+    'salvar_escritorio_saas',
+    'alterar_status_escritorio_saas',
+    'simular_manutencao',
+    'executar_manutencao',
+    'simular_backup',
+    'executar_backup',
+    'verificar_backup',
+    'salvar_atualizacao',
+    'alterar_status_atualizacao',
+    'simular_atualizacao',
+];
+
+if ($acao_cfg !== '' && in_array($acao_cfg, $acoesExclusivasMaster, true) && !$ehUsuarioMaster) {
+    sgl_redirect_cfg('escritorio', 'erro', 'Ação permitida somente ao usuário MASTER.');
+}
+
+if (in_array($tab_ativa, ['usuarios', 'sistema', 'administracao', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes', 'logs'], true) && !$ehUsuarioMaster) {
+    sgl_redirect_cfg('escritorio', 'erro', 'Área restrita ao usuário MASTER.');
+}
 
 if (isset($_GET['msg_sucesso'])) { $msg = $_GET['msg_sucesso']; $msg_tipo = 'success'; }
 if (isset($_GET['msg_aviso'])) { $msg = $_GET['msg_aviso']; $msg_tipo = 'warning'; }
@@ -313,10 +1214,929 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !validarTokenCsrf($_POST['csrf_toke
 // -----------------------------------------------------------------------------
 // Ações POST
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Central de Atualizações Enterprise — Sprint 4.1.3 / Etapa 9
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'salvar_atualizacao') {
+    $atualizacaoId = max(0, (int)($_POST['atualizacao_id'] ?? 0));
+    $versao = sgl_limpar_texto((string)($_POST['atualizacao_versao'] ?? ''), 40);
+    $titulo = sgl_limpar_texto((string)($_POST['atualizacao_titulo'] ?? ''), 180);
+    $descricao = sgl_limpar_texto((string)($_POST['atualizacao_descricao'] ?? ''), 3000);
+    $changelog = trim((string)($_POST['atualizacao_changelog'] ?? ''));
+    $requisitos = trim((string)($_POST['atualizacao_requisitos'] ?? ''));
+    $tipo = (string)($_POST['atualizacao_tipo'] ?? 'melhoria');
+    $status = (string)($_POST['atualizacao_status'] ?? 'planejada');
+    $impacto = (string)($_POST['atualizacao_impacto'] ?? 'baixo');
+    $obrigatoria = !empty($_POST['atualizacao_obrigatoria']) ? 1 : 0;
+    $phpMinimo = sgl_limpar_texto((string)($_POST['atualizacao_php_minimo'] ?? '8.0.0'), 20);
+    $bancoMinimo = sgl_limpar_texto((string)($_POST['atualizacao_banco_minimo'] ?? ''), 30);
+    $arquivosEstimados = max(0, min(100000, (int)($_POST['atualizacao_arquivos_estimados'] ?? 0)));
+    $tamanhoMb = max(0, min(100000, (float)str_replace(',', '.', (string)($_POST['atualizacao_tamanho_mb'] ?? '0'))));
+    $tamanhoBytes = (int)round($tamanhoMb * 1024 * 1024);
+    $publicadaEm = trim((string)($_POST['atualizacao_publicada_em'] ?? ''));
+
+    $tiposPermitidos = ['melhoria','correcao','seguranca','banco','interface','integracao'];
+    $statusPermitidos = ['planejada','disponivel','homologacao','instalada','cancelada'];
+    $impactosPermitidos = ['baixo','medio','alto','critico'];
+
+    if ($versao === '' || $titulo === '') {
+        sgl_redirect_cfg('atualizacoes', 'erro', 'Informe a versão e o título da atualização.');
+    }
+    if (!preg_match('/^[0-9A-Za-z._-]{1,40}$/', $versao)) {
+        sgl_redirect_cfg('atualizacoes', 'erro', 'A versão contém caracteres inválidos.');
+    }
+    if (!in_array($tipo, $tiposPermitidos, true)) $tipo = 'melhoria';
+    if (!in_array($status, $statusPermitidos, true)) $status = 'planejada';
+    if (!in_array($impacto, $impactosPermitidos, true)) $impacto = 'baixo';
+
+    $publicadaSql = null;
+    if ($publicadaEm !== '') {
+        $objPublicacao = DateTime::createFromFormat('Y-m-d\TH:i', $publicadaEm);
+        if (!$objPublicacao) {
+            sgl_redirect_cfg('atualizacoes', 'erro', 'Data de publicação inválida.');
+        }
+        $publicadaSql = $objPublicacao->format('Y-m-d H:i:s');
+    }
+
+    try {
+        $stmtDuplicada = $conn->prepare(
+            "SELECT id FROM atualizacoes_sistema WHERE versao = ? AND id <> ? LIMIT 1"
+        );
+        $stmtDuplicada->bind_param('si', $versao, $atualizacaoId);
+        $stmtDuplicada->execute();
+        $duplicada = $stmtDuplicada->get_result()->fetch_assoc();
+        $stmtDuplicada->close();
+
+        if ($duplicada) {
+            sgl_redirect_cfg('atualizacoes', 'erro', 'Esta versão já está cadastrada.');
+        }
+
+        $responsavel = (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Sistema');
+        $aplicadaEm = $status === 'instalada' ? date('Y-m-d H:i:s') : null;
+        $aplicadaPor = $status === 'instalada' ? $usuarioSessaoId : null;
+
+        if ($atualizacaoId > 0) {
+            $stmt = $conn->prepare(
+                "UPDATE atualizacoes_sistema
+                    SET versao=?, titulo=?, descricao=?, status=?, obrigatoria=?, publicada_em=?,
+                        aplicada_em=?, aplicada_por=?, tipo=?, changelog=?, requisitos=?, impacto=?,
+                        versao_php_minima=?, versao_banco_minima=?, tamanho_estimado_bytes=?,
+                        arquivos_estimados=?, responsavel_nome=?
+                  WHERE id=?"
+            );
+            $tiposBind = 'ssssississssssii' . 'si';
+            $stmt->bind_param(
+                $tiposBind,
+                $versao,
+                $titulo,
+                $descricao,
+                $status,
+                $obrigatoria,
+                $publicadaSql,
+                $aplicadaEm,
+                $aplicadaPor,
+                $tipo,
+                $changelog,
+                $requisitos,
+                $impacto,
+                $phpMinimo,
+                $bancoMinimo,
+                $tamanhoBytes,
+                $arquivosEstimados,
+                $responsavel,
+                $atualizacaoId
+            );
+            $stmt->execute();
+            $stmt->close();
+            $registroAtualizacao = $atualizacaoId;
+            $acaoAtualizacao = 'Atualizou versão na Central de Atualizações';
+            $mensagemAtualizacao = 'Atualização editada com sucesso.';
+        } else {
+            $stmt = $conn->prepare(
+                "INSERT INTO atualizacoes_sistema
+                    (versao,titulo,descricao,status,obrigatoria,publicada_em,aplicada_em,aplicada_por,
+                     tipo,changelog,requisitos,impacto,versao_php_minima,versao_banco_minima,
+                     tamanho_estimado_bytes,arquivos_estimados,responsavel_nome)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            );
+            $tiposBind = 'ssssississssssii' . 's';
+            $stmt->bind_param(
+                $tiposBind,
+                $versao,
+                $titulo,
+                $descricao,
+                $status,
+                $obrigatoria,
+                $publicadaSql,
+                $aplicadaEm,
+                $aplicadaPor,
+                $tipo,
+                $changelog,
+                $requisitos,
+                $impacto,
+                $phpMinimo,
+                $bancoMinimo,
+                $tamanhoBytes,
+                $arquivosEstimados,
+                $responsavel
+            );
+            $stmt->execute();
+            $registroAtualizacao = (int)$stmt->insert_id;
+            $stmt->close();
+            $acaoAtualizacao = 'Cadastrou versão na Central de Atualizações';
+            $mensagemAtualizacao = 'Atualização cadastrada com sucesso.';
+        }
+
+        if ($status === 'instalada') {
+            sgl_cfg_set($conn, 'versao_sistema', $versao);
+            sgl_cfg_set($conn, 'data_atualizacao_sistema', date('Y-m-d H:i:s'));
+        }
+
+        sgl_log(
+            $conn,
+            $acaoAtualizacao,
+            'atualizacoes_sistema',
+            (string)$registroAtualizacao,
+            "Versão: {$versao}; Status: {$status}; Impacto: {$impacto}"
+        );
+        sgl_redirect_cfg('atualizacoes', 'sucesso', $mensagemAtualizacao);
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('atualizacoes', 'erro', 'Não foi possível salvar a atualização.');
+    }
+}
+
+if ($acao_cfg === 'alterar_status_atualizacao') {
+    $atualizacaoId = max(0, (int)($_POST['atualizacao_id'] ?? 0));
+    $novoStatus = (string)($_POST['novo_status_atualizacao'] ?? '');
+    $statusPermitidos = ['planejada','disponivel','homologacao','instalada','cancelada'];
+
+    if ($atualizacaoId <= 0 || !in_array($novoStatus, $statusPermitidos, true)) {
+        sgl_redirect_cfg('atualizacoes', 'erro', 'Atualização ou status inválido.');
+    }
+
+    try {
+        $stmt = $conn->prepare("SELECT versao FROM atualizacoes_sistema WHERE id=? LIMIT 1");
+        $stmt->bind_param('i', $atualizacaoId);
+        $stmt->execute();
+        $rowAtualizacao = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$rowAtualizacao) {
+            sgl_redirect_cfg('atualizacoes', 'erro', 'Atualização não encontrada.');
+        }
+
+        $aplicadaEm = $novoStatus === 'instalada' ? date('Y-m-d H:i:s') : null;
+        $aplicadaPor = $novoStatus === 'instalada' ? $usuarioSessaoId : null;
+
+        $stmt = $conn->prepare(
+            "UPDATE atualizacoes_sistema
+                SET status=?, aplicada_em=?, aplicada_por=?
+              WHERE id=?"
+        );
+        $stmt->bind_param('ssii', $novoStatus, $aplicadaEm, $aplicadaPor, $atualizacaoId);
+        $stmt->execute();
+        $stmt->close();
+
+        if ($novoStatus === 'instalada') {
+            sgl_cfg_set($conn, 'versao_sistema', (string)$rowAtualizacao['versao']);
+            sgl_cfg_set($conn, 'data_atualizacao_sistema', date('Y-m-d H:i:s'));
+        }
+
+        sgl_log(
+            $conn,
+            'Alterou status de atualização',
+            'atualizacoes_sistema',
+            (string)$atualizacaoId,
+            'Novo status: ' . $novoStatus
+        );
+        sgl_redirect_cfg('atualizacoes', 'sucesso', 'Status da atualização alterado.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('atualizacoes', 'erro', 'Não foi possível alterar o status.');
+    }
+}
+
+if ($acao_cfg === 'simular_atualizacao') {
+    $atualizacaoId = max(0, (int)($_POST['atualizacao_id'] ?? 0));
+
+    try {
+        $stmt = $conn->prepare("SELECT * FROM atualizacoes_sistema WHERE id=? LIMIT 1");
+        $stmt->bind_param('i', $atualizacaoId);
+        $stmt->execute();
+        $atualizacaoSelecionada = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$atualizacaoSelecionada) {
+            sgl_redirect_cfg('atualizacoes', 'erro', 'Atualização não encontrada para simulação.');
+        }
+
+        $diagnosticoAtualizacao = rojex_atualizacao_diagnostico($conn, $atualizacaoSelecionada);
+        $diagnosticoAtualizacao['atualizacao_id'] = $atualizacaoId;
+        $diagnosticoAtualizacao['versao'] = (string)$atualizacaoSelecionada['versao'];
+        $diagnosticoAtualizacao['titulo'] = (string)$atualizacaoSelecionada['titulo'];
+
+        $_SESSION['rojex_atualizacao_preview'] = $diagnosticoAtualizacao;
+
+        $agora = date('Y-m-d H:i:s');
+        $stmt = $conn->prepare(
+            "UPDATE atualizacoes_sistema
+                SET verificada_em=?, compatibilidade_status=?
+              WHERE id=?"
+        );
+        $stmt->bind_param(
+            'ssi',
+            $agora,
+            $diagnosticoAtualizacao['status'],
+            $atualizacaoId
+        );
+        $stmt->execute();
+        $stmt->close();
+
+        sgl_log(
+            $conn,
+            'Simulou atualização do sistema',
+            'atualizacoes_sistema',
+            (string)$atualizacaoId,
+            "Versão: {$atualizacaoSelecionada['versao']}; Compatibilidade: {$diagnosticoAtualizacao['status']}; Pontuação: {$diagnosticoAtualizacao['percentual']}%"
+        );
+
+        sgl_redirect_cfg(
+            'atualizacoes',
+            $diagnosticoAtualizacao['status'] === 'compativel' ? 'sucesso' : 'aviso',
+            'Simulação concluída. Nenhum arquivo ou dado foi alterado.'
+        );
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('atualizacoes', 'erro', 'Não foi possível executar a simulação da atualização.');
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Estrutura de Backup Enterprise — Sprint 4.1.3 / Etapa 8
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'simular_backup') {
+    $tipoBackup = (string)($_POST['backup_tipo'] ?? 'banco');
+    if (!in_array($tipoBackup, ['banco','arquivos','completo'], true)) {
+        $tipoBackup = 'banco';
+    }
+
+    $mapaArquivos = rojex_backup_mapear_arquivos();
+    $tabelasBackup = rojex_manutencao_tabelas($conn);
+    $estimativaBanco = 0;
+    foreach ($tabelasBackup as $tabelaBackup) {
+        $estimativaBanco += (int)($tabelaBackup['bytes'] ?? 0);
+    }
+
+    $previewBackup = [
+        'tipo'=>$tipoBackup,
+        'criado_em'=>time(),
+        'tabelas'=>count($tabelasBackup),
+        'estimativa_banco_bytes'=>$estimativaBanco,
+        'arquivos_quantidade'=>$mapaArquivos['quantidade'],
+        'arquivos_bytes'=>$mapaArquivos['bytes'],
+        'zip_disponivel'=>class_exists('ZipArchive'),
+        'diretorio'=>rojex_backup_diretorio(),
+    ];
+
+    $previewBackup['hash'] = hash_hmac(
+        'sha256',
+        json_encode([
+            $previewBackup['tipo'],
+            $previewBackup['criado_em'],
+            $previewBackup['tabelas'],
+            $previewBackup['arquivos_quantidade'],
+        ]),
+        (string)($_SESSION['csrf_token'] ?? session_id())
+    );
+
+    $_SESSION['rojex_backup_preview'] = $previewBackup;
+    sgl_log($conn, 'Simulou backup Enterprise', 'backups_sistema', null, 'Tipo: ' . $tipoBackup);
+    sgl_redirect_cfg('backup', 'sucesso', 'Simulação de backup concluída. Revise a prévia antes de executar.');
+}
+
+if ($acao_cfg === 'executar_backup') {
+    $previewBackup = $_SESSION['rojex_backup_preview'] ?? null;
+    $hashInformado = (string)($_POST['backup_hash'] ?? '');
+    $confirmacao = strtoupper(trim((string)($_POST['confirmacao_backup'] ?? '')));
+
+    if (!is_array($previewBackup) || empty($previewBackup['hash']) || !hash_equals((string)$previewBackup['hash'], $hashInformado)) {
+        sgl_redirect_cfg('backup', 'erro', 'A simulação de backup expirou ou não corresponde à execução.');
+    }
+    if ((time() - (int)($previewBackup['criado_em'] ?? 0)) > 1800) {
+        unset($_SESSION['rojex_backup_preview']);
+        sgl_redirect_cfg('backup', 'erro', 'A simulação expirou após 30 minutos. Faça uma nova simulação.');
+    }
+    if ($confirmacao !== 'BACKUP') {
+        sgl_redirect_cfg('backup', 'erro', 'Confirmação inválida. Digite BACKUP.');
+    }
+
+    $tipoBackup = (string)$previewBackup['tipo'];
+    $diretorioBackup = rojex_backup_diretorio();
+
+    if (!is_dir($diretorioBackup) || !is_writable($diretorioBackup)) {
+        sgl_redirect_cfg('backup', 'erro', 'A pasta storage/backups não existe ou não possui permissão de gravação.');
+    }
+
+    $sqlTemporario = null;
+    $arquivoFinal = null;
+    $quantidadeArquivos = 0;
+    $detalhes = [];
+    $erroBackup = '';
+
+    try {
+        if ($tipoBackup === 'banco') {
+            $nomeArquivo = rojex_backup_nome_seguro('banco', 'sql');
+            $arquivoFinal = $diretorioBackup . DIRECTORY_SEPARATOR . $nomeArquivo;
+            $resultadoSql = rojex_backup_banco($conn, $arquivoFinal);
+
+            if (!$resultadoSql['ok']) {
+                throw new RuntimeException($resultadoSql['erro'] ?: 'Falha ao gerar backup do banco.');
+            }
+
+            $quantidadeArquivos = 1;
+            $detalhes = [
+                'tabelas'=>$resultadoSql['tabelas'],
+                'registros'=>$resultadoSql['registros'],
+            ];
+        } else {
+            if (!class_exists('ZipArchive')) {
+                throw new RuntimeException('A extensão ZIP do PHP não está habilitada.');
+            }
+
+            $mapaArquivos = rojex_backup_mapear_arquivos();
+
+            if ($tipoBackup === 'completo') {
+                $sqlTemporario = $diretorioBackup . DIRECTORY_SEPARATOR . rojex_backup_nome_seguro('banco_temp', 'sql');
+                $resultadoSql = rojex_backup_banco($conn, $sqlTemporario);
+                if (!$resultadoSql['ok']) {
+                    throw new RuntimeException($resultadoSql['erro'] ?: 'Falha ao gerar SQL para o backup completo.');
+                }
+                $detalhes['tabelas'] = $resultadoSql['tabelas'];
+                $detalhes['registros'] = $resultadoSql['registros'];
+            }
+
+            $nomeArquivo = rojex_backup_nome_seguro($tipoBackup, 'zip');
+            $arquivoFinal = $diretorioBackup . DIRECTORY_SEPARATOR . $nomeArquivo;
+            $resultadoZip = rojex_backup_zip_arquivos(
+                $arquivoFinal,
+                $mapaArquivos['arquivos'],
+                $tipoBackup === 'completo' ? $sqlTemporario : null
+            );
+
+            if (!$resultadoZip['ok']) {
+                throw new RuntimeException($resultadoZip['erro'] ?: 'Falha ao gerar o arquivo ZIP.');
+            }
+
+            $quantidadeArquivos = (int)$resultadoZip['quantidade'];
+            $detalhes['arquivos_incluidos'] = $quantidadeArquivos;
+            $detalhes['fontes'] = array_keys(rojex_backup_fontes_arquivos());
+        }
+
+        if ($sqlTemporario && is_file($sqlTemporario)) {
+            @unlink($sqlTemporario);
+        }
+
+        $validacao = rojex_backup_validar_arquivo($arquivoFinal);
+        if (!$validacao['ok']) {
+            throw new RuntimeException('O arquivo foi criado, mas não passou na verificação de integridade.');
+        }
+
+        $detalhes['hash_sha256'] = $validacao['hash'];
+        $detalhes['tamanho_bytes'] = $validacao['tamanho'];
+
+        $backupId = rojex_backup_registrar(
+            $conn,
+            'manual',
+            'concluido',
+            $arquivoFinal,
+            (int)$validacao['tamanho'],
+            (string)$validacao['hash'],
+            $tipoBackup,
+            $quantidadeArquivos,
+            json_encode($detalhes, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+            'integro'
+        );
+
+        $_SESSION['rojex_backup_ultimo_resultado'] = [
+            'id'=>$backupId,
+            'tipo'=>$tipoBackup,
+            'arquivo'=>basename($arquivoFinal),
+            'tamanho'=>$validacao['tamanho'],
+            'hash'=>$validacao['hash'],
+            'quantidade'=>$quantidadeArquivos,
+        ];
+
+        unset($_SESSION['rojex_backup_preview']);
+        sgl_log(
+            $conn,
+            'Executou backup Enterprise',
+            'backups_sistema',
+            (string)$backupId,
+            "Tipo: {$tipoBackup}; Arquivo: " . basename($arquivoFinal) . '; Integridade: OK'
+        );
+        sgl_redirect_cfg('backup', 'sucesso', 'Backup criado e verificado com sucesso.');
+    } catch (Throwable $e) {
+        if ($sqlTemporario && is_file($sqlTemporario)) @unlink($sqlTemporario);
+        if ($arquivoFinal && is_file($arquivoFinal) && filesize($arquivoFinal) === 0) @unlink($arquivoFinal);
+
+        rojex_backup_registrar(
+            $conn,
+            'manual',
+            'falhou',
+            $arquivoFinal,
+            0,
+            null,
+            $tipoBackup,
+            0,
+            $e->getMessage(),
+            'falhou'
+        );
+
+        sgl_log($conn, 'Falha no backup Enterprise', 'backups_sistema', null, $e->getMessage());
+        sgl_redirect_cfg('backup', 'erro', 'Não foi possível concluir o backup: ' . $e->getMessage());
+    }
+}
+
+if ($acao_cfg === 'verificar_backup') {
+    $backupId = max(0, (int)($_POST['backup_id'] ?? 0));
+
+    try {
+        $stmt = $conn->prepare("SELECT id, arquivo, hash_arquivo FROM backups_sistema WHERE id = ? LIMIT 1");
+        $stmt->bind_param('i', $backupId);
+        $stmt->execute();
+        $backupRegistro = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$backupRegistro || empty($backupRegistro['arquivo'])) {
+            sgl_redirect_cfg('backup', 'erro', 'Backup não localizado para verificação.');
+        }
+
+        $validacao = rojex_backup_validar_arquivo(
+            (string)$backupRegistro['arquivo'],
+            $backupRegistro['hash_arquivo'] ?: null
+        );
+        $statusVerificacao = $validacao['status'];
+        $agora = date('Y-m-d H:i:s');
+
+        $stmt = $conn->prepare(
+            "UPDATE backups_sistema
+                SET verificado_em=?, verificacao_status=?, tamanho_bytes=?, hash_arquivo=?
+              WHERE id=?"
+        );
+        $stmt->bind_param(
+            'ssisi',
+            $agora,
+            $statusVerificacao,
+            $validacao['tamanho'],
+            $validacao['hash'],
+            $backupId
+        );
+        $stmt->execute();
+        $stmt->close();
+
+        sgl_log(
+            $conn,
+            'Verificou integridade de backup',
+            'backups_sistema',
+            (string)$backupId,
+            'Resultado: ' . $statusVerificacao
+        );
+
+        sgl_redirect_cfg(
+            'backup',
+            $validacao['ok'] ? 'sucesso' : 'erro',
+            $validacao['ok']
+                ? 'Integridade confirmada: arquivo válido e hash correspondente.'
+                : 'Falha de integridade: arquivo ausente ou hash divergente.'
+        );
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('backup', 'erro', 'Não foi possível verificar o backup.');
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Ferramentas de Manutenção Enterprise — Sprint 4.1.3 / Etapa 7
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'simular_manutencao') {
+    $acoesSelecionadas = $_POST['manutencao_acoes'] ?? [];
+    if (!is_array($acoesSelecionadas)) $acoesSelecionadas = [];
+
+    $permitidas = ['temporarios','logs_antigos','analisar_banco','otimizar_banco','permissoes'];
+    $acoesSelecionadas = array_values(array_intersect($permitidas, array_map('strval', $acoesSelecionadas)));
+    $diasLogs = max(30, min(3650, (int)($_POST['manutencao_dias_logs'] ?? 365)));
+    $idadeTemporarios = max(24, min(8760, (int)($_POST['manutencao_idade_temporarios'] ?? 72)));
+
+    if (!$acoesSelecionadas) {
+        sgl_redirect_cfg('manutencao', 'erro', 'Selecione ao menos uma rotina para simular.');
+    }
+
+    $preview = [
+        'acoes' => $acoesSelecionadas,
+        'dias_logs' => $diasLogs,
+        'idade_temporarios' => $idadeTemporarios,
+        'criado_em' => time(),
+        'temporarios' => ['quantidade'=>0,'bytes'=>0,'erros'=>[]],
+        'logs_antigos' => 0,
+        'tabelas' => [],
+        'permissoes' => [],
+    ];
+
+    if (in_array('temporarios', $acoesSelecionadas, true)) {
+        $mapaTemporarios = rojex_manutencao_mapear_temporarios($idadeTemporarios);
+        $preview['temporarios'] = [
+            'quantidade' => $mapaTemporarios['quantidade'],
+            'bytes' => $mapaTemporarios['bytes'],
+            'erros' => $mapaTemporarios['erros'],
+        ];
+    }
+
+    if (in_array('logs_antigos', $acoesSelecionadas, true) && sgl_tabela_existe($conn, 'logs_sistema')) {
+        $dataCorte = date('Y-m-d H:i:s', strtotime("-{$diasLogs} days"));
+        $stmt = $conn->prepare("SELECT COUNT(*) AS total FROM logs_sistema WHERE criado_em < ?");
+        $stmt->bind_param('s', $dataCorte);
+        $stmt->execute();
+        $preview['logs_antigos'] = (int)($stmt->get_result()->fetch_assoc()['total'] ?? 0);
+        $stmt->close();
+    }
+
+    if (in_array('analisar_banco', $acoesSelecionadas, true) || in_array('otimizar_banco', $acoesSelecionadas, true)) {
+        $preview['tabelas'] = rojex_manutencao_tabelas($conn);
+    }
+
+    if (in_array('permissoes', $acoesSelecionadas, true)) {
+        $raizProjeto = realpath(__DIR__ . '/..') ?: (__DIR__ . '/..');
+        foreach ([
+            'assets/img' => $raizProjeto . '/assets/img',
+            'uploads' => $raizProjeto . '/uploads',
+            'storage' => $raizProjeto . '/storage',
+            'config' => $raizProjeto . '/config',
+        ] as $rotulo => $caminhoPermissao) {
+            $preview['permissoes'][$rotulo] = [
+                'existe' => is_dir($caminhoPermissao),
+                'gravavel' => is_dir($caminhoPermissao) ? is_writable($caminhoPermissao) : false,
+            ];
+        }
+    }
+
+    $preview['hash'] = hash_hmac(
+        'sha256',
+        json_encode([
+            $preview['acoes'],
+            $preview['dias_logs'],
+            $preview['idade_temporarios'],
+            $preview['criado_em'],
+        ]),
+        (string)($_SESSION['csrf_token'] ?? session_id())
+    );
+
+    $_SESSION['rojex_manutencao_preview'] = $preview;
+    rojex_registrar_manutencao(
+        $conn,
+        'simulacao',
+        'dry_run',
+        'concluida',
+        'Simulação de manutenção concluída sem alterar dados.',
+        $preview
+    );
+    sgl_log($conn, 'Simulou manutenção Enterprise', 'manutencoes_sistema', null, 'Ações: ' . implode(', ', $acoesSelecionadas));
+    sgl_redirect_cfg('manutencao', 'sucesso', 'Simulação concluída. Revise a prévia antes de executar.');
+}
+
+if ($acao_cfg === 'executar_manutencao') {
+    $preview = $_SESSION['rojex_manutencao_preview'] ?? null;
+    $hashInformado = (string)($_POST['manutencao_hash'] ?? '');
+    $confirmacao = strtoupper(trim((string)($_POST['confirmacao_manutencao'] ?? '')));
+
+    if (!is_array($preview) || empty($preview['hash']) || !hash_equals((string)$preview['hash'], $hashInformado)) {
+        sgl_redirect_cfg('manutencao', 'erro', 'A simulação expirou ou não corresponde à execução. Faça uma nova simulação.');
+    }
+    if ((time() - (int)($preview['criado_em'] ?? 0)) > 1800) {
+        unset($_SESSION['rojex_manutencao_preview']);
+        sgl_redirect_cfg('manutencao', 'erro', 'A simulação expirou após 30 minutos. Faça uma nova simulação.');
+    }
+    if ($confirmacao !== 'MANUTENCAO') {
+        sgl_redirect_cfg('manutencao', 'erro', 'Confirmação inválida. Digite MANUTENCAO.');
+    }
+
+    $resultado = [
+        'acoes' => $preview['acoes'],
+        'temporarios_excluidos' => 0,
+        'temporarios_bytes' => 0,
+        'logs_excluidos' => 0,
+        'tabelas_analisadas' => 0,
+        'tabelas_otimizadas' => 0,
+        'falhas' => [],
+    ];
+
+    if (in_array('temporarios', $preview['acoes'], true)) {
+        $mapaTemporarios = rojex_manutencao_mapear_temporarios((int)$preview['idade_temporarios']);
+        foreach ($mapaTemporarios['arquivos'] as $arquivoTemporario) {
+            $tamanho = is_file($arquivoTemporario) ? max(0, (int)@filesize($arquivoTemporario)) : 0;
+            if (is_file($arquivoTemporario) && @unlink($arquivoTemporario)) {
+                $resultado['temporarios_excluidos']++;
+                $resultado['temporarios_bytes'] += $tamanho;
+            } else {
+                $resultado['falhas'][] = 'Não foi possível remover: ' . basename($arquivoTemporario);
+            }
+        }
+    }
+
+    if (in_array('logs_antigos', $preview['acoes'], true) && sgl_tabela_existe($conn, 'logs_sistema')) {
+        $diasLogs = max(30, min(3650, (int)$preview['dias_logs']));
+        $dataCorte = date('Y-m-d H:i:s', strtotime("-{$diasLogs} days"));
+
+        // Preserva os 1.000 eventos mais recentes, mesmo que o período configurado seja antigo.
+        $sqlLimpezaLogs = "DELETE FROM logs_sistema
+                            WHERE criado_em < ?
+                              AND id NOT IN (
+                                  SELECT id FROM (
+                                      SELECT id FROM logs_sistema ORDER BY id DESC LIMIT 1000
+                                  ) AS logs_preservados
+                              )";
+        $stmt = $conn->prepare($sqlLimpezaLogs);
+        $stmt->bind_param('s', $dataCorte);
+        $stmt->execute();
+        $resultado['logs_excluidos'] = max(0, $stmt->affected_rows);
+        $stmt->close();
+    }
+
+    $tabelas = rojex_manutencao_tabelas($conn);
+    if (in_array('analisar_banco', $preview['acoes'], true)) {
+        foreach ($tabelas as $tabelaInfo) {
+            $nomeTabela = $tabelaInfo['nome'];
+            try {
+                if ($conn->query("ANALYZE TABLE `$nomeTabela`")) {
+                    $resultado['tabelas_analisadas']++;
+                }
+            } catch (Throwable $e) {
+                $resultado['falhas'][] = "ANALYZE {$nomeTabela}: " . $e->getMessage();
+            }
+        }
+    }
+
+    if (in_array('otimizar_banco', $preview['acoes'], true)) {
+        foreach ($tabelas as $tabelaInfo) {
+            $nomeTabela = $tabelaInfo['nome'];
+            try {
+                if ($conn->query("OPTIMIZE TABLE `$nomeTabela`")) {
+                    $resultado['tabelas_otimizadas']++;
+                }
+            } catch (Throwable $e) {
+                $resultado['falhas'][] = "OPTIMIZE {$nomeTabela}: " . $e->getMessage();
+            }
+        }
+    }
+
+    $statusManutencao = $resultado['falhas'] ? 'concluida_com_avisos' : 'concluida';
+    $resumoManutencao =
+        "{$resultado['temporarios_excluidos']} temporário(s), " .
+        "{$resultado['logs_excluidos']} log(s), " .
+        "{$resultado['tabelas_analisadas']} tabela(s) analisada(s), " .
+        "{$resultado['tabelas_otimizadas']} tabela(s) otimizada(s).";
+
+    rojex_registrar_manutencao(
+        $conn,
+        'manutencao_controlada',
+        'execucao',
+        $statusManutencao,
+        $resumoManutencao,
+        $resultado
+    );
+    sgl_log($conn, 'Executou manutenção Enterprise', 'manutencoes_sistema', null, $resumoManutencao);
+
+    $_SESSION['rojex_manutencao_ultimo_resultado'] = $resultado;
+    unset($_SESSION['rojex_manutencao_preview']);
+
+    sgl_redirect_cfg(
+        'manutencao',
+        $resultado['falhas'] ? 'aviso' : 'sucesso',
+        $resultado['falhas']
+            ? 'Manutenção concluída com avisos. Consulte o resultado detalhado.'
+            : 'Manutenção concluída com sucesso.'
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Gestão de Escritórios SaaS — Sprint 4.1.3 / Etapa 3
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'salvar_escritorio_saas') {
+    $escritorioIdSaas = max(0, (int)($_POST['escritorio_saas_id'] ?? 0));
+    $tenantIdSaas = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($_POST['tenant_id_saas'] ?? '')));
+    $nomeSaas = sgl_limpar_texto((string)($_POST['nome_escritorio_saas'] ?? ''), 180);
+    $documentoSaas = sgl_limpar_texto((string)($_POST['documento_escritorio_saas'] ?? ''), 30);
+    $responsavelSaas = sgl_limpar_texto((string)($_POST['responsavel_escritorio_saas'] ?? ''), 140);
+    $emailSaas = sgl_limpar_texto((string)($_POST['email_escritorio_saas'] ?? ''), 140);
+    $telefoneSaas = sgl_limpar_texto((string)($_POST['telefone_escritorio_saas'] ?? ''), 40);
+    $cidadeSaas = sgl_limpar_texto((string)($_POST['cidade_escritorio_saas'] ?? ''), 100);
+    $ufSaas = strtoupper(sgl_limpar_texto((string)($_POST['uf_escritorio_saas'] ?? ''), 2));
+    $subdominioSaas = strtolower(preg_replace('/[^a-zA-Z0-9.-]/', '', (string)($_POST['subdominio_escritorio_saas'] ?? '')));
+    $statusEscritorioSaas = (string)($_POST['status_escritorio_saas'] ?? 'implantacao');
+    $planoEscritorioSaas = (string)($_POST['plano_escritorio_saas'] ?? 'enterprise');
+    $observacoesEscritorioSaas = sgl_limpar_texto((string)($_POST['observacoes_escritorio_saas'] ?? ''), 1500);
+
+    if ($nomeSaas === '') {
+        sgl_redirect_cfg('administracao', 'erro', 'Informe o nome do escritório.');
+    }
+    if ($tenantIdSaas === '') {
+        try { $tenantIdSaas = 'ROJEX-TENANT-' . strtoupper(bin2hex(random_bytes(8))); }
+        catch (Throwable $e) { $tenantIdSaas = 'ROJEX-TENANT-' . strtoupper(substr(hash('sha256', uniqid('', true)), 0, 16)); }
+    }
+    if ($emailSaas !== '' && !filter_var($emailSaas, FILTER_VALIDATE_EMAIL)) {
+        sgl_redirect_cfg('administracao', 'erro', 'Informe um e-mail válido para o escritório.');
+    }
+    if (!in_array($statusEscritorioSaas, ['implantacao','ativo','suspenso','bloqueado','encerrado'], true)) {
+        $statusEscritorioSaas = 'implantacao';
+    }
+    if (!in_array($planoEscritorioSaas, ['starter','professional','enterprise'], true)) {
+        $planoEscritorioSaas = 'enterprise';
+    }
+
+    try {
+        $stmtDup = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? AND id <> ? LIMIT 1");
+        $stmtDup->bind_param('si', $tenantIdSaas, $escritorioIdSaas);
+        $stmtDup->execute();
+        $duplicadoTenant = $stmtDup->get_result()->fetch_assoc();
+        $stmtDup->close();
+        if ($duplicadoTenant) {
+            sgl_redirect_cfg('administracao', 'erro', 'Este Tenant ID já pertence a outro escritório.');
+        }
+
+        if ($escritorioIdSaas > 0) {
+            $stmt = $conn->prepare("UPDATE escritorios_saas SET tenant_id=?, nome=?, documento=?, responsavel=?, email=?, telefone=?, cidade=?, uf=?, subdominio=?, status=?, plano=?, observacoes=?, encerrado_em=IF(?='encerrado', COALESCE(encerrado_em,NOW()), NULL) WHERE id=?");
+            $stmt->bind_param('sssssssssssssi', $tenantIdSaas, $nomeSaas, $documentoSaas, $responsavelSaas, $emailSaas, $telefoneSaas, $cidadeSaas, $ufSaas, $subdominioSaas, $statusEscritorioSaas, $planoEscritorioSaas, $observacoesEscritorioSaas, $statusEscritorioSaas, $escritorioIdSaas);
+            $stmt->execute();
+            $stmt->close();
+            $registroEscritorioLog = (string)$escritorioIdSaas;
+            $mensagemEscritorio = 'Escritório atualizado com sucesso.';
+            $acaoEscritorioLog = 'Atualizou escritório SaaS';
+        } else {
+            $stmt = $conn->prepare("INSERT INTO escritorios_saas (tenant_id,nome,documento,responsavel,email,telefone,cidade,uf,subdominio,status,plano,observacoes,encerrado_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,IF(?='encerrado',NOW(),NULL))");
+            $stmt->bind_param('sssssssssssss', $tenantIdSaas, $nomeSaas, $documentoSaas, $responsavelSaas, $emailSaas, $telefoneSaas, $cidadeSaas, $ufSaas, $subdominioSaas, $statusEscritorioSaas, $planoEscritorioSaas, $observacoesEscritorioSaas, $statusEscritorioSaas);
+            $stmt->execute();
+            $registroEscritorioLog = (string)$stmt->insert_id;
+            $stmt->close();
+            $mensagemEscritorio = 'Escritório cadastrado com sucesso.';
+            $acaoEscritorioLog = 'Criou escritório SaaS';
+        }
+
+        sgl_log($conn, $acaoEscritorioLog, 'escritorios_saas', $registroEscritorioLog, "Tenant: {$tenantIdSaas}; Status: {$statusEscritorioSaas}; Plano: {$planoEscritorioSaas}");
+        sgl_redirect_cfg('administracao', 'sucesso', $mensagemEscritorio);
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('administracao', 'erro', 'Não foi possível salvar o escritório.');
+    }
+}
+
+if ($acao_cfg === 'alterar_status_escritorio_saas') {
+    $escritorioIdSaas = max(0, (int)($_POST['escritorio_saas_id'] ?? 0));
+    $novoStatusEscritorio = (string)($_POST['novo_status_escritorio'] ?? '');
+    if ($escritorioIdSaas <= 0 || !in_array($novoStatusEscritorio, ['implantacao','ativo','suspenso','bloqueado','encerrado'], true)) {
+        sgl_redirect_cfg('administracao', 'erro', 'Escritório ou status inválido.');
+    }
+    try {
+        $stmt = $conn->prepare("UPDATE escritorios_saas SET status=?, encerrado_em=IF(?='encerrado',COALESCE(encerrado_em,NOW()),NULL) WHERE id=?");
+        $stmt->bind_param('ssi', $novoStatusEscritorio, $novoStatusEscritorio, $escritorioIdSaas);
+        $stmt->execute();
+        $stmt->close();
+        sgl_log($conn, 'Alterou status de escritório SaaS', 'escritorios_saas', (string)$escritorioIdSaas, 'Novo status: ' . $novoStatusEscritorio);
+        sgl_redirect_cfg('administracao', 'sucesso', 'Status do escritório atualizado.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('administracao', 'erro', 'Não foi possível alterar o status do escritório.');
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Central de Licenças SaaS — Sprint 4.1.3 / Etapa 2
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'salvar_licenca_saas') {
+    $licencaId = max(0, (int)($_POST['licenca_id'] ?? 0));
+    $chaveLicenca = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($_POST['chave_licenca'] ?? '')));
+    $planoLicenca = (string)($_POST['plano_licenca_saas'] ?? 'enterprise');
+    $statusLicencaSaas = (string)($_POST['status_licenca_saas'] ?? 'teste');
+    $limiteUsuariosSaas = max(1, min(1000, (int)($_POST['limite_usuarios_saas'] ?? 100)));
+    $limiteArmazenamentoSaas = max(1, min(100000, (int)($_POST['limite_armazenamento_saas'] ?? 50)));
+    $ativadaEm = trim((string)($_POST['ativada_em'] ?? ''));
+    $renovacaoEm = trim((string)($_POST['renovacao_em'] ?? ''));
+    $observacoesLicenca = sgl_limpar_texto((string)($_POST['observacoes_licenca'] ?? ''), 1500);
+    $escritorioId = max(0, (int)($_POST['escritorio_id'] ?? 0));
+
+    if ($chaveLicenca === '' || strlen($chaveLicenca) < 8) {
+        sgl_redirect_cfg('administracao', 'erro', 'Informe uma chave de licença válida com pelo menos 8 caracteres.');
+    }
+    if (!in_array($planoLicenca, ['starter','professional','enterprise'], true)) {
+        $planoLicenca = 'enterprise';
+    }
+    if (!in_array($statusLicencaSaas, ['teste','ativa','suspensa','expirada','cancelada'], true)) {
+        $statusLicencaSaas = 'teste';
+    }
+    foreach ([$ativadaEm, $renovacaoEm] as $dataLicencaSaas) {
+        if ($dataLicencaSaas !== '') {
+            $obj = DateTime::createFromFormat('Y-m-d', $dataLicencaSaas);
+            if (!$obj || $obj->format('Y-m-d') !== $dataLicencaSaas) {
+                sgl_redirect_cfg('administracao', 'erro', 'Informe datas válidas para a licença.');
+            }
+        }
+    }
+    if ($ativadaEm !== '' && $renovacaoEm !== '' && $renovacaoEm < $ativadaEm) {
+        sgl_redirect_cfg('administracao', 'erro', 'A renovação não pode ser anterior à ativação.');
+    }
+
+    try {
+        $stmtDup = $conn->prepare("SELECT id FROM licencas_saas WHERE chave_licenca = ? AND id <> ? LIMIT 1");
+        $stmtDup->bind_param('si', $chaveLicenca, $licencaId);
+        $stmtDup->execute();
+        $duplicada = $stmtDup->get_result()->fetch_assoc();
+        $stmtDup->close();
+        if ($duplicada) {
+            sgl_redirect_cfg('administracao', 'erro', 'Esta chave de licença já está cadastrada.');
+        }
+
+        $escritorioVinculo = $escritorioId > 0 ? $escritorioId : null;
+        $ativadaSql = $ativadaEm !== '' ? $ativadaEm : null;
+        $renovacaoSql = $renovacaoEm !== '' ? $renovacaoEm : null;
+
+        if ($licencaId > 0) {
+            $stmt = $conn->prepare("UPDATE licencas_saas SET escritorio_id = ?, chave_licenca = ?, plano = ?, status = ?, limite_usuarios = ?, limite_armazenamento_gb = ?, ativada_em = ?, renovacao_em = ?, observacoes = ? WHERE id = ?");
+            $stmt->bind_param('isssiisssi', $escritorioVinculo, $chaveLicenca, $planoLicenca, $statusLicencaSaas, $limiteUsuariosSaas, $limiteArmazenamentoSaas, $ativadaSql, $renovacaoSql, $observacoesLicenca, $licencaId);
+            $stmt->execute();
+            $stmt->close();
+            $registroLog = (string)$licencaId;
+            $acaoLog = 'Atualizou licença SaaS';
+            $mensagem = 'Licença atualizada com sucesso.';
+        } else {
+            $stmt = $conn->prepare("INSERT INTO licencas_saas (escritorio_id, chave_licenca, plano, status, limite_usuarios, limite_armazenamento_gb, ativada_em, renovacao_em, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param('isssiisss', $escritorioVinculo, $chaveLicenca, $planoLicenca, $statusLicencaSaas, $limiteUsuariosSaas, $limiteArmazenamentoSaas, $ativadaSql, $renovacaoSql, $observacoesLicenca);
+            $stmt->execute();
+            $registroLog = (string)$stmt->insert_id;
+            $stmt->close();
+            $acaoLog = 'Criou licença SaaS';
+            $mensagem = 'Licença cadastrada com sucesso.';
+        }
+
+        // Se a licença pertence ao tenant desta instalação, mantém compatibilidade
+        // com as chaves antigas já consumidas por outras telas do sistema.
+        $tenantAtual = sgl_cfg_get($conn, 'tenant_id', '');
+        if ($escritorioId > 0 && $tenantAtual !== '') {
+            $stmtTenant = $conn->prepare("SELECT tenant_id FROM escritorios_saas WHERE id = ? LIMIT 1");
+            $stmtTenant->bind_param('i', $escritorioId);
+            $stmtTenant->execute();
+            $tenantLicenca = (string)($stmtTenant->get_result()->fetch_assoc()['tenant_id'] ?? '');
+            $stmtTenant->close();
+            if ($tenantLicenca === $tenantAtual) {
+                sgl_cfg_set($conn, 'chave_instalacao', $chaveLicenca);
+                sgl_cfg_set($conn, 'plano_licenca', $planoLicenca);
+                sgl_cfg_set($conn, 'status_licenca', $statusLicencaSaas === 'cancelada' ? 'suspensa' : $statusLicencaSaas);
+                sgl_cfg_set($conn, 'limite_usuarios_licenca', (string)min(100, $limiteUsuariosSaas));
+                sgl_cfg_set($conn, 'limite_armazenamento_gb', (string)$limiteArmazenamentoSaas);
+                sgl_cfg_set($conn, 'data_ativacao_licenca', $ativadaEm);
+                sgl_cfg_set($conn, 'data_renovacao_licenca', $renovacaoEm);
+            }
+        }
+
+        sgl_log($conn, $acaoLog, 'licencas_saas', $registroLog, "Plano: {$planoLicenca}; Status: {$statusLicencaSaas}; Limite: {$limiteUsuariosSaas} usuários.");
+        sgl_redirect_cfg('administracao', 'sucesso', $mensagem);
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('administracao', 'erro', 'Não foi possível salvar a licença. Verifique os dados informados.');
+    }
+}
+
+if ($acao_cfg === 'alterar_status_licenca_saas') {
+    $licencaId = max(0, (int)($_POST['licenca_id'] ?? 0));
+    $novoStatus = (string)($_POST['novo_status'] ?? '');
+    if ($licencaId <= 0 || !in_array($novoStatus, ['teste','ativa','suspensa','expirada','cancelada'], true)) {
+        sgl_redirect_cfg('administracao', 'erro', 'Licença ou status inválido.');
+    }
+
+    try {
+        $stmt = $conn->prepare("UPDATE licencas_saas SET status = ? WHERE id = ?");
+        $stmt->bind_param('si', $novoStatus, $licencaId);
+        $stmt->execute();
+        $alteradas = $stmt->affected_rows;
+        $stmt->close();
+        if ($alteradas < 1) {
+            sgl_redirect_cfg('administracao', 'aviso', 'A licença já estava com o status selecionado ou não foi encontrada.');
+        }
+
+        $stmtAtual = $conn->prepare("SELECT l.chave_licenca, e.tenant_id FROM licencas_saas l LEFT JOIN escritorios_saas e ON e.id = l.escritorio_id WHERE l.id = ? LIMIT 1");
+        $stmtAtual->bind_param('i', $licencaId);
+        $stmtAtual->execute();
+        $licencaAtualizada = $stmtAtual->get_result()->fetch_assoc();
+        $stmtAtual->close();
+        if ($licencaAtualizada && (string)($licencaAtualizada['tenant_id'] ?? '') === sgl_cfg_get($conn, 'tenant_id', '')) {
+            sgl_cfg_set($conn, 'status_licenca', $novoStatus === 'cancelada' ? 'suspensa' : $novoStatus);
+        }
+
+        sgl_log($conn, 'Alterou status de licença SaaS', 'licencas_saas', (string)$licencaId, 'Novo status: ' . $novoStatus);
+        sgl_redirect_cfg('administracao', 'sucesso', 'Status da licença atualizado.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('administracao', 'erro', 'Não foi possível alterar o status da licença.');
+    }
+}
+
 if ($acao_cfg === 'salvar_escritorio') {
     $campos = [
         'nome_escritorio' => 140,
         'razao_social_escritorio' => 180,
+        'codigo_interno_escritorio' => 40,
+        'responsavel_administrativo_escritorio' => 140,
+        'email_administrativo_escritorio' => 140,
         'inscricao_estadual_escritorio' => 60,
         'inscricao_municipal_escritorio' => 60,
         'responsavel_escritorio' => 140,
@@ -343,14 +2163,49 @@ if ($acao_cfg === 'salvar_escritorio') {
     ];
     foreach ($campos as $campo => $max) {
         $valor = sgl_limpar_texto((string)($_POST[$campo] ?? ''), $max);
-        if ($campo === 'email_escritorio' && $valor !== '' && !filter_var($valor, FILTER_VALIDATE_EMAIL)) {
-            sgl_redirect_cfg('escritorio', 'erro', 'E-mail do escritório inválido.');
+        if (in_array($campo, ['email_escritorio', 'email_administrativo_escritorio'], true) && $valor !== '' && !filter_var($valor, FILTER_VALIDATE_EMAIL)) {
+            sgl_redirect_cfg('escritorio', 'erro', 'Informe um endereço de e-mail válido.');
         }
         if ($campo === 'uf_escritorio') {
             $valor = strtoupper($valor);
         }
+        if ($campo === 'codigo_interno_escritorio') {
+            $valor = strtoupper(preg_replace('/[^a-zA-Z0-9._-]/', '', $valor));
+        }
         sgl_cfg_set($conn, $campo, $valor);
     }
+
+    $tipoEscritorio = (string)($_POST['tipo_escritorio'] ?? 'escritorio_advocacia');
+    $tiposPermitidos = ['escritorio_advocacia', 'advogado_autonomo', 'departamento_juridico', 'consultoria_juridica', 'outro'];
+    if (!in_array($tipoEscritorio, $tiposPermitidos, true)) {
+        $tipoEscritorio = 'escritorio_advocacia';
+    }
+
+    $statusOperacional = (string)($_POST['status_operacional_escritorio'] ?? 'ativo');
+    if (!in_array($statusOperacional, ['ativo', 'implantacao', 'suspenso'], true)) {
+        $statusOperacional = 'ativo';
+    }
+
+    $dataInicio = trim((string)($_POST['data_inicio_atividades_escritorio'] ?? ''));
+    if ($dataInicio !== '') {
+        $dataObj = DateTime::createFromFormat('Y-m-d', $dataInicio);
+        if (!$dataObj || $dataObj->format('Y-m-d') !== $dataInicio) {
+            sgl_redirect_cfg('escritorio', 'erro', 'A data de início das atividades é inválida.');
+        }
+    }
+
+    $timezone = (string)($_POST['timezone_escritorio'] ?? 'America/Sao_Paulo');
+    $timezonesPermitidos = ['America/Sao_Paulo', 'America/Manaus', 'America/Cuiaba', 'America/Recife', 'America/Fortaleza', 'America/Belem', 'America/Rio_Branco', 'UTC'];
+    if (!in_array($timezone, $timezonesPermitidos, true)) {
+        $timezone = 'America/Sao_Paulo';
+    }
+
+    sgl_cfg_set($conn, 'tipo_escritorio', $tipoEscritorio);
+    sgl_cfg_set($conn, 'status_operacional_escritorio', $statusOperacional);
+    sgl_cfg_set($conn, 'data_inicio_atividades_escritorio', $dataInicio);
+    sgl_cfg_set($conn, 'timezone_escritorio', $timezone);
+    sgl_cfg_set($conn, 'idioma_escritorio', 'pt-BR');
+    sgl_cfg_set($conn, 'moeda_escritorio', 'BRL');
 
     // Mantém compatibilidade com telas antigas que ainda usam chaves simples.
     sgl_cfg_set($conn, 'razao_social', sgl_limpar_texto((string)($_POST['razao_social_escritorio'] ?? ''), 180));
@@ -396,20 +2251,64 @@ if ($acao_cfg === 'remover_logo') {
     sgl_redirect_cfg('marca', 'aviso', 'Logo personalizada removida.');
 }
 
+if ($acao_cfg === 'salvar_marca') {
+    $nomeMarca = sgl_limpar_texto((string)($_POST['nome_marca_exibicao'] ?? ''), 80);
+    $sloganMarca = sgl_limpar_texto((string)($_POST['slogan_marca'] ?? ''), 160);
+    $posicaoLogo = in_array(($_POST['posicao_logo'] ?? 'esquerda'), ['esquerda','centro'], true)
+        ? (string)$_POST['posicao_logo']
+        : 'esquerda';
+
+    sgl_cfg_set($conn, 'nome_marca_exibicao', $nomeMarca);
+    sgl_cfg_set($conn, 'slogan_marca', $sloganMarca);
+    sgl_cfg_set($conn, 'posicao_logo', $posicaoLogo);
+    sgl_cfg_set($conn, 'exibir_nome_menu', !empty($_POST['exibir_nome_menu']) ? '1' : '0');
+    sgl_cfg_set($conn, 'exibir_slogan_documentos', !empty($_POST['exibir_slogan_documentos']) ? '1' : '0');
+
+    sgl_log($conn, 'Atualizou configurações da marca', 'configuracoes', null, 'Nome, slogan e preferências de exibição.');
+    sgl_redirect_cfg('marca', 'sucesso', 'Configurações da marca salvas com sucesso.');
+}
+
 if ($acao_cfg === 'salvar_tema') {
+    $modoTema = in_array(($_POST['tema_modo'] ?? 'claro'), ['claro','escuro','automatico'], true)
+        ? (string)$_POST['tema_modo']
+        : 'claro';
+    $densidade = in_array(($_POST['tema_densidade'] ?? 'confortavel'), ['compacta','confortavel'], true)
+        ? (string)$_POST['tema_densidade']
+        : 'confortavel';
+    $bordas = in_array(($_POST['tema_bordas'] ?? 'suaves'), ['retas','suaves','arredondadas'], true)
+        ? (string)$_POST['tema_bordas']
+        : 'suaves';
+    $fonte = max(90, min(115, (int)($_POST['tema_fonte_percentual'] ?? 100)));
+
     sgl_cfg_set($conn, 'cor_primaria', sgl_validar_hex((string)($_POST['cor_primaria'] ?? ''), '#1a3c5e'));
     sgl_cfg_set($conn, 'cor_secundaria', sgl_validar_hex((string)($_POST['cor_secundaria'] ?? ''), '#2c6fad'));
     sgl_cfg_set($conn, 'cor_accent', sgl_validar_hex((string)($_POST['cor_accent'] ?? ''), '#f0a500'));
-    sgl_cfg_set($conn, 'tema_modo', in_array(($_POST['tema_modo'] ?? 'claro'), ['claro','escuro'], true) ? $_POST['tema_modo'] : 'claro');
-    sgl_log($conn, 'Atualizou identidade visual', 'configuracoes');
-    sgl_redirect_cfg('tema', 'sucesso', 'Tema salvo com sucesso.');
+    sgl_cfg_set($conn, 'cor_fundo', sgl_validar_hex((string)($_POST['cor_fundo'] ?? ''), '#f4f6f9'));
+    sgl_cfg_set($conn, 'cor_texto', sgl_validar_hex((string)($_POST['cor_texto'] ?? ''), '#212529'));
+    sgl_cfg_set($conn, 'tema_modo', $modoTema);
+    sgl_cfg_set($conn, 'tema_densidade', $densidade);
+    sgl_cfg_set($conn, 'tema_bordas', $bordas);
+    sgl_cfg_set($conn, 'tema_fonte_percentual', (string)$fonte);
+
+    sgl_log($conn, 'Atualizou identidade visual Enterprise', 'configuracoes', null, 'Cores, modo, densidade, bordas e escala de fonte.');
+    sgl_redirect_cfg('tema', 'sucesso', 'Tema Enterprise salvo com sucesso.');
 }
 
 if ($acao_cfg === 'restaurar_tema') {
-    sgl_cfg_set($conn, 'cor_primaria', '#1a3c5e');
-    sgl_cfg_set($conn, 'cor_secundaria', '#2c6fad');
-    sgl_cfg_set($conn, 'cor_accent', '#f0a500');
-    sgl_cfg_set($conn, 'tema_modo', 'claro');
+    $padroesTema = [
+        'cor_primaria' => '#1a3c5e',
+        'cor_secundaria' => '#2c6fad',
+        'cor_accent' => '#f0a500',
+        'cor_fundo' => '#f4f6f9',
+        'cor_texto' => '#212529',
+        'tema_modo' => 'claro',
+        'tema_densidade' => 'confortavel',
+        'tema_bordas' => 'suaves',
+        'tema_fonte_percentual' => '100',
+    ];
+    foreach ($padroesTema as $chaveTema => $valorTema) {
+        sgl_cfg_set($conn, $chaveTema, $valorTema);
+    }
     sgl_log($conn, 'Restaurou tema padrão', 'configuracoes');
     sgl_redirect_cfg('tema', 'aviso', 'Tema padrão restaurado.');
 }
@@ -418,9 +2317,17 @@ if ($acao_cfg === 'novo_usuario') {
     $nome = sgl_limpar_texto((string)($_POST['nome'] ?? ''), 120);
     $usuario = preg_replace('/[^a-zA-Z0-9._-]/', '', (string)($_POST['usuario'] ?? ''));
     $email = sgl_limpar_texto((string)($_POST['email'] ?? ''), 120);
+    $telefone = sgl_limpar_texto((string)($_POST['telefone'] ?? ''), 40);
+    $cargo = sgl_limpar_texto((string)($_POST['cargo'] ?? ''), 100);
+    $departamento = sgl_limpar_texto((string)($_POST['departamento'] ?? ''), 100);
+    $observacoes = sgl_limpar_texto((string)($_POST['observacoes'] ?? ''), 1000);
     $perfil = (string)($_POST['perfil'] ?? 'Usuário');
     $senha = (string)($_POST['senha'] ?? '');
-    $perfis = ['Administrador','Advogado','Atendente','Financeiro','Usuário'];
+
+    $perfis = [
+        'Administrador Master','Administrador','Advogado','Coordenador',
+        'Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'
+    ];
 
     if ($nome === '' || $usuario === '' || strlen($senha) < 6 || !in_array($perfil, $perfis, true)) {
         sgl_redirect_cfg('usuarios', 'erro', 'Preencha nome, usuário, perfil e senha com no mínimo 6 caracteres.');
@@ -429,58 +2336,395 @@ if ($acao_cfg === 'novo_usuario') {
         sgl_redirect_cfg('usuarios', 'erro', 'E-mail do usuário inválido.');
     }
 
+    $limiteUsuarios = max(1, min(100, (int)sgl_cfg_get($conn, 'limite_usuarios_licenca', '100')));
+    $totalUsuariosAtuais = sgl_select_count($conn, "SELECT COUNT(*) AS total FROM usuarios");
+    if ($totalUsuariosAtuais >= $limiteUsuarios) {
+        sgl_redirect_cfg('usuarios', 'erro', "Limite da licença atingido: {$limiteUsuarios} usuário(s).");
+    }
+
     try {
+        $stmtDup = $conn->prepare("SELECT id FROM usuarios WHERE usuario = ? OR (? <> '' AND email = ?) LIMIT 1");
+        $stmtDup->bind_param('sss', $usuario, $email, $email);
+        $stmtDup->execute();
+        $duplicado = $stmtDup->get_result()->fetch_assoc();
+        $stmtDup->close();
+
+        if ($duplicado) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Já existe usuário com este login ou e-mail.');
+        }
+
         $hash = password_hash($senha, PASSWORD_DEFAULT);
-        $stmt = $conn->prepare("INSERT INTO usuarios (nome, usuario, email, senha, perfil, ativo) VALUES (?, ?, ?, ?, ?, 1)");
-        $stmt->bind_param('sssss', $nome, $usuario, $email, $hash, $perfil);
+
+        $colunasExtras = [];
+        $valoresExtras = [];
+        $tiposExtras = '';
+
+        foreach ([
+            'telefone' => [$telefone, 's'],
+            'cargo' => [$cargo, 's'],
+            'departamento' => [$departamento, 's'],
+            'observacoes' => [$observacoes, 's'],
+        ] as $colunaExtra => $dadosExtra) {
+            if (sgl_coluna_existe($conn, 'usuarios', $colunaExtra)) {
+                $colunasExtras[] = $colunaExtra;
+                $valoresExtras[] = $dadosExtra[0];
+                $tiposExtras .= $dadosExtra[1];
+            }
+        }
+
+        $colunasSql = "nome, usuario, email, senha, perfil, ativo";
+        $placeholders = "?, ?, ?, ?, ?, 1";
+        if ($colunasExtras) {
+            $colunasSql .= ", " . implode(", ", $colunasExtras);
+            $placeholders .= ", " . implode(", ", array_fill(0, count($colunasExtras), "?"));
+        }
+
+        $stmt = $conn->prepare("INSERT INTO usuarios ($colunasSql) VALUES ($placeholders)");
+        $tipos = 'sssss' . $tiposExtras;
+        $valores = array_merge([$nome, $usuario, $email, $hash, $perfil], $valoresExtras);
+        $stmt->bind_param($tipos, ...$valores);
         $stmt->execute();
         $novoId = (string)$stmt->insert_id;
         $stmt->close();
-        sgl_log($conn, 'Criou usuário', 'usuarios', $novoId, $usuario);
+
+        sgl_log(
+            $conn,
+            'Criou usuário Enterprise',
+            'usuarios',
+            $novoId,
+            "Login: {$usuario}; Perfil: {$perfil}; Departamento: " . ($departamento ?: '-')
+        );
         sgl_redirect_cfg('usuarios', 'sucesso', 'Usuário criado com sucesso.');
     } catch (Throwable $e) {
-        sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível criar usuário. Verifique se o login já existe.');
+        sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível criar o usuário. Verifique os dados informados.');
+    }
+}
+
+if ($acao_cfg === 'editar_usuario' && !empty($_POST['usuario_id'])) {
+    $id = (int)$_POST['usuario_id'];
+    $nome = sgl_limpar_texto((string)($_POST['nome'] ?? ''), 120);
+    $email = sgl_limpar_texto((string)($_POST['email'] ?? ''), 120);
+    $telefone = sgl_limpar_texto((string)($_POST['telefone'] ?? ''), 40);
+    $cargo = sgl_limpar_texto((string)($_POST['cargo'] ?? ''), 100);
+    $departamento = sgl_limpar_texto((string)($_POST['departamento'] ?? ''), 100);
+    $observacoes = sgl_limpar_texto((string)($_POST['observacoes'] ?? ''), 1000);
+    $perfil = (string)($_POST['perfil'] ?? 'Usuário');
+
+    $perfis = [
+        'Administrador Master','Administrador','Advogado','Coordenador',
+        'Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'
+    ];
+
+    if ($nome === '' || !in_array($perfil, $perfis, true)) {
+        sgl_redirect_cfg('usuarios', 'erro', 'Nome ou perfil inválido.');
+    }
+    if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        sgl_redirect_cfg('usuarios', 'erro', 'E-mail do usuário inválido.');
+    }
+
+    try {
+        $stmtAtual = $conn->prepare("SELECT perfil FROM usuarios WHERE id = ? LIMIT 1");
+        $stmtAtual->bind_param('i', $id);
+        $stmtAtual->execute();
+        $usuarioAtual = $stmtAtual->get_result()->fetch_assoc();
+        $stmtAtual->close();
+
+        if (!$usuarioAtual) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado.');
+        }
+
+        $perfilAtual = (string)$usuarioAtual['perfil'];
+        $ehAdminAtual = in_array($perfilAtual, ['Administrador', 'Administrador Master'], true);
+        $seraAdmin = in_array($perfil, ['Administrador', 'Administrador Master'], true);
+
+        if ($ehAdminAtual && !$seraAdmin) {
+            $totalAdminsAtivos = sgl_select_count(
+                $conn,
+                "SELECT COUNT(*) AS total FROM usuarios WHERE ativo = 1 AND perfil IN ('Administrador','Administrador Master')"
+            );
+            if ($totalAdminsAtivos <= 1) {
+                sgl_redirect_cfg('usuarios', 'erro', 'Não é possível remover o perfil do último administrador ativo.');
+            }
+        }
+
+        $stmtDup = $conn->prepare("SELECT id FROM usuarios WHERE id <> ? AND ? <> '' AND email = ? LIMIT 1");
+        $stmtDup->bind_param('iss', $id, $email, $email);
+        $stmtDup->execute();
+        $duplicado = $stmtDup->get_result()->fetch_assoc();
+        $stmtDup->close();
+
+        if ($duplicado) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Este e-mail já está vinculado a outro usuário.');
+        }
+
+        $sets = ["nome = ?", "email = ?", "perfil = ?"];
+        $tipos = "sss";
+        $valores = [$nome, $email, $perfil];
+
+        foreach ([
+            'telefone' => $telefone,
+            'cargo' => $cargo,
+            'departamento' => $departamento,
+            'observacoes' => $observacoes,
+        ] as $colunaExtra => $valorExtra) {
+            if (sgl_coluna_existe($conn, 'usuarios', $colunaExtra)) {
+                $sets[] = "`$colunaExtra` = ?";
+                $tipos .= 's';
+                $valores[] = $valorExtra;
+            }
+        }
+
+        if (sgl_coluna_existe($conn, 'usuarios', 'atualizado_em')) {
+            $sets[] = "atualizado_em = NOW()";
+        }
+
+        $tipos .= 'i';
+        $valores[] = $id;
+
+        $stmt = $conn->prepare("UPDATE usuarios SET " . implode(', ', $sets) . " WHERE id = ?");
+        $stmt->bind_param($tipos, ...$valores);
+        $stmt->execute();
+        $stmt->close();
+
+        sgl_log(
+            $conn,
+            'Atualizou usuário Enterprise',
+            'usuarios',
+            (string)$id,
+            "Perfil anterior: {$perfilAtual}; Novo perfil: {$perfil}; Departamento: " . ($departamento ?: '-')
+        );
+        sgl_redirect_cfg('usuarios', 'sucesso', 'Dados do usuário atualizados.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível atualizar o usuário.');
     }
 }
 
 if ($acao_cfg === 'alterar_status_usuario' && !empty($_POST['usuario_id'])) {
     $id = (int)$_POST['usuario_id'];
-    $ativo = (int)($_POST['ativo'] ?? 1);
+    $ativo = ((int)($_POST['ativo'] ?? 1) === 1) ? 1 : 0;
+
     if ($id === (int)($_SESSION['user_id'] ?? 0) && $ativo === 0) {
         sgl_redirect_cfg('usuarios', 'erro', 'Você não pode desativar o próprio usuário logado.');
     }
-    $stmt = $conn->prepare("UPDATE usuarios SET ativo = ?, atualizado_em = NOW() WHERE id = ?");
-    $stmt->bind_param('ii', $ativo, $id);
-    $stmt->execute();
-    $stmt->close();
-    sgl_log($conn, $ativo ? 'Ativou usuário' : 'Desativou usuário', 'usuarios', (string)$id);
-    sgl_redirect_cfg('usuarios', 'sucesso', 'Status do usuário atualizado.');
+
+    try {
+        $stmtPerfil = $conn->prepare("SELECT perfil FROM usuarios WHERE id = ? LIMIT 1");
+        $stmtPerfil->bind_param('i', $id);
+        $stmtPerfil->execute();
+        $usuarioAlvo = $stmtPerfil->get_result()->fetch_assoc();
+        $stmtPerfil->close();
+
+        if (!$usuarioAlvo) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado.');
+        }
+
+        if ($ativo === 0 && in_array($usuarioAlvo['perfil'], ['Administrador','Administrador Master'], true)) {
+            $totalAdminsAtivos = sgl_select_count(
+                $conn,
+                "SELECT COUNT(*) AS total FROM usuarios WHERE ativo = 1 AND perfil IN ('Administrador','Administrador Master')"
+            );
+            if ($totalAdminsAtivos <= 1) {
+                sgl_redirect_cfg('usuarios', 'erro', 'Não é possível desativar o último administrador ativo.');
+            }
+        }
+
+        $sqlAtualizacao = sgl_coluna_existe($conn, 'usuarios', 'atualizado_em')
+            ? "UPDATE usuarios SET ativo = ?, atualizado_em = NOW() WHERE id = ?"
+            : "UPDATE usuarios SET ativo = ? WHERE id = ?";
+
+        $stmt = $conn->prepare($sqlAtualizacao);
+        $stmt->bind_param('ii', $ativo, $id);
+        $stmt->execute();
+        $stmt->close();
+
+        sgl_log($conn, $ativo ? 'Ativou usuário' : 'Desativou usuário', 'usuarios', (string)$id);
+        sgl_redirect_cfg('usuarios', 'sucesso', 'Status do usuário atualizado.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível alterar o status do usuário.');
+    }
+}
+
+if ($acao_cfg === 'encerrar_vinculo_usuario' && !empty($_POST['usuario_id'])) {
+    $id = (int)$_POST['usuario_id'];
+
+    if ($id === $usuarioSessaoId || $id === $usuarioMasterId) {
+        sgl_redirect_cfg('usuarios', 'erro', 'O usuário MASTER não pode ter o vínculo encerrado.');
+    }
+
+    try {
+        $stmt = $conn->prepare("SELECT id, nome, usuario, perfil, ativo FROM usuarios WHERE id = ? LIMIT 1");
+        $stmt->bind_param('i', $id);
+        $stmt->execute();
+        $alvo = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$alvo) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado.');
+        }
+
+        if (!sgl_registrar_historico_usuario($conn, $id, 'ENCERRAMENTO_DE_VINCULO')) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível criar o histórico de segurança. Nenhuma alteração foi realizada.');
+        }
+
+        $sets = ["ativo = 0"];
+        if (sgl_coluna_existe($conn, 'usuarios', 'vinculo_status')) {
+            $sets[] = "vinculo_status = 'encerrado'";
+        }
+        if (sgl_coluna_existe($conn, 'usuarios', 'desligado_em')) {
+            $sets[] = "desligado_em = NOW()";
+        }
+        if (sgl_coluna_existe($conn, 'usuarios', 'desligado_por')) {
+            $sets[] = "desligado_por = " . (int)$usuarioSessaoId;
+        }
+        if (sgl_coluna_existe($conn, 'usuarios', 'atualizado_em')) {
+            $sets[] = "atualizado_em = NOW()";
+        }
+
+        $stmt = $conn->prepare("UPDATE usuarios SET " . implode(', ', $sets) . " WHERE id = ?");
+        $stmt->bind_param('i', $id);
+        $stmt->execute();
+        $stmt->close();
+
+        sgl_log(
+            $conn,
+            'Encerrou vínculo de usuário',
+            'usuarios',
+            (string)$id,
+            'Cadastro preservado integralmente em usuarios_historico para auditoria e prova futura.'
+        );
+        sgl_redirect_cfg('usuarios', 'aviso', 'Vínculo encerrado. O cadastro e o histórico foram preservados.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível encerrar o vínculo do usuário.');
+    }
 }
 
 if ($acao_cfg === 'resetar_senha_usuario' && !empty($_POST['usuario_id'])) {
     $id = (int)$_POST['usuario_id'];
     $nova = (string)($_POST['nova_senha'] ?? '');
+
+    // Política atual preservada conforme decisão do projeto.
     if (strlen($nova) < 6) {
         sgl_redirect_cfg('usuarios', 'erro', 'A nova senha deve ter no mínimo 6 caracteres.');
     }
-    $hash = password_hash($nova, PASSWORD_DEFAULT);
-    $stmt = $conn->prepare("UPDATE usuarios SET senha = ?, atualizado_em = NOW() WHERE id = ?");
-    $stmt->bind_param('si', $hash, $id);
-    $stmt->execute();
-    $stmt->close();
-    sgl_log($conn, 'Redefiniu senha de usuário', 'usuarios', (string)$id);
-    sgl_redirect_cfg('usuarios', 'sucesso', 'Senha redefinida com sucesso.');
+
+    try {
+        $hash = password_hash($nova, PASSWORD_DEFAULT);
+        $sqlAtualizacao = sgl_coluna_existe($conn, 'usuarios', 'atualizado_em')
+            ? "UPDATE usuarios SET senha = ?, atualizado_em = NOW() WHERE id = ?"
+            : "UPDATE usuarios SET senha = ? WHERE id = ?";
+
+        $stmt = $conn->prepare($sqlAtualizacao);
+        $stmt->bind_param('si', $hash, $id);
+        $stmt->execute();
+        $stmt->close();
+
+        sgl_log($conn, 'Redefiniu senha de usuário', 'usuarios', (string)$id);
+        sgl_redirect_cfg('usuarios', 'sucesso', 'Senha redefinida com sucesso.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível redefinir a senha.');
+    }
 }
 
 if ($acao_cfg === 'salvar_sistema') {
-    $modo_debug = !empty($_POST['modo_debug']) ? '1' : '0';
-    $dias_alerta = max(1, min(60, (int)($_POST['dias_alerta_prazos'] ?? 7)));
-    $itens_pagina = max(10, min(100, (int)($_POST['itens_por_pagina'] ?? 25)));
-    sgl_cfg_set($conn, 'modo_debug', $modo_debug);
-    sgl_cfg_set($conn, 'dias_alerta_prazos', (string)$dias_alerta);
-    sgl_cfg_set($conn, 'itens_por_pagina', (string)$itens_pagina);
-    sgl_log($conn, 'Atualizou parâmetros do sistema', 'configuracoes');
-    sgl_redirect_cfg('sistema', 'sucesso', 'Parâmetros do sistema salvos.');
+    $modoDebug = !empty($_POST['modo_debug']) ? '1' : '0';
+    $diasAlerta = max(1, min(60, (int)($_POST['dias_alerta_prazos'] ?? 7)));
+    $itensPagina = max(10, min(100, (int)($_POST['itens_por_pagina'] ?? 25)));
+
+    $ambiente = (string)($_POST['ambiente_sistema'] ?? 'desenvolvimento');
+    if (!in_array($ambiente, ['desenvolvimento','homologacao','producao'], true)) {
+        $ambiente = 'desenvolvimento';
+    }
+
+    $plano = (string)($_POST['plano_licenca'] ?? 'enterprise');
+    if (!in_array($plano, ['starter','professional','enterprise'], true)) {
+        $plano = 'enterprise';
+    }
+
+    $statusLicenca = (string)($_POST['status_licenca'] ?? 'ativa');
+    if (!in_array($statusLicenca, ['ativa','teste','suspensa','expirada'], true)) {
+        $statusLicenca = 'ativa';
+    }
+
+    $statusIa = (string)($_POST['status_integracao_ia'] ?? 'desativada');
+    if (!in_array($statusIa, ['desativada','preparada','ativa'], true)) {
+        $statusIa = 'desativada';
+    }
+
+    $provedorIa = (string)($_POST['provedor_ia'] ?? 'nao_definido');
+    if (!in_array($provedorIa, ['nao_definido','openai','anthropic','google','deepseek','outro'], true)) {
+        $provedorIa = 'nao_definido';
+    }
+
+    $limiteUsuarios = max(1, min(100, (int)($_POST['limite_usuarios_licenca'] ?? 100)));
+    $limiteArmazenamento = max(1, min(10000, (int)($_POST['limite_armazenamento_gb'] ?? 50)));
+
+    $dataAtivacao = trim((string)($_POST['data_ativacao_licenca'] ?? ''));
+    $dataRenovacao = trim((string)($_POST['data_renovacao_licenca'] ?? ''));
+
+    foreach ([$dataAtivacao, $dataRenovacao] as $dataLicenca) {
+        if ($dataLicenca !== '') {
+            $objData = DateTime::createFromFormat('Y-m-d', $dataLicenca);
+            if (!$objData || $objData->format('Y-m-d') !== $dataLicenca) {
+                sgl_redirect_cfg('sistema', 'erro', 'Informe datas válidas para a licença.');
+            }
+        }
+    }
+
+    $dominio = strtolower(sgl_limpar_texto((string)($_POST['dominio_saas'] ?? ''), 180));
+    $subdominio = strtolower(preg_replace('/[^a-zA-Z0-9.-]/', '', (string)($_POST['subdominio_saas'] ?? '')));
+    $versaoSistema = sgl_limpar_texto((string)($_POST['versao_sistema'] ?? '4.1.2'), 30);
+    $versaoBanco = sgl_limpar_texto((string)($_POST['versao_banco'] ?? '1.0'), 30);
+
+    $recursosPermitidos = [
+        'recurso_portal_cliente',
+        'recurso_assinatura_digital',
+        'recurso_whatsapp',
+        'recurso_email_automatico',
+        'recurso_cnj',
+        'recurso_bi',
+        'recurso_cij',
+        'recurso_ia',
+    ];
+
+    $configSistema = [
+        'modo_debug' => $modoDebug,
+        'dias_alerta_prazos' => (string)$diasAlerta,
+        'itens_por_pagina' => (string)$itensPagina,
+        'ambiente_sistema' => $ambiente,
+        'versao_sistema' => $versaoSistema,
+        'versao_banco' => $versaoBanco,
+        'plano_licenca' => $plano,
+        'status_licenca' => $statusLicenca,
+        'data_ativacao_licenca' => $dataAtivacao,
+        'data_renovacao_licenca' => $dataRenovacao,
+        'limite_usuarios_licenca' => (string)$limiteUsuarios,
+        'limite_armazenamento_gb' => (string)$limiteArmazenamento,
+        'dominio_saas' => $dominio,
+        'subdominio_saas' => $subdominio,
+        'status_integracao_ia' => $statusIa,
+        'provedor_ia' => $provedorIa,
+        'modo_manutencao_preparado' => !empty($_POST['modo_manutencao_preparado']) ? '1' : '0',
+        'cache_aplicacao_preparado' => !empty($_POST['cache_aplicacao_preparado']) ? '1' : '0',
+        'backup_automatico_preparado' => !empty($_POST['backup_automatico_preparado']) ? '1' : '0',
+    ];
+
+    foreach ($recursosPermitidos as $recurso) {
+        $configSistema[$recurso] = !empty($_POST[$recurso]) ? '1' : '0';
+    }
+
+    foreach ($configSistema as $chaveSistema => $valorSistema) {
+        sgl_cfg_set($conn, $chaveSistema, $valorSistema);
+    }
+
+    sgl_log(
+        $conn,
+        'Atualizou Sistema Enterprise e preparação SaaS',
+        'configuracoes',
+        null,
+        "Ambiente: {$ambiente}; Plano: {$plano}; Licença: {$statusLicenca}; Limite de usuários: {$limiteUsuarios}; IA: {$statusIa}"
+    );
+
+    sgl_redirect_cfg('sistema', 'sucesso', 'Configurações do Sistema Enterprise salvas com sucesso.');
 }
 
 $lixeira_permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos'];
@@ -587,6 +2831,16 @@ if ($acao_cfg === 'esvaziar_lixeira') {
 $config_padrao = [
     'nome_escritorio' => 'SGL Advocacia',
     'razao_social_escritorio' => '',
+    'identificador_escritorio' => '',
+    'codigo_interno_escritorio' => '',
+    'tipo_escritorio' => 'escritorio_advocacia',
+    'status_operacional_escritorio' => 'ativo',
+    'data_inicio_atividades_escritorio' => '',
+    'responsavel_administrativo_escritorio' => '',
+    'email_administrativo_escritorio' => '',
+    'timezone_escritorio' => 'America/Sao_Paulo',
+    'idioma_escritorio' => 'pt-BR',
+    'moeda_escritorio' => 'BRL',
     'inscricao_estadual_escritorio' => '',
     'inscricao_municipal_escritorio' => '',
     'responsavel_escritorio' => '',
@@ -610,20 +2864,87 @@ $config_padrao = [
     'facebook_escritorio' => '',
     'linkedin_escritorio' => '',
     'rodape_documentos' => 'Documento emitido pelo ROJEX.AI',
+    'nome_marca_exibicao' => '',
+    'slogan_marca' => '',
+    'posicao_logo' => 'esquerda',
+    'exibir_nome_menu' => '1',
+    'exibir_slogan_documentos' => '0',
     'cor_primaria' => '#1a3c5e',
     'cor_secundaria' => '#2c6fad',
     'cor_accent' => '#f0a500',
+    'cor_fundo' => '#f4f6f9',
+    'cor_texto' => '#212529',
     'tema_modo' => 'claro',
+    'tema_densidade' => 'confortavel',
+    'tema_bordas' => 'suaves',
+    'tema_fonte_percentual' => '100',
     'modo_debug' => '0',
     'dias_alerta_prazos' => '7',
     'itens_por_pagina' => '25',
     'logo_arquivo' => '',
+    'limite_usuarios_licenca' => '100',
+    'identificador_instalacao' => '',
+    'tenant_id' => '',
+    'chave_instalacao' => '',
+    'ambiente_sistema' => 'desenvolvimento',
+    'versao_sistema' => '4.1.2',
+    'versao_banco' => '1.0',
+    'plano_licenca' => 'enterprise',
+    'status_licenca' => 'ativa',
+    'data_ativacao_licenca' => '',
+    'data_renovacao_licenca' => '',
+    'limite_armazenamento_gb' => '50',
+    'dominio_saas' => '',
+    'subdominio_saas' => '',
+    'status_integracao_ia' => 'desativada',
+    'provedor_ia' => 'nao_definido',
+    'modo_manutencao_preparado' => '0',
+    'cache_aplicacao_preparado' => '0',
+    'backup_automatico_preparado' => '0',
+    'recurso_portal_cliente' => '1',
+    'recurso_assinatura_digital' => '0',
+    'recurso_whatsapp' => '1',
+    'recurso_email_automatico' => '1',
+    'recurso_cnj' => '0',
+    'recurso_bi' => '0',
+    'recurso_cij' => '1',
+    'recurso_ia' => '0',
 ];
 
 $cfg = [];
 foreach ($config_padrao as $chave => $default) {
     $cfg[$chave] = sgl_cfg_get($conn, $chave, $default);
 }
+
+// Identificador técnico permanente: prepara o cadastro para futura vinculação SaaS
+// sem alterar a arquitetura atual nem expor dados sensíveis.
+if ($cfg['identificador_escritorio'] === '') {
+    try {
+        $cfg['identificador_escritorio'] = 'ROJEX-' . strtoupper(bin2hex(random_bytes(4)));
+    } catch (Throwable $e) {
+        $cfg['identificador_escritorio'] = 'ROJEX-' . strtoupper(substr(hash('sha256', uniqid('', true)), 0, 8));
+    }
+    sgl_cfg_set($conn, 'identificador_escritorio', $cfg['identificador_escritorio']);
+}
+
+
+foreach ([
+    'identificador_instalacao' => 'INST',
+    'tenant_id' => 'TENANT',
+    'chave_instalacao' => 'KEY',
+] as $chaveIdentificador => $prefixoIdentificador) {
+    if (($cfg[$chaveIdentificador] ?? '') === '') {
+        try {
+            $sufixoIdentificador = strtoupper(bin2hex(random_bytes(8)));
+        } catch (Throwable $e) {
+            $sufixoIdentificador = strtoupper(substr(hash('sha256', uniqid('', true)), 0, 16));
+        }
+
+        $cfg[$chaveIdentificador] = 'ROJEX-' . $prefixoIdentificador . '-' . $sufixoIdentificador;
+        sgl_cfg_set($conn, $chaveIdentificador, $cfg[$chaveIdentificador]);
+    }
+}
+
 $logo_exibir = $cfg['logo_arquivo'] ? 'assets/img/' . htmlspecialchars($cfg['logo_arquivo'], ENT_QUOTES, 'UTF-8') : 'assets/img/logo_custom.png';
 $lixeira_todos = sgl_buscar_lixeira($conn);
 
@@ -660,7 +2981,17 @@ $backup_resumo = sgl_backup_resumo($conn);
 
 $usuarios = [];
 if (sgl_tabela_existe($conn, 'usuarios')) {
-    $resUsuarios = $conn->query("SELECT id, nome, usuario, email, perfil, ativo, criado_em, ultimo_login FROM usuarios ORDER BY ativo DESC, nome ASC");
+    $camposUsuarios = ['id', 'nome', 'usuario', 'email', 'perfil', 'ativo'];
+
+    foreach (['telefone','cargo','departamento','observacoes','vinculo_status','desligado_em','desligado_por','criado_em','ultimo_login'] as $campoUsuarioOpcional) {
+        if (sgl_coluna_existe($conn, 'usuarios', $campoUsuarioOpcional)) {
+            $camposUsuarios[] = $campoUsuarioOpcional;
+        }
+    }
+
+    $resUsuarios = $conn->query(
+        "SELECT " . implode(', ', $camposUsuarios) . " FROM usuarios ORDER BY ativo DESC, nome ASC"
+    );
     if ($resUsuarios) {
         while ($u = $resUsuarios->fetch_assoc()) {
             $usuarios[] = $u;
@@ -669,17 +3000,89 @@ if (sgl_tabela_existe($conn, 'usuarios')) {
 }
 
 $logs = [];
+$logsRelatorio = [];
+$logDataInicio = trim((string)($_GET['log_data_inicio'] ?? ''));
+$logDataFim = trim((string)($_GET['log_data_fim'] ?? ''));
+$logUsuario = max(0, (int)($_GET['log_usuario'] ?? 0));
+$logModulo = trim((string)($_GET['log_modulo'] ?? ''));
+
 if (sgl_tabela_existe($conn, 'logs_sistema')) {
     try {
-        $resLogs = $conn->query("SELECT l.*, COALESCE(l.usuario_nome, u.nome) AS responsavel_nome, COALESCE(l.usuario_login, u.usuario) AS responsavel_login, COALESCE(l.usuario_perfil, u.perfil) AS responsavel_perfil FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id ORDER BY l.id DESC LIMIT 50");
-        if ($resLogs) {
-            while ($l = $resLogs->fetch_assoc()) { $logs[] = $l; }
+        $whereLogs = [];
+        $tiposLogs = '';
+        $valoresLogs = [];
+
+        if ($logDataInicio !== '') {
+            $whereLogs[] = "l.criado_em >= ?";
+            $tiposLogs .= 's';
+            $valoresLogs[] = $logDataInicio . ' 00:00:00';
+        }
+        if ($logDataFim !== '') {
+            $whereLogs[] = "l.criado_em <= ?";
+            $tiposLogs .= 's';
+            $valoresLogs[] = $logDataFim . ' 23:59:59';
+        }
+        if ($logUsuario > 0) {
+            $whereLogs[] = "l.usuario_id = ?";
+            $tiposLogs .= 'i';
+            $valoresLogs[] = $logUsuario;
+        }
+        if ($logModulo !== '') {
+            $whereLogs[] = "l.tabela = ?";
+            $tiposLogs .= 's';
+            $valoresLogs[] = $logModulo;
+        }
+
+        $sqlLogsBase = "SELECT l.*,
+                               COALESCE(l.usuario_nome, u.nome) AS responsavel_nome,
+                               COALESCE(l.usuario_login, u.usuario) AS responsavel_login,
+                               COALESCE(l.usuario_perfil, u.perfil) AS responsavel_perfil
+                          FROM logs_sistema l
+                     LEFT JOIN usuarios u ON u.id = l.usuario_id";
+
+        if ($whereLogs) {
+            $sqlLogsBase .= " WHERE " . implode(' AND ', $whereLogs);
+        }
+        $sqlLogsBase .= " ORDER BY l.id ASC";
+
+        $stmtLogs = $conn->prepare($sqlLogsBase);
+        if ($tiposLogs !== '') {
+            $stmtLogs->bind_param($tiposLogs, ...$valoresLogs);
+        }
+        $stmtLogs->execute();
+        $resLogs = $stmtLogs->get_result();
+        while ($l = $resLogs->fetch_assoc()) {
+            $logsRelatorio[] = $l;
+        }
+        $stmtLogs->close();
+
+        $logs = array_slice(array_reverse($logsRelatorio), 0, 100);
+    } catch (Throwable $e) {
+        $logs = [];
+        $logsRelatorio = [];
+    }
+}
+
+$logModulosDisponiveis = [];
+if (sgl_tabela_existe($conn, 'logs_sistema')) {
+    try {
+        $resModulosLog = $conn->query("SELECT DISTINCT tabela FROM logs_sistema WHERE tabela IS NOT NULL AND tabela <> '' ORDER BY tabela");
+        if ($resModulosLog) {
+            while ($moduloLog = $resModulosLog->fetch_assoc()) {
+                $logModulosDisponiveis[] = (string)$moduloLog['tabela'];
+            }
         }
     } catch (Throwable $e) {}
 }
 
 $totalUsuarios = count($usuarios);
 $totalAtivos = count(array_filter($usuarios, fn($u) => (int)$u['ativo'] === 1));
+$totalInativos = $totalUsuarios - $totalAtivos;
+$totalAdministradores = count(array_filter($usuarios, fn($u) => in_array($u['perfil'] ?? '', ['Administrador','Administrador Master'], true)));
+$totalAdvogadosUsuarios = count(array_filter($usuarios, fn($u) => ($u['perfil'] ?? '') === 'Advogado'));
+$totalFinanceiroUsuarios = count(array_filter($usuarios, fn($u) => ($u['perfil'] ?? '') === 'Financeiro'));
+$limiteUsuariosLicenca = max(1, min(100, (int)$cfg['limite_usuarios_licenca']));
+$percentualLicencaUsuarios = min(100, (int)round(($totalUsuarios / $limiteUsuariosLicenca) * 100));
 $totalLogs = sgl_select_count($conn, "SELECT COUNT(*) AS total FROM logs_sistema");
 $inventarioLogs = [];
 if (sgl_tabela_existe($conn, 'logs_sistema')) {
@@ -690,7 +3093,585 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
 }
 $totalLixeira = count($lixeira_todos);
 
-$tabs_validas = ['escritorio','marca','tema','usuarios','sistema','lixeira','logs'];
+
+// Sincroniza, sem duplicar, esta instalação com a estrutura SaaS central.
+// O cadastro nasce a partir das configurações homologadas na Sprint 4.1.2.
+$tenantAtualSaas = (string)($cfg['tenant_id'] ?? '');
+$escritorioAtualSaasId = 0;
+if ($tenantAtualSaas !== '' && sgl_tabela_existe($conn, 'escritorios_saas')) {
+    try {
+        $nomeSaas = (string)($cfg['nome_escritorio'] ?: 'Escritório sem nome');
+        $documentoSaas = (string)($cfg['cpf_cnpj_escritorio'] ?? '');
+        $responsavelSaas = (string)($cfg['responsavel_administrativo_escritorio'] ?: $cfg['responsavel_escritorio']);
+        $emailSaas = (string)($cfg['email_administrativo_escritorio'] ?: $cfg['email_escritorio']);
+        $subdominioSaas = (string)($cfg['subdominio_saas'] ?? '');
+        $statusEscritorioSaas = in_array(($cfg['status_operacional_escritorio'] ?? ''), ['ativo','implantacao','suspenso'], true) ? (string)$cfg['status_operacional_escritorio'] : 'implantacao';
+        $planoAtualSaas = in_array(($cfg['plano_licenca'] ?? ''), ['starter','professional','enterprise'], true) ? (string)$cfg['plano_licenca'] : 'enterprise';
+
+        $stmt = $conn->prepare("INSERT INTO escritorios_saas (tenant_id, nome, documento, responsavel, email, subdominio, status, plano) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE nome = VALUES(nome), documento = VALUES(documento), responsavel = VALUES(responsavel), email = VALUES(email), subdominio = VALUES(subdominio), status = VALUES(status), plano = VALUES(plano)");
+        $stmt->bind_param('ssssssss', $tenantAtualSaas, $nomeSaas, $documentoSaas, $responsavelSaas, $emailSaas, $subdominioSaas, $statusEscritorioSaas, $planoAtualSaas);
+        $stmt->execute();
+        $stmt->close();
+
+        $stmt = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
+        $stmt->bind_param('s', $tenantAtualSaas);
+        $stmt->execute();
+        $escritorioAtualSaasId = (int)($stmt->get_result()->fetch_assoc()['id'] ?? 0);
+        $stmt->close();
+
+        $chaveAtualSaas = (string)($cfg['chave_instalacao'] ?? '');
+        if ($escritorioAtualSaasId > 0 && $chaveAtualSaas !== '') {
+            $statusAtualSaas = in_array(($cfg['status_licenca'] ?? ''), ['teste','ativa','suspensa','expirada'], true) ? (string)$cfg['status_licenca'] : 'teste';
+            $limiteUsuariosAtualSaas = max(1, (int)($cfg['limite_usuarios_licenca'] ?? 100));
+            $limiteArmazenamentoAtualSaas = max(1, (int)($cfg['limite_armazenamento_gb'] ?? 50));
+            $ativacaoAtualSaas = ($cfg['data_ativacao_licenca'] ?? '') !== '' ? (string)$cfg['data_ativacao_licenca'] : null;
+            $renovacaoAtualSaas = ($cfg['data_renovacao_licenca'] ?? '') !== '' ? (string)$cfg['data_renovacao_licenca'] : null;
+            $stmt = $conn->prepare("INSERT INTO licencas_saas (escritorio_id, chave_licenca, plano, status, limite_usuarios, limite_armazenamento_gb, ativada_em, renovacao_em, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Licença sincronizada com a instalação atual.') ON DUPLICATE KEY UPDATE escritorio_id = VALUES(escritorio_id), plano = VALUES(plano), limite_usuarios = VALUES(limite_usuarios), limite_armazenamento_gb = VALUES(limite_armazenamento_gb)");
+            $stmt->bind_param('isssiiss', $escritorioAtualSaasId, $chaveAtualSaas, $planoAtualSaas, $statusAtualSaas, $limiteUsuariosAtualSaas, $limiteArmazenamentoAtualSaas, $ativacaoAtualSaas, $renovacaoAtualSaas);
+            $stmt->execute();
+            $stmt->close();
+        }
+    } catch (Throwable $e) {
+        // A sincronização administrativa nunca deve interromper Configurações.
+    }
+}
+
+$escritoriosSaas = [];
+$licencasSaas = [];
+$licencaEditar = null;
+$escritorioEditar = null;
+$escritorioBusca = trim((string)($_GET['escritorio_q'] ?? ''));
+$escritorioStatusFiltro = trim((string)($_GET['escritorio_status'] ?? ''));
+$escritorioPlanoFiltro = trim((string)($_GET['escritorio_plano'] ?? ''));
+if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'escritorios_saas')) {
+    try {
+        $sqlEscritorios = "SELECT e.*,
+            (SELECT COUNT(*) FROM licencas_saas l WHERE l.escritorio_id=e.id) AS total_licencas,
+            (SELECT COUNT(*) FROM licencas_saas l WHERE l.escritorio_id=e.id AND l.status='ativa') AS licencas_ativas
+            FROM escritorios_saas e WHERE 1=1";
+        $tiposEscritorios = '';
+        $valoresEscritorios = [];
+        if ($escritorioBusca !== '') {
+            $sqlEscritorios .= " AND (e.nome LIKE ? OR e.tenant_id LIKE ? OR e.documento LIKE ? OR e.responsavel LIKE ?)";
+            $buscaLike = '%' . $escritorioBusca . '%';
+            $tiposEscritorios .= 'ssss';
+            array_push($valoresEscritorios, $buscaLike, $buscaLike, $buscaLike, $buscaLike);
+        }
+        if (in_array($escritorioStatusFiltro, ['implantacao','ativo','suspenso','bloqueado','encerrado'], true)) {
+            $sqlEscritorios .= " AND e.status = ?";
+            $tiposEscritorios .= 's';
+            $valoresEscritorios[] = $escritorioStatusFiltro;
+        }
+        if (in_array($escritorioPlanoFiltro, ['starter','professional','enterprise'], true)) {
+            $sqlEscritorios .= " AND e.plano = ?";
+            $tiposEscritorios .= 's';
+            $valoresEscritorios[] = $escritorioPlanoFiltro;
+        }
+        $sqlEscritorios .= " ORDER BY e.status='ativo' DESC, e.nome ASC";
+        $stmtEscritorios = $conn->prepare($sqlEscritorios);
+        if ($tiposEscritorios !== '') { $stmtEscritorios->bind_param($tiposEscritorios, ...$valoresEscritorios); }
+        $stmtEscritorios->execute();
+        $res = $stmtEscritorios->get_result();
+        if ($res) { while ($row = $res->fetch_assoc()) { $escritoriosSaas[] = $row; } }
+        $stmtEscritorios->close();
+
+        $editarEscritorioId = max(0, (int)($_GET['editar_escritorio'] ?? 0));
+        if ($editarEscritorioId > 0) {
+            $stmtEditarEscritorio = $conn->prepare("SELECT * FROM escritorios_saas WHERE id=? LIMIT 1");
+            $stmtEditarEscritorio->bind_param('i', $editarEscritorioId);
+            $stmtEditarEscritorio->execute();
+            $escritorioEditar = $stmtEditarEscritorio->get_result()->fetch_assoc() ?: null;
+            $stmtEditarEscritorio->close();
+        }
+    } catch (Throwable $e) {}
+}
+if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'licencas_saas')) {
+    try {
+        $res = $conn->query("SELECT l.*, e.nome AS escritorio_nome, e.tenant_id FROM licencas_saas l LEFT JOIN escritorios_saas e ON e.id = l.escritorio_id ORDER BY l.id DESC");
+        if ($res) { while ($row = $res->fetch_assoc()) { $licencasSaas[] = $row; } }
+        $editarLicencaId = max(0, (int)($_GET['editar_licenca'] ?? 0));
+        if ($editarLicencaId > 0) {
+            foreach ($licencasSaas as $licencaItem) {
+                if ((int)$licencaItem['id'] === $editarLicencaId) { $licencaEditar = $licencaItem; break; }
+            }
+        }
+    } catch (Throwable $e) {}
+}
+
+
+// Histórico de usuários desligados — Sprint 4.1.3 / Etapa 4.
+$usuariosDesligados = [];
+$historicoUsuariosDesligados = [];
+$desligadoBusca = trim((string)($_GET['desligado_q'] ?? ''));
+$desligadoAcao = trim((string)($_GET['desligado_acao'] ?? ''));
+$desligadoDataInicio = trim((string)($_GET['desligado_data_inicio'] ?? ''));
+$desligadoDataFim = trim((string)($_GET['desligado_data_fim'] ?? ''));
+
+if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'usuarios')) {
+    try {
+        $where = [];
+        $tipos = '';
+        $valores = [];
+        if (sgl_coluna_existe($conn, 'usuarios', 'vinculo_status')) {
+            $where[] = "u.vinculo_status = 'encerrado'";
+        } elseif (sgl_coluna_existe($conn, 'usuarios', 'ativo')) {
+            $where[] = "u.ativo = 0";
+        }
+        if ($desligadoBusca !== '') {
+            $where[] = "(u.nome LIKE ? OR u.usuario LIKE ? OR u.email LIKE ? OR u.perfil LIKE ?)";
+            $like = '%' . $desligadoBusca . '%';
+            $tipos .= 'ssss';
+            array_push($valores, $like, $like, $like, $like);
+        }
+        if ($desligadoDataInicio !== '' && sgl_coluna_existe($conn, 'usuarios', 'desligado_em')) {
+            $where[] = "u.desligado_em >= ?";
+            $tipos .= 's';
+            $valores[] = $desligadoDataInicio . ' 00:00:00';
+        }
+        if ($desligadoDataFim !== '' && sgl_coluna_existe($conn, 'usuarios', 'desligado_em')) {
+            $where[] = "u.desligado_em <= ?";
+            $tipos .= 's';
+            $valores[] = $desligadoDataFim . ' 23:59:59';
+        }
+        $campos = ['u.id','u.nome','u.usuario','u.email','u.perfil','u.ativo'];
+        foreach (['telefone','cargo','departamento','observacoes','vinculo_status','desligado_em','desligado_por','criado_em','ultimo_login'] as $campo) {
+            if (sgl_coluna_existe($conn, 'usuarios', $campo)) $campos[] = 'u.`' . $campo . '`';
+        }
+        $sql = "SELECT " . implode(', ', $campos) . ", d.nome AS desligado_por_nome FROM usuarios u LEFT JOIN usuarios d ON d.id = u.desligado_por";
+        if ($where) $sql .= " WHERE " . implode(' AND ', $where);
+        $sql .= sgl_coluna_existe($conn, 'usuarios', 'desligado_em') ? " ORDER BY u.desligado_em DESC, u.id DESC" : " ORDER BY u.id DESC";
+        $stmt = $conn->prepare($sql);
+        if ($tipos !== '') $stmt->bind_param($tipos, ...$valores);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        while ($row = $res->fetch_assoc()) $usuariosDesligados[] = $row;
+        $stmt->close();
+    } catch (Throwable $e) { $usuariosDesligados = []; }
+}
+
+if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'usuarios_historico')) {
+    try {
+        $where = [];
+        $tipos = '';
+        $valores = [];
+        if ($desligadoAcao !== '') { $where[] = 'h.acao = ?'; $tipos .= 's'; $valores[] = $desligadoAcao; }
+        if ($desligadoDataInicio !== '') { $where[] = 'h.criado_em >= ?'; $tipos .= 's'; $valores[] = $desligadoDataInicio . ' 00:00:00'; }
+        if ($desligadoDataFim !== '') { $where[] = 'h.criado_em <= ?'; $tipos .= 's'; $valores[] = $desligadoDataFim . ' 23:59:59'; }
+        $sql = "SELECT h.* FROM usuarios_historico h" . ($where ? " WHERE " . implode(' AND ', $where) : '') . " ORDER BY h.id DESC LIMIT 500";
+        $stmt = $conn->prepare($sql);
+        if ($tipos !== '') $stmt->bind_param($tipos, ...$valores);
+        $stmt->execute();
+        $res = $stmt->get_result();
+        while ($row = $res->fetch_assoc()) {
+            $dados = json_decode((string)$row['dados_snapshot'], true);
+            $row['snapshot'] = is_array($dados) ? $dados : [];
+            if ($desligadoBusca !== '') {
+                $alvo = mb_strtolower(json_encode($row['snapshot'], JSON_UNESCAPED_UNICODE) . ' ' . ($row['realizado_por_nome'] ?? '') . ' ' . ($row['acao'] ?? ''), 'UTF-8');
+                if (mb_strpos($alvo, mb_strtolower($desligadoBusca, 'UTF-8')) === false) continue;
+            }
+            $historicoUsuariosDesligados[] = $row;
+        }
+        $stmt->close();
+    } catch (Throwable $e) { $historicoUsuariosDesligados = []; }
+}
+
+// Indicadores consolidados do painel MASTER da Sprint 4.1.3.
+$totalEscritoriosSaas = sgl_tabela_existe($conn, 'escritorios_saas')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM escritorios_saas") : 0;
+$totalEscritoriosAtivos = sgl_tabela_existe($conn, 'escritorios_saas')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM escritorios_saas WHERE status = 'ativo'") : 0;
+$totalLicencasSaas = sgl_tabela_existe($conn, 'licencas_saas')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM licencas_saas") : 0;
+$totalLicencasAtivas = sgl_tabela_existe($conn, 'licencas_saas')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM licencas_saas WHERE status = 'ativa'") : 0;
+$totalUsuariosDesligados = sgl_tabela_existe($conn, 'usuarios') && sgl_coluna_existe($conn, 'usuarios', 'vinculo_status')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM usuarios WHERE vinculo_status = 'encerrado'") : 0;
+$totalBackupsRegistrados = sgl_tabela_existe($conn, 'backups_sistema')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM backups_sistema") : 0;
+$totalAtualizacoesPendentes = sgl_tabela_existe($conn, 'atualizacoes_sistema')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM atualizacoes_sistema WHERE status IN ('planejada','disponivel')") : 0;
+
+// -----------------------------------------------------------------------------
+// Diagnóstico Enterprise e saúde do sistema
+// -----------------------------------------------------------------------------
+$versaoBancoServidor = '-';
+$charsetBanco = '-';
+try {
+    $resVersaoBanco = $conn->query("SELECT VERSION() AS versao");
+    if ($resVersaoBanco) {
+        $versaoBancoServidor = (string)($resVersaoBanco->fetch_assoc()['versao'] ?? '-');
+    }
+
+    $resCharset = $conn->query("SELECT @@character_set_database AS charset_banco");
+    if ($resCharset) {
+        $charsetBanco = (string)($resCharset->fetch_assoc()['charset_banco'] ?? '-');
+    }
+} catch (Throwable $e) {}
+
+$servidorWeb = (string)($_SERVER['SERVER_SOFTWARE'] ?? 'Não identificado');
+$httpsAtivo = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+    || ((string)($_SERVER['SERVER_PORT'] ?? '') === '443');
+
+$limiteMemoriaPhp = (string)ini_get('memory_limit');
+$uploadMaximoPhp = (string)ini_get('upload_max_filesize');
+$postMaximoPhp = (string)ini_get('post_max_size');
+$tempoExecucaoPhp = (string)ini_get('max_execution_time');
+$timezonePhp = (string)date_default_timezone_get();
+
+$espacoTotalDisco = @disk_total_space(__DIR__) ?: 0;
+$espacoLivreDisco = @disk_free_space(__DIR__) ?: 0;
+$espacoUsadoDisco = max(0, $espacoTotalDisco - $espacoLivreDisco);
+$percentualDisco = $espacoTotalDisco > 0
+    ? min(100, (int)round(($espacoUsadoDisco / $espacoTotalDisco) * 100))
+    : 0;
+
+$diagnosticoModulos = [
+    'Clientes' => sgl_tabela_existe($conn, 'clientes') ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM clientes") : 0,
+    'Advogados' => sgl_tabela_existe($conn, 'advogados') ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM advogados") : 0,
+    'Processos' => sgl_tabela_existe($conn, 'processos') ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM processos") : 0,
+    'Agenda' => sgl_tabela_existe($conn, 'agenda') ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM agenda") : 0,
+    'Documentos' => sgl_tabela_existe($conn, 'documentos_arquivos') ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM documentos_arquivos") : 0,
+    'Modelos' => sgl_tabela_existe($conn, 'modelos_documentos') ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM modelos_documentos") : 0,
+    'Contas a Pagar' => sgl_tabela_existe($conn, 'contas_pagar') ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM contas_pagar") : 0,
+    'Contas a Receber' => sgl_tabela_existe($conn, 'contas_receber') ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM contas_receber") : 0,
+    'Usuários' => $totalUsuarios,
+    'LOG' => $totalLogs,
+    'Lixeira' => $totalLixeira,
+];
+
+$segurancaSistema = [
+    'CSRF' => function_exists('gerarTokenCsrf') && function_exists('validarTokenCsrf'),
+    'Hash de senha' => function_exists('password_hash') && defined('PASSWORD_DEFAULT'),
+    'LOG Enterprise' => sgl_tabela_existe($conn, 'logs_sistema'),
+    'Lixeira Enterprise' => function_exists('sgl_buscar_lixeira'),
+    'Histórico de usuários' => sgl_tabela_existe($conn, 'usuarios_historico'),
+    'HTTPS' => $httpsAtivo,
+    'Banco conectado' => $conn->ping(),
+];
+
+$totalChecksSeguranca = count($segurancaSistema);
+$checksSegurancaOk = count(array_filter($segurancaSistema));
+$percentualSaude = $totalChecksSeguranca > 0
+    ? (int)round(($checksSegurancaOk / $totalChecksSeguranca) * 100)
+    : 0;
+
+
+// -----------------------------------------------------------------------------
+// Painel de Saúde Consolidado — Sprint 4.1.3 / Etapa 6
+// -----------------------------------------------------------------------------
+$inicioDiagnosticoSaude = microtime(true);
+$memoriaAtualBytes = memory_get_usage(true);
+$memoriaPicoBytes = memory_get_peak_usage(true);
+$opcacheAtivo = function_exists('opcache_get_status') && (bool)@opcache_get_status(false);
+$extensoesObrigatorias = ['mysqli','mbstring','json','openssl','fileinfo','session'];
+$extensoesStatus = [];
+foreach ($extensoesObrigatorias as $extensaoObrigatoria) {
+    $extensoesStatus[$extensaoObrigatoria] = extension_loaded($extensaoObrigatoria);
+}
+
+$totalTabelasBanco = 0;
+$tamanhoBancoBytes = 0;
+$tempoConsultaMs = 0.0;
+try {
+    $inicioConsultaSaude = microtime(true);
+    $resBancoSaude = $conn->query("SELECT COUNT(*) AS total_tabelas,
+        COALESCE(SUM(data_length + index_length),0) AS tamanho_bytes
+        FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()");
+    $tempoConsultaMs = round((microtime(true) - $inicioConsultaSaude) * 1000, 2);
+    if ($resBancoSaude) {
+        $dadosBancoSaude = $resBancoSaude->fetch_assoc();
+        $totalTabelasBanco = (int)($dadosBancoSaude['total_tabelas'] ?? 0);
+        $tamanhoBancoBytes = (float)($dadosBancoSaude['tamanho_bytes'] ?? 0);
+    }
+} catch (Throwable $e) {}
+
+$pastasCriticasSaude = [
+    'assets/img' => __DIR__ . '/../assets/img',
+    'uploads' => __DIR__ . '/../uploads',
+    'config' => __DIR__ . '/../config',
+];
+$pastasStatusSaude = [];
+foreach ($pastasCriticasSaude as $nomePastaSaude => $caminhoPastaSaude) {
+    $pastasStatusSaude[$nomePastaSaude] = [
+        'existe' => is_dir($caminhoPastaSaude),
+        'gravavel' => is_dir($caminhoPastaSaude) ? is_writable($caminhoPastaSaude) : false,
+    ];
+}
+
+$licencasProblematicas = sgl_tabela_existe($conn, 'licencas_saas')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM licencas_saas WHERE status IN ('suspensa','expirada','cancelada')") : 0;
+$escritoriosProblematicos = sgl_tabela_existe($conn, 'escritorios_saas')
+    ? sgl_select_count($conn, "SELECT COUNT(*) AS total FROM escritorios_saas WHERE status IN ('suspenso','bloqueado','encerrado')") : 0;
+
+$checksSaudeConsolidada = [];
+$adicionarCheckSaude = static function (array &$destino, string $categoria, string $item, string $valor, string $nivel, string $recomendacao): void {
+    $destino[] = compact('categoria','item','valor','nivel','recomendacao');
+};
+
+$adicionarCheckSaude($checksSaudeConsolidada, 'Servidor', 'PHP', PHP_VERSION, version_compare(PHP_VERSION, '8.0.0', '>=') ? 'excelente' : 'critico', 'Utilize PHP 8.0 ou superior.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'Servidor', 'HTTPS', $httpsAtivo ? 'Ativo' : 'Inativo', $httpsAtivo ? 'excelente' : (($cfg['ambiente_sistema'] ?? '') === 'producao' ? 'critico' : 'atencao'), 'Ative SSL obrigatoriamente no ambiente de produção.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'Servidor', 'OPcache', $opcacheAtivo ? 'Ativo' : 'Inativo', $opcacheAtivo ? 'excelente' : 'atencao', 'Habilite OPcache na Hostinger para melhorar o desempenho.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'PHP', 'Memória', $limiteMemoriaPhp, sgl_ini_bytes($limiteMemoriaPhp) >= 128*1024*1024 ? 'excelente' : 'atencao', 'Recomendado: memory_limit de pelo menos 128M.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'PHP', 'Upload máximo', $uploadMaximoPhp, sgl_ini_bytes($uploadMaximoPhp) >= 16*1024*1024 ? 'excelente' : 'atencao', 'Recomendado: upload_max_filesize de pelo menos 16M.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'PHP', 'POST máximo', $postMaximoPhp, sgl_ini_bytes($postMaximoPhp) >= 16*1024*1024 ? 'excelente' : 'atencao', 'Recomendado: post_max_size de pelo menos 16M.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'Banco', 'Conexão', $conn->ping() ? 'Conectado' : 'Falha', $conn->ping() ? 'excelente' : 'critico', 'Verifique as credenciais e a disponibilidade do MySQL/MariaDB.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'Banco', 'Charset', $charsetBanco, $charsetBanco === 'utf8mb4' ? 'excelente' : 'atencao', 'Utilize utf8mb4 para compatibilidade completa com caracteres.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'Banco', 'Tempo de consulta', number_format($tempoConsultaMs, 2, ',', '.') . ' ms', $tempoConsultaMs <= 100 ? 'excelente' : ($tempoConsultaMs <= 500 ? 'atencao' : 'critico'), 'Investigue consultas e índices se o tempo permanecer elevado.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'Armazenamento', 'Disco utilizado', $percentualDisco . '%', $percentualDisco < 80 ? 'excelente' : ($percentualDisco < 90 ? 'atencao' : 'critico'), 'Mantenha pelo menos 20% do disco livre.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'SaaS', 'Licenças com atenção', (string)$licencasProblematicas, $licencasProblematicas === 0 ? 'excelente' : 'atencao', 'Revise licenças suspensas, expiradas ou canceladas.');
+$adicionarCheckSaude($checksSaudeConsolidada, 'SaaS', 'Escritórios com atenção', (string)$escritoriosProblematicos, $escritoriosProblematicos === 0 ? 'excelente' : 'atencao', 'Revise escritórios suspensos, bloqueados ou encerrados.');
+
+foreach ($extensoesStatus as $extensaoSaude => $ativaExtensaoSaude) {
+    $adicionarCheckSaude($checksSaudeConsolidada, 'PHP', 'Extensão ' . $extensaoSaude, $ativaExtensaoSaude ? 'Carregada' : 'Ausente', $ativaExtensaoSaude ? 'excelente' : 'critico', 'Habilite a extensão ' . $extensaoSaude . '.');
+}
+foreach ($pastasStatusSaude as $nomePastaSaude => $statusPastaSaude) {
+    $nivelPastaSaude = !$statusPastaSaude['existe'] ? 'atencao' : ($statusPastaSaude['gravavel'] ? 'excelente' : 'atencao');
+    $valorPastaSaude = !$statusPastaSaude['existe'] ? 'Não localizada' : ($statusPastaSaude['gravavel'] ? 'Gravável' : 'Somente leitura');
+    $adicionarCheckSaude($checksSaudeConsolidada, 'Permissões', $nomePastaSaude, $valorPastaSaude, $nivelPastaSaude, 'Confirme existência e permissões adequadas na hospedagem.');
+}
+
+$quantidadeExcelenteSaude = count(array_filter($checksSaudeConsolidada, static fn($c) => $c['nivel'] === 'excelente'));
+$quantidadeAtencaoSaude = count(array_filter($checksSaudeConsolidada, static fn($c) => $c['nivel'] === 'atencao'));
+$quantidadeCriticoSaude = count(array_filter($checksSaudeConsolidada, static fn($c) => $c['nivel'] === 'critico'));
+$totalChecksSaudeConsolidada = count($checksSaudeConsolidada);
+$pontuacaoSaudeConsolidada = $totalChecksSaudeConsolidada > 0
+    ? max(0, (int)round((($quantidadeExcelenteSaude + ($quantidadeAtencaoSaude * 0.5)) / $totalChecksSaudeConsolidada) * 100))
+    : 0;
+$tempoRespostaDiagnosticoMs = round((microtime(true) - $inicioDiagnosticoSaude) * 1000, 2);
+
+
+// -----------------------------------------------------------------------------
+// Relatórios Administrativos Enterprise — Sprint 4.1.3 / Etapa 5
+// -----------------------------------------------------------------------------
+$relatorioTipo = trim((string)($_GET['relatorio_tipo'] ?? 'resumo'));
+$relatorioDataInicio = trim((string)($_GET['relatorio_data_inicio'] ?? ''));
+$relatorioDataFim = trim((string)($_GET['relatorio_data_fim'] ?? ''));
+$relatorioFormato = trim((string)($_GET['relatorio_exportar'] ?? ''));
+
+$tiposRelatorioPermitidos = ['resumo','escritorios','licencas','usuarios','desligados','saude'];
+if (!in_array($relatorioTipo, $tiposRelatorioPermitidos, true)) {
+    $relatorioTipo = 'resumo';
+}
+foreach ([$relatorioDataInicio, $relatorioDataFim] as $dataRelatorio) {
+    if ($dataRelatorio !== '') {
+        $objDataRelatorio = DateTime::createFromFormat('Y-m-d', $dataRelatorio);
+        if (!$objDataRelatorio || $objDataRelatorio->format('Y-m-d') !== $dataRelatorio) {
+            $relatorioDataInicio = '';
+            $relatorioDataFim = '';
+            break;
+        }
+    }
+}
+
+if ($ehUsuarioMaster) {
+    $tituloRelatorio = 'Relatório Administrativo';
+    $cabecalhosRelatorio = [];
+    $linhasRelatorio = [];
+
+    $dentroPeriodo = static function (?string $data) use ($relatorioDataInicio, $relatorioDataFim): bool {
+        if (!$data) return $relatorioDataInicio === '' && $relatorioDataFim === '';
+        $dia = substr($data, 0, 10);
+        if ($relatorioDataInicio !== '' && $dia < $relatorioDataInicio) return false;
+        if ($relatorioDataFim !== '' && $dia > $relatorioDataFim) return false;
+        return true;
+    };
+
+    if ($relatorioTipo === 'escritorios') {
+        $tituloRelatorio = 'Relatório de Escritórios SaaS';
+        $cabecalhosRelatorio = ['Tenant ID','Escritório','Documento','Responsável','Plano','Status','Licenças','Criado em'];
+        foreach ($escritoriosSaas as $itemRelatorio) {
+            if (!$dentroPeriodo($itemRelatorio['criado_em'] ?? null)) continue;
+            $linhasRelatorio[] = [
+                $itemRelatorio['tenant_id'] ?? '',
+                $itemRelatorio['nome'] ?? '',
+                $itemRelatorio['documento'] ?? '',
+                $itemRelatorio['responsavel'] ?? '',
+                ucfirst((string)($itemRelatorio['plano'] ?? '')),
+                ucfirst((string)($itemRelatorio['status'] ?? '')),
+                $itemRelatorio['total_licencas'] ?? 0,
+                !empty($itemRelatorio['criado_em']) ? date('d/m/Y H:i', strtotime($itemRelatorio['criado_em'])) : '',
+            ];
+        }
+    } elseif ($relatorioTipo === 'licencas') {
+        $tituloRelatorio = 'Relatório de Licenças SaaS';
+        $cabecalhosRelatorio = ['Chave','Escritório','Plano','Status','Usuários','Armazenamento','Ativação','Renovação'];
+        foreach ($licencasSaas as $itemRelatorio) {
+            if (!$dentroPeriodo($itemRelatorio['criado_em'] ?? null)) continue;
+            $linhasRelatorio[] = [
+                $itemRelatorio['chave_licenca'] ?? '',
+                $itemRelatorio['escritorio_nome'] ?? 'Sem vínculo',
+                ucfirst((string)($itemRelatorio['plano'] ?? '')),
+                ucfirst((string)($itemRelatorio['status'] ?? '')),
+                $itemRelatorio['limite_usuarios'] ?? 0,
+                ($itemRelatorio['limite_armazenamento_gb'] ?? 0) . ' GB',
+                !empty($itemRelatorio['ativada_em']) ? date('d/m/Y', strtotime($itemRelatorio['ativada_em'])) : '',
+                !empty($itemRelatorio['renovacao_em']) ? date('d/m/Y', strtotime($itemRelatorio['renovacao_em'])) : '',
+            ];
+        }
+    } elseif ($relatorioTipo === 'usuarios') {
+        $tituloRelatorio = 'Relatório de Usuários';
+        $cabecalhosRelatorio = ['Nome','Login','E-mail','Perfil','Status','Vínculo','Criado em','Último login'];
+        foreach ($usuarios as $itemRelatorio) {
+            if (!$dentroPeriodo($itemRelatorio['criado_em'] ?? null)) continue;
+            $linhasRelatorio[] = [
+                $itemRelatorio['nome'] ?? '',
+                $itemRelatorio['usuario'] ?? '',
+                $itemRelatorio['email'] ?? '',
+                $itemRelatorio['perfil'] ?? '',
+                !empty($itemRelatorio['ativo']) ? 'Ativo' : 'Inativo',
+                $itemRelatorio['vinculo_status'] ?? 'ativo',
+                !empty($itemRelatorio['criado_em']) ? date('d/m/Y H:i', strtotime($itemRelatorio['criado_em'])) : '',
+                !empty($itemRelatorio['ultimo_login']) ? date('d/m/Y H:i', strtotime($itemRelatorio['ultimo_login'])) : '',
+            ];
+        }
+    } elseif ($relatorioTipo === 'desligados') {
+        $tituloRelatorio = 'Relatório de Usuários Desligados';
+        $cabecalhosRelatorio = ['Nome','Login','E-mail','Perfil','Desligado em','Responsável','Ação','IP'];
+        foreach ($usuariosDesligados as $itemRelatorio) {
+            $dataReferencia = $itemRelatorio['historico_criado_em'] ?? $itemRelatorio['desligado_em'] ?? null;
+            if (!$dentroPeriodo($dataReferencia)) continue;
+            $linhasRelatorio[] = [
+                $itemRelatorio['nome'] ?? '',
+                $itemRelatorio['usuario'] ?? '',
+                $itemRelatorio['email'] ?? '',
+                $itemRelatorio['perfil'] ?? '',
+                !empty($dataReferencia) ? date('d/m/Y H:i', strtotime($dataReferencia)) : '',
+                $itemRelatorio['realizado_por_nome'] ?? $itemRelatorio['desligado_por_nome'] ?? 'Não identificado',
+                $itemRelatorio['historico_acao'] ?? 'ENCERRAMENTO_DE_VINCULO',
+                $itemRelatorio['historico_ip'] ?? '',
+            ];
+        }
+    } elseif ($relatorioTipo === 'saude') {
+        $tituloRelatorio = 'Relatório de Saúde do Sistema';
+        $cabecalhosRelatorio = ['Indicador','Resultado','Situação'];
+        $linhasRelatorio[] = ['Saúde geral', $percentualSaude . '%', $percentualSaude >= 85 ? 'Saudável' : 'Atenção'];
+        $linhasRelatorio[] = ['PHP', PHP_VERSION, version_compare(PHP_VERSION, '8.0.0', '>=') ? 'Compatível' : 'Atualizar'];
+        $linhasRelatorio[] = ['MySQL/MariaDB', $versaoBancoServidor, 'Conectado'];
+        $linhasRelatorio[] = ['HTTPS', $httpsAtivo ? 'Ativo' : 'Inativo', $httpsAtivo ? 'OK' : 'Atenção no deploy'];
+        $linhasRelatorio[] = ['Espaço em disco usado', $percentualDisco . '%', $percentualDisco < 85 ? 'OK' : 'Atenção'];
+        foreach ($segurancaSistema as $nomeCheck => $statusCheck) {
+            $linhasRelatorio[] = [$nomeCheck, $statusCheck ? 'Ativo' : 'Inativo', $statusCheck ? 'OK' : 'Atenção'];
+        }
+    } else {
+        $tituloRelatorio = 'Resumo Administrativo Consolidado';
+        $cabecalhosRelatorio = ['Indicador','Quantidade/Situação'];
+        $linhasRelatorio = [
+            ['Escritórios SaaS', count($escritoriosSaas)],
+            ['Licenças SaaS', count($licencasSaas)],
+            ['Usuários cadastrados', $totalUsuarios],
+            ['Usuários ativos', $totalAtivos],
+            ['Usuários desligados', count($usuariosDesligados)],
+            ['Eventos no LOG', $totalLogs],
+            ['Itens na lixeira', $totalLixeira],
+            ['Saúde do sistema', $percentualSaude . '%'],
+            ['Ambiente', $cfg['ambiente_sistema'] ?? 'desenvolvimento'],
+            ['Versão do sistema', $cfg['versao_sistema'] ?? ''],
+        ];
+    }
+
+    $periodoDescricao = ($relatorioDataInicio || $relatorioDataFim)
+        ? 'Período: ' . ($relatorioDataInicio ? date('d/m/Y', strtotime($relatorioDataInicio)) : 'início') . ' até ' . ($relatorioDataFim ? date('d/m/Y', strtotime($relatorioDataFim)) : 'hoje')
+        : 'Período: todos os registros';
+
+    sgl_log($conn, 'Exportou relatório administrativo', 'relatorios_administrativos', null, "Tipo: {$relatorioTipo}; Formato: {$relatorioFormato}; {$periodoDescricao}");
+
+    $nomeArquivoRelatorio = 'rojex_' . $relatorioTipo . '_' . date('Ymd_His');
+
+    // A exportação é executada no navegador para evitar "headers already sent",
+    // pois este módulo é carregado após o layout principal do index.php.
+}
+
+
+$manutencaoPreview = $_SESSION['rojex_manutencao_preview'] ?? null;
+$manutencaoUltimoResultado = $_SESSION['rojex_manutencao_ultimo_resultado'] ?? null;
+unset($_SESSION['rojex_manutencao_ultimo_resultado']);
+
+$manutencoesRecentes = [];
+if (sgl_tabela_existe($conn, 'manutencoes_sistema')) {
+    try {
+        $resManutencoes = $conn->query(
+            "SELECT id, tipo, modo, status, resumo, executado_por_nome, criado_em
+               FROM manutencoes_sistema
+              ORDER BY id DESC
+              LIMIT 20"
+        );
+        if ($resManutencoes) {
+            while ($rowManutencao = $resManutencoes->fetch_assoc()) {
+                $manutencoesRecentes[] = $rowManutencao;
+            }
+        }
+    } catch (Throwable $e) {}
+}
+
+$manutencaoDiretorios = rojex_manutencao_diretorios_permitidos();
+$manutencaoTabelas = rojex_manutencao_tabelas($conn);
+
+
+$backupPreview = $_SESSION['rojex_backup_preview'] ?? null;
+$backupUltimoResultado = $_SESSION['rojex_backup_ultimo_resultado'] ?? null;
+unset($_SESSION['rojex_backup_ultimo_resultado']);
+
+$backupsRecentes = [];
+if (sgl_tabela_existe($conn, 'backups_sistema')) {
+    try {
+        $resBackups = $conn->query(
+            "SELECT id,tipo,status,arquivo,nome_original,tamanho_bytes,hash_arquivo,escopo,
+                    quantidade_arquivos,responsavel_nome,criado_em,verificado_em,verificacao_status
+               FROM backups_sistema
+              ORDER BY id DESC
+              LIMIT 30"
+        );
+        if ($resBackups) {
+            while ($rowBackup = $resBackups->fetch_assoc()) {
+                $backupsRecentes[] = $rowBackup;
+            }
+        }
+    } catch (Throwable $e) {}
+}
+
+$backupDiretorio = rojex_backup_diretorio();
+$backupZipDisponivel = class_exists('ZipArchive');
+
+
+$atualizacaoPreview = $_SESSION['rojex_atualizacao_preview'] ?? null;
+$atualizacoesLista = [];
+
+if (sgl_tabela_existe($conn, 'atualizacoes_sistema')) {
+    try {
+        $resAtualizacoes = $conn->query(
+            "SELECT *
+               FROM atualizacoes_sistema
+              ORDER BY
+                CASE status
+                    WHEN 'disponivel' THEN 1
+                    WHEN 'homologacao' THEN 2
+                    WHEN 'planejada' THEN 3
+                    WHEN 'instalada' THEN 4
+                    ELSE 5
+                END,
+                id DESC"
+        );
+        if ($resAtualizacoes) {
+            while ($rowAtualizacao = $resAtualizacoes->fetch_assoc()) {
+                $atualizacoesLista[] = $rowAtualizacao;
+            }
+        }
+    } catch (Throwable $e) {}
+}
+
+$versaoSistemaAtual = rojex_atualizacao_versao_atual($conn);
+$ambienteSistemaAtual = rojex_atualizacao_ambiente($conn);
+$versaoBancoAtual = rojex_atualizacao_banco_versao($conn);
+$backupAtualizacaoRecente = rojex_atualizacao_backup_recente($conn, 30);
+$totalAtualizacoesDisponiveis = 0;
+$totalAtualizacoesInstaladas = 0;
+foreach ($atualizacoesLista as $atualizacaoContador) {
+    if ($atualizacaoContador['status'] === 'disponivel') $totalAtualizacoesDisponiveis++;
+    if ($atualizacaoContador['status'] === 'instalada') $totalAtualizacoesInstaladas++;
+}
+
+$tabs_validas = ['escritorio','marca','tema','usuarios','sistema','administracao','desligados','relatorios','saude','manutencao','backup','atualizacoes','lixeira','logs'];
+
 if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 ?>
 
@@ -726,10 +3707,18 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         'tema' => ['Tema','bi-palette'],
         'usuarios' => ['Usuários','bi-people'],
         'sistema' => ['Sistema','bi-sliders'],
+        'administracao' => ['Administração','bi-shield-lock-fill'],
+        'desligados' => ['Desligados','bi-person-x-fill'],
+        'relatorios' => ['Relatórios','bi-file-earmark-bar-graph-fill'],
+        'saude' => ['Saúde','bi-heart-pulse-fill'],
+        'manutencao' => ['Manutenção','bi-tools'],
+        'backup' => ['Backup','bi-cloud-arrow-up-fill'],
+        'atualizacoes' => ['Atualizações','bi-arrow-repeat'],
         'lixeira' => ['Lixeira','bi-trash3'],
         'logs' => ['Logs','bi-clock-history'],
     ];
     foreach ($tabDefs as $id => $tab) :
+        if (in_array($id, ['usuarios','sistema','administracao','desligados','relatorios','saude','manutencao','backup','atualizacoes','logs'], true) && !$ehUsuarioMaster) { continue; }
         $active = $tab_ativa === $id ? 'active' : '';
         $badge = ($id === 'lixeira' && $totalLixeira > 0) ? '<span class="badge bg-danger ms-1">' . $totalLixeira . '</span>' : '';
     ?>
@@ -751,9 +3740,27 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
             <div class="row g-3">
                 <div class="col-md-6"><label class="form-label">Nome fantasia / Escritório</label><input name="nome_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['nome_escritorio'])?>"></div>
                 <div class="col-md-6"><label class="form-label">Razão social</label><input name="razao_social_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['razao_social_escritorio'])?>"></div>
-                <div class="col-md-4"><label class="form-label">CPF/CNPJ</label><input name="cpf_cnpj_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['cpf_cnpj_escritorio'])?>"></div>
-                <div class="col-md-4"><label class="form-label">Inscrição Estadual</label><input name="inscricao_estadual_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['inscricao_estadual_escritorio'])?>"></div>
-                <div class="col-md-4"><label class="form-label">Inscrição Municipal</label><input name="inscricao_municipal_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['inscricao_municipal_escritorio'])?>"></div>
+                <div class="col-md-3"><label class="form-label">Identificador Enterprise</label><input class="form-control bg-light" value="<?=htmlspecialchars($cfg['identificador_escritorio'])?>" readonly><div class="form-text">Código técnico permanente do cadastro.</div></div>
+                <div class="col-md-3"><label class="form-label">Código interno</label><input name="codigo_interno_escritorio" class="form-control text-uppercase" maxlength="40" value="<?=htmlspecialchars($cfg['codigo_interno_escritorio'])?>" placeholder="Ex.: MATRIZ-SP"></div>
+                <div class="col-md-3"><label class="form-label">Tipo de organização</label><select name="tipo_escritorio" class="form-select"><option value="escritorio_advocacia" <?=$cfg['tipo_escritorio']==='escritorio_advocacia'?'selected':''?>>Escritório de advocacia</option><option value="advogado_autonomo" <?=$cfg['tipo_escritorio']==='advogado_autonomo'?'selected':''?>>Advogado autônomo</option><option value="departamento_juridico" <?=$cfg['tipo_escritorio']==='departamento_juridico'?'selected':''?>>Departamento jurídico</option><option value="consultoria_juridica" <?=$cfg['tipo_escritorio']==='consultoria_juridica'?'selected':''?>>Consultoria jurídica</option><option value="outro" <?=$cfg['tipo_escritorio']==='outro'?'selected':''?>>Outro</option></select></div>
+                <div class="col-md-3"><label class="form-label">Status operacional</label><select name="status_operacional_escritorio" class="form-select"><option value="ativo" <?=$cfg['status_operacional_escritorio']==='ativo'?'selected':''?>>Ativo</option><option value="implantacao" <?=$cfg['status_operacional_escritorio']==='implantacao'?'selected':''?>>Em implantação</option><option value="suspenso" <?=$cfg['status_operacional_escritorio']==='suspenso'?'selected':''?>>Suspenso</option></select></div>
+                <div class="col-md-3"><label class="form-label">CPF/CNPJ</label><input name="cpf_cnpj_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['cpf_cnpj_escritorio'])?>"></div>
+                <div class="col-md-3"><label class="form-label">Inscrição Estadual</label><input name="inscricao_estadual_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['inscricao_estadual_escritorio'])?>"></div>
+                <div class="col-md-3"><label class="form-label">Inscrição Municipal</label><input name="inscricao_municipal_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['inscricao_municipal_escritorio'])?>"></div>
+                <div class="col-md-3"><label class="form-label">Início das atividades</label><input type="date" name="data_inicio_atividades_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['data_inicio_atividades_escritorio'])?>"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card shadow-sm border-0 mb-4">
+        <div class="card-header bg-dark text-white"><i class="bi bi-diagram-3 me-1"></i> Administração Enterprise</div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-4"><label class="form-label">Responsável administrativo</label><input name="responsavel_administrativo_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['responsavel_administrativo_escritorio'])?>"></div>
+                <div class="col-md-4"><label class="form-label">E-mail administrativo</label><input type="email" name="email_administrativo_escritorio" class="form-control" value="<?=htmlspecialchars($cfg['email_administrativo_escritorio'])?>"></div>
+                <div class="col-md-4"><label class="form-label">Fuso horário</label><select name="timezone_escritorio" class="form-select"><?php foreach (['America/Sao_Paulo'=>'Brasília / São Paulo','America/Manaus'=>'Manaus','America/Cuiaba'=>'Cuiabá','America/Recife'=>'Recife','America/Fortaleza'=>'Fortaleza','America/Belem'=>'Belém','America/Rio_Branco'=>'Rio Branco','UTC'=>'UTC'] as $tzValor => $tzNome): ?><option value="<?=htmlspecialchars($tzValor)?>" <?=$cfg['timezone_escritorio']===$tzValor?'selected':''?>><?=htmlspecialchars($tzNome)?></option><?php endforeach; ?></select></div>
+                <div class="col-md-6"><div class="border rounded p-3 bg-light h-100"><small class="text-muted d-block">IDIOMA PADRÃO</small><strong>Português do Brasil (pt-BR)</strong></div></div>
+                <div class="col-md-6"><div class="border rounded p-3 bg-light h-100"><small class="text-muted d-block">MOEDA PADRÃO</small><strong>Real brasileiro (BRL)</strong></div></div>
             </div>
         </div>
     </div>
@@ -815,30 +3822,75 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'marca'): ?>
-<div class="card shadow-sm border-0">
-    <div class="card-header bg-dark text-white"><i class="bi bi-image me-1"></i> Marca e Logomarca</div>
-    <div class="card-body">
-        <div class="row g-4 align-items-start">
-            <div class="col-md-4 text-center">
-                <p class="text-muted small mb-2">Logo atual</p>
-                <img src="<?=$logo_exibir?>?v=<?=time()?>" class="img-thumbnail bg-light" style="max-width:240px;max-height:240px;object-fit:contain;" alt="Logo atual">
+<div class="row g-4">
+    <div class="col-lg-5">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white"><i class="bi bi-image me-1"></i> Logomarca do Escritório</div>
+            <div class="card-body">
+                <div class="text-center mb-4">
+                    <p class="text-muted small mb-2">Logo interna atual</p>
+                    <img src="<?=$logo_exibir?>?v=<?=time()?>" class="img-thumbnail bg-light" style="max-width:260px;max-height:220px;object-fit:contain;" alt="Logo atual">
+                    <div class="form-text mt-2">A identidade da tela de login ROJEX.AI não é alterada por esta configuração.</div>
+                </div>
+
+                <form method="POST" enctype="multipart/form-data">
+                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                    <input type="hidden" name="acao_cfg" value="upload_logo">
+                    <label class="form-label fw-semibold">Substituir logo interna</label>
+                    <input type="file" name="logo" class="form-control" accept=".jpg,.jpeg,.png" required onchange="prevLogo(this)">
+                    <div class="form-text">JPG ou PNG, até 2 MB. A logo atual pode continuar sendo utilizada normalmente.</div>
+                    <div id="prev_wrap" style="display:none;" class="mt-3 text-center"><img id="prev_img" src="#" class="img-thumbnail" style="max-width:220px;max-height:140px;object-fit:contain;" alt="Prévia"></div>
+                    <button class="btn btn-primary mt-3"><i class="bi bi-upload me-1"></i>Enviar logomarca</button>
+                </form>
+
                 <?php if ($cfg['logo_arquivo']): ?>
                 <form method="POST" class="mt-3">
                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                     <input type="hidden" name="acao_cfg" value="remover_logo">
-                    <button class="btn btn-outline-danger btn-sm" onclick="return confirm('Remover logo personalizada?')"><i class="bi bi-x-circle me-1"></i>Remover logo</button>
+                    <button class="btn btn-outline-danger btn-sm" onclick="return confirm('Remover logo personalizada?')"><i class="bi bi-x-circle me-1"></i>Remover logo personalizada</button>
                 </form>
                 <?php endif; ?>
             </div>
-            <div class="col-md-8">
-                <form method="POST" enctype="multipart/form-data">
+        </div>
+    </div>
+
+    <div class="col-lg-7">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white"><i class="bi bi-badge-ad me-1"></i> Identidade da Marca</div>
+            <div class="card-body">
+                <form method="POST" class="row g-3">
                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
-                    <input type="hidden" name="acao_cfg" value="upload_logo">
-                    <label class="form-label fw-semibold">Enviar nova logomarca</label>
-                    <input type="file" name="logo" class="form-control" accept=".jpg,.jpeg,.png" required onchange="prevLogo(this)">
-                    <div class="form-text">JPG ou PNG. Tamanho máximo: 2 MB. O sistema usará esta logo no menu e futuramente em PDFs/recibos.</div>
-                    <div id="prev_wrap" style="display:none;" class="mt-3"><img id="prev_img" src="#" class="img-thumbnail" style="max-width:220px;max-height:140px;object-fit:contain;" alt="Prévia"></div>
-                    <button class="btn btn-primary mt-3"><i class="bi bi-upload me-1"></i>Enviar logomarca</button>
+                    <input type="hidden" name="acao_cfg" value="salvar_marca">
+                    <div class="col-12">
+                        <label class="form-label">Nome de exibição da marca</label>
+                        <input name="nome_marca_exibicao" class="form-control" maxlength="80" value="<?=htmlspecialchars($cfg['nome_marca_exibicao'])?>" placeholder="Ex.: SGL Advocacia">
+                        <div class="form-text">Campo visual opcional. Não altera o nome oficial do produto ROJEX.AI.</div>
+                    </div>
+                    <div class="col-12">
+                        <label class="form-label">Slogan institucional</label>
+                        <input name="slogan_marca" class="form-control" maxlength="160" value="<?=htmlspecialchars($cfg['slogan_marca'])?>" placeholder="Ex.: Excelência jurídica com tecnologia">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Posição preferencial da logo</label>
+                        <select name="posicao_logo" class="form-select">
+                            <option value="esquerda" <?=$cfg['posicao_logo']==='esquerda'?'selected':''?>>À esquerda</option>
+                            <option value="centro" <?=$cfg['posicao_logo']==='centro'?'selected':''?>>Centralizada</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6 d-flex flex-column justify-content-end gap-2 pb-1">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" name="exibir_nome_menu" value="1" <?=$cfg['exibir_nome_menu']==='1'?'checked':''?>>
+                            <label class="form-check-label">Exibir nome junto à logo</label>
+                        </div>
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" name="exibir_slogan_documentos" value="1" <?=$cfg['exibir_slogan_documentos']==='1'?'checked':''?>>
+                            <label class="form-check-label">Preparar slogan para documentos</label>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <div class="alert alert-info small mb-0"><i class="bi bi-shield-check me-1"></i>Estas preferências ficam armazenadas para integração gradual nos menus, recibos e documentos, sem quebrar os layouts atuais.</div>
+                    </div>
+                    <div class="col-12"><button class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Salvar identidade da marca</button></div>
                 </form>
             </div>
         </div>
@@ -847,34 +3899,83 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'tema'): ?>
-<div class="card shadow-sm border-0">
-    <div class="card-header bg-dark text-white"><i class="bi bi-palette me-1"></i> Identidade Visual</div>
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white"><i class="bi bi-palette me-1"></i> Tema Enterprise</div>
     <div class="card-body">
-        <form method="POST" class="row g-4">
+        <form method="POST" id="formTemaEnterprise" class="row g-4">
             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
             <input type="hidden" name="acao_cfg" value="salvar_tema">
-            <?php foreach ([['cor_primaria','Cor primária / menu'], ['cor_secundaria','Cor secundária / ativo'], ['cor_accent','Cor de destaque / dourado']] as $c): ?>
-            <div class="col-md-4">
-                <label class="form-label fw-semibold"><?=$c[1]?></label>
-                <div class="input-group">
-                    <input type="color" name="<?=$c[0]?>" id="<?=$c[0]?>" class="form-control form-control-color" value="<?=htmlspecialchars($cfg[$c[0]])?>" oninput="syncCor('<?=$c[0]?>')">
-                    <input type="text" id="<?=$c[0]?>_txt" class="form-control" value="<?=htmlspecialchars($cfg[$c[0]])?>" maxlength="7" style="font-family:monospace" oninput="syncTxt('<?=$c[0]?>')">
+
+            <div class="col-lg-7">
+                <div class="row g-3">
+                    <?php foreach ([
+                        ['cor_primaria','Cor primária / menu'],
+                        ['cor_secundaria','Cor secundária / itens ativos'],
+                        ['cor_accent','Cor de destaque'],
+                        ['cor_fundo','Cor de fundo'],
+                        ['cor_texto','Cor principal do texto']
+                    ] as $c): ?>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold"><?=$c[1]?></label>
+                        <div class="input-group">
+                            <input type="color" name="<?=$c[0]?>" id="<?=$c[0]?>" class="form-control form-control-color" value="<?=htmlspecialchars($cfg[$c[0]])?>" oninput="syncCor('<?=$c[0]?>');atualizarPreviewTema();">
+                            <input type="text" id="<?=$c[0]?>_txt" class="form-control" value="<?=htmlspecialchars($cfg[$c[0]])?>" maxlength="7" style="font-family:monospace" oninput="syncTxt('<?=$c[0]?>');atualizarPreviewTema();">
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Modo visual</label>
+                        <select name="tema_modo" id="tema_modo" class="form-select" onchange="atualizarPreviewTema()">
+                            <option value="claro" <?=$cfg['tema_modo']==='claro'?'selected':''?>>Claro</option>
+                            <option value="escuro" <?=$cfg['tema_modo']==='escuro'?'selected':''?>>Escuro</option>
+                            <option value="automatico" <?=$cfg['tema_modo']==='automatico'?'selected':''?>>Automático pelo dispositivo</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Densidade dos componentes</label>
+                        <select name="tema_densidade" id="tema_densidade" class="form-select" onchange="atualizarPreviewTema()">
+                            <option value="confortavel" <?=$cfg['tema_densidade']==='confortavel'?'selected':''?>>Confortável</option>
+                            <option value="compacta" <?=$cfg['tema_densidade']==='compacta'?'selected':''?>>Compacta</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Estilo das bordas</label>
+                        <select name="tema_bordas" id="tema_bordas" class="form-select" onchange="atualizarPreviewTema()">
+                            <option value="retas" <?=$cfg['tema_bordas']==='retas'?'selected':''?>>Retas</option>
+                            <option value="suaves" <?=$cfg['tema_bordas']==='suaves'?'selected':''?>>Suaves</option>
+                            <option value="arredondadas" <?=$cfg['tema_bordas']==='arredondadas'?'selected':''?>>Arredondadas</option>
+                        </select>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label fw-semibold">Escala da fonte: <span id="temaFonteValor"><?=htmlspecialchars($cfg['tema_fonte_percentual'])?>%</span></label>
+                        <input type="range" name="tema_fonte_percentual" id="tema_fonte_percentual" class="form-range" min="90" max="115" step="5" value="<?=htmlspecialchars($cfg['tema_fonte_percentual'])?>" oninput="atualizarPreviewTema()">
+                    </div>
                 </div>
-                <div class="mt-2 rounded p-2 text-white text-center small" id="prev_<?=$c[0]?>" style="background:<?=htmlspecialchars($cfg[$c[0]])?>;">Prévia</div>
             </div>
-            <?php endforeach; ?>
-            <div class="col-md-4">
-                <label class="form-label fw-semibold">Modo visual</label>
-                <select name="tema_modo" class="form-select">
-                    <option value="claro" <?=$cfg['tema_modo']==='claro'?'selected':''?>>Claro</option>
-                    <option value="escuro" <?=$cfg['tema_modo']==='escuro'?'selected':''?>>Escuro / Premium</option>
-                </select>
-                <div class="form-text">O modo escuro será ampliado nas próximas etapas.</div>
+
+            <div class="col-lg-5">
+                <label class="form-label fw-semibold">Prévia segura</label>
+                <div id="previewTemaEnterprise" class="border shadow-sm overflow-hidden">
+                    <div class="preview-tema-menu d-flex align-items-center justify-content-between">
+                        <strong><i class="bi bi-grid me-1"></i> ROJEX.AI</strong><span class="badge preview-tema-badge">Enterprise</span>
+                    </div>
+                    <div class="preview-tema-corpo">
+                        <h5 class="mb-2">Painel do escritório</h5>
+                        <p class="mb-3 preview-tema-muted">Exemplo de visualização antes da aplicação global.</p>
+                        <div class="preview-tema-card border mb-3">
+                            <small>PROCESSOS ATIVOS</small><h4 class="mb-0">128</h4>
+                        </div>
+                        <button type="button" class="btn preview-tema-btn">Ação principal</button>
+                    </div>
+                </div>
+                <div class="form-text mt-2">Nesta etapa, as escolhas são gravadas e visualizadas aqui. A aplicação geral será feita de forma controlada para preservar todos os módulos.</div>
             </div>
-            <div class="col-12 d-flex gap-2">
-                <button class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Salvar tema</button>
+
+            <div class="col-12 d-flex gap-2 flex-wrap">
+                <button class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Salvar tema Enterprise</button>
         </form>
-                <form method="POST" onsubmit="return confirm('Restaurar tema padrão?')">
+                <form method="POST" onsubmit="return confirm('Restaurar o tema padrão do sistema?')">
                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                     <input type="hidden" name="acao_cfg" value="restaurar_tema">
                     <button class="btn btn-outline-secondary"><i class="bi bi-arrow-counterclockwise me-1"></i>Restaurar padrão</button>
@@ -885,63 +3986,194 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'usuarios'): ?>
+<div class="row g-3 mb-4">
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">TOTAL</small><h4 class="mb-0"><?= $totalUsuarios ?></h4><small><?= $limiteUsuariosLicenca ?> permitido(s)</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ATIVOS</small><h4 class="mb-0 text-success"><?= $totalAtivos ?></h4><small><?= $totalInativos ?> inativo(s)</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ADMINISTRAÇÃO</small><h4 class="mb-0 text-primary"><?= $totalAdministradores ?></h4><small>administrador(es)</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ADVOGADOS</small><h4 class="mb-0"><?= $totalAdvogadosUsuarios ?></h4><small>perfil jurídico</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">FINANCEIRO</small><h4 class="mb-0"><?= $totalFinanceiroUsuarios ?></h4><small>perfil financeiro</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">LICENÇA</small><h4 class="mb-0"><?= $percentualLicencaUsuarios ?>%</h4><div class="progress mt-2" style="height:6px"><div class="progress-bar" style="width:<?=$percentualLicencaUsuarios?>%"></div></div></div></div></div>
+</div>
+
+<div class="alert alert-info border-0 shadow-sm">
+    <i class="bi bi-shield-check me-1"></i>
+    A estrutura Enterprise está preparada para perfis, departamentos e limite de licença.
+    A política atual de senha com mínimo de 6 caracteres foi preservada nesta fase.
+</div>
+
 <div class="row g-4">
-    <div class="col-lg-4">
-        <div class="card shadow-sm border-0 h-100">
-            <div class="card-header bg-dark text-white"><i class="bi bi-person-plus me-1"></i> Novo Usuário</div>
+    <div class="col-xl-4">
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-dark text-white"><i class="bi bi-person-plus me-1"></i> Novo Usuário Enterprise</div>
             <div class="card-body">
                 <form method="POST" class="row g-3">
                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                     <input type="hidden" name="acao_cfg" value="novo_usuario">
-                    <div class="col-12"><label class="form-label">Nome</label><input name="nome" class="form-control" required></div>
-                    <div class="col-12"><label class="form-label">Usuário</label><input name="usuario" class="form-control" required></div>
-                    <div class="col-12"><label class="form-label">E-mail</label><input type="email" name="email" class="form-control"></div>
-                    <div class="col-12"><label class="form-label">Perfil</label><select name="perfil" class="form-select"><option>Administrador</option><option>Advogado</option><option>Atendente</option><option>Financeiro</option><option>Usuário</option></select></div>
-                    <div class="col-12"><label class="form-label">Senha inicial</label><input type="password" name="senha" class="form-control" minlength="6" required></div>
+
+                    <div class="col-12"><label class="form-label">Nome completo</label><input name="nome" class="form-control" maxlength="120" required></div>
+                    <div class="col-md-6"><label class="form-label">Login</label><input name="usuario" class="form-control" maxlength="80" required></div>
+                    <div class="col-md-6"><label class="form-label">Telefone</label><input name="telefone" class="form-control" maxlength="40"></div>
+                    <div class="col-12"><label class="form-label">E-mail</label><input type="email" name="email" class="form-control" maxlength="120"></div>
+                    <div class="col-md-6"><label class="form-label">Cargo</label><input name="cargo" class="form-control" maxlength="100" placeholder="Ex.: Sócio, Analista"></div>
+                    <div class="col-md-6"><label class="form-label">Departamento</label><input name="departamento" class="form-control" maxlength="100" placeholder="Ex.: Jurídico"></div>
+                    <div class="col-12">
+                        <label class="form-label">Perfil</label>
+                        <select name="perfil" class="form-select">
+                            <?php foreach (['Administrador Master','Administrador','Advogado','Coordenador','Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'] as $perfilOpcao): ?>
+                                <option value="<?=htmlspecialchars($perfilOpcao)?>"><?=htmlspecialchars($perfilOpcao)?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    <div class="col-12"><label class="form-label">Observações</label><textarea name="observacoes" class="form-control" rows="2" maxlength="1000"></textarea></div>
+                    <div class="col-12">
+                        <label class="form-label">Senha inicial</label>
+                        <input type="password" name="senha" class="form-control" minlength="6" required>
+                        <div class="form-text">Política atual preservada: mínimo de 6 caracteres.</div>
+                    </div>
                     <div class="col-12"><button class="btn btn-primary w-100"><i class="bi bi-plus-circle me-1"></i>Criar usuário</button></div>
                 </form>
             </div>
         </div>
     </div>
-    <div class="col-lg-8">
+
+    <div class="col-xl-8">
         <div class="card shadow-sm border-0">
-            <div class="card-header bg-dark text-white d-flex justify-content-between"><span><i class="bi bi-people me-1"></i> Usuários do Sistema</span><span><?=count($usuarios)?> registro(s)</span></div>
+            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-people me-1"></i> Usuários do Sistema</span>
+                <span><?=count($usuarios)?> de <?=$limiteUsuariosLicenca?></span>
+            </div>
+
             <div class="table-responsive">
                 <table class="table table-hover align-middle mb-0">
-                    <thead class="table-light"><tr><th>Nome</th><th>Usuário</th><th>Perfil</th><th>Status</th><th class="text-end">Ações</th></tr></thead>
+                    <thead class="table-light">
+                        <tr><th>Usuário</th><th>Perfil / setor</th><th>Último acesso</th><th>Status</th><th class="text-end">Ações</th></tr>
+                    </thead>
                     <tbody>
                     <?php if(empty($usuarios)): ?>
                         <tr><td colspan="5" class="text-center py-4 text-muted">Nenhum usuário encontrado.</td></tr>
                     <?php endif; ?>
+
                     <?php foreach($usuarios as $u): ?>
+                    <?php
+                        $perfilUsuario = (string)($u['perfil'] ?? 'Usuário');
+                        $badgePerfil = in_array($perfilUsuario, ['Administrador','Administrador Master'], true)
+                            ? 'bg-primary'
+                            : ($perfilUsuario === 'Financeiro' ? 'bg-success' : 'bg-secondary');
+                    ?>
                     <tr>
-                        <td><strong><?=htmlspecialchars($u['nome'])?></strong><br><small class="text-muted"><?=htmlspecialchars($u['email'] ?? '')?></small></td>
-                        <td><code><?=htmlspecialchars($u['usuario'])?></code></td>
-                        <td><span class="badge bg-secondary"><?=htmlspecialchars($u['perfil'])?></span></td>
-                        <td><?=((int)$u['ativo']===1) ? '<span class="badge bg-success">Ativo</span>' : '<span class="badge bg-danger">Inativo</span>'?></td>
+                        <td>
+                            <strong><?=htmlspecialchars($u['nome'])?></strong>
+                            <div><code><?=htmlspecialchars($u['usuario'])?></code></div>
+                            <small class="text-muted"><?=htmlspecialchars($u['email'] ?? '')?></small>
+                        </td>
+                        <td>
+                            <span class="badge <?=$badgePerfil?>"><?=htmlspecialchars($perfilUsuario)?></span>
+                            <?php if (!empty($u['cargo'])): ?><div class="small mt-1"><?=htmlspecialchars($u['cargo'])?></div><?php endif; ?>
+                            <?php if (!empty($u['departamento'])): ?><small class="text-muted"><?=htmlspecialchars($u['departamento'])?></small><?php endif; ?>
+                        </td>
+                        <td>
+                            <?php if (!empty($u['ultimo_login'])): ?>
+                                <?=date('d/m/Y H:i', strtotime($u['ultimo_login']))?>
+                            <?php else: ?>
+                                <span class="text-muted">Nunca acessou</span>
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <?php if ((int)$u['id'] === $usuarioMasterId): ?>
+                                <span class="badge bg-warning text-dark">MASTER</span>
+                            <?php elseif (($u['vinculo_status'] ?? '') === 'encerrado'): ?>
+                                <span class="badge bg-dark">Vínculo encerrado</span>
+                            <?php elseif ((int)$u['ativo'] === 1): ?>
+                                <span class="badge bg-success">Ativo</span>
+                            <?php else: ?>
+                                <span class="badge bg-danger">Inativo</span>
+                            <?php endif; ?>
+                        </td>
                         <td class="text-end">
+                            <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="collapse" data-bs-target="#editarUsuario<?= (int)$u['id'] ?>">
+                                <i class="bi bi-pencil-square"></i> Editar
+                            </button>
+
+                            <?php if ((int)$u['id'] !== $usuarioMasterId): ?>
                             <form method="POST" class="d-inline">
                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                                 <input type="hidden" name="acao_cfg" value="alterar_status_usuario">
                                 <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
                                 <input type="hidden" name="ativo" value="<?=((int)$u['ativo']===1)?0:1?>">
-                                <button class="btn btn-sm <?=((int)$u['ativo']===1)?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Alterar status deste usuário?')"><?=((int)$u['ativo']===1)?'Desativar':'Ativar'?></button>
+                                <button class="btn btn-sm <?=((int)$u['ativo']===1)?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Alterar status deste usuário?')">
+                                    <?=((int)$u['ativo']===1)?'Desativar':'Ativar'?>
+                                </button>
                             </form>
-                            <button class="btn btn-sm btn-outline-primary" data-bs-toggle="collapse" data-bs-target="#senha<?= (int)$u['id'] ?>">Senha</button>
+
+                            <button class="btn btn-sm btn-outline-secondary" type="button" data-bs-toggle="collapse" data-bs-target="#senha<?= (int)$u['id'] ?>">Senha</button>
+
+                            <?php if (($u['vinculo_status'] ?? '') !== 'encerrado'): ?>
+                            <form method="POST" class="d-inline" onsubmit="return confirm('Encerrar definitivamente o vínculo deste usuário? O acesso será bloqueado, mas todo o cadastro será preservado para auditoria e prova futura.');">
+                                <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                <input type="hidden" name="acao_cfg" value="encerrar_vinculo_usuario">
+                                <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
+                                <button class="btn btn-sm btn-dark"><i class="bi bi-person-x me-1"></i>Encerrar vínculo</button>
+                            </form>
+                            <?php endif; ?>
+                            <?php else: ?>
+                                <span class="badge bg-warning text-dark"><i class="bi bi-shield-lock me-1"></i>Protegido</span>
+                            <?php endif; ?>
                         </td>
                     </tr>
-                    <tr class="collapse" id="senha<?= (int)$u['id'] ?>"><td colspan="5">
-                        <form method="POST" class="d-flex gap-2 justify-content-end">
-                            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
-                            <input type="hidden" name="acao_cfg" value="resetar_senha_usuario">
-                            <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
-                            <input type="password" name="nova_senha" class="form-control" style="max-width:260px" minlength="6" placeholder="Nova senha" required>
-                            <button class="btn btn-primary btn-sm">Redefinir</button>
-                        </form>
-                    </td></tr>
+
+                    <tr class="collapse bg-light" id="editarUsuario<?= (int)$u['id'] ?>">
+                        <td colspan="5">
+                            <form method="POST" class="row g-3 p-2">
+                                <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                <input type="hidden" name="acao_cfg" value="editar_usuario">
+                                <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
+
+                                <div class="col-md-4"><label class="form-label">Nome</label><input name="nome" class="form-control form-control-sm" value="<?=htmlspecialchars($u['nome'])?>" required></div>
+                                <div class="col-md-4"><label class="form-label">E-mail</label><input type="email" name="email" class="form-control form-control-sm" value="<?=htmlspecialchars($u['email'] ?? '')?>"></div>
+                                <div class="col-md-4"><label class="form-label">Telefone</label><input name="telefone" class="form-control form-control-sm" value="<?=htmlspecialchars($u['telefone'] ?? '')?>"></div>
+                                <div class="col-md-4"><label class="form-label">Cargo</label><input name="cargo" class="form-control form-control-sm" value="<?=htmlspecialchars($u['cargo'] ?? '')?>"></div>
+                                <div class="col-md-4"><label class="form-label">Departamento</label><input name="departamento" class="form-control form-control-sm" value="<?=htmlspecialchars($u['departamento'] ?? '')?>"></div>
+                                <div class="col-md-4">
+                                    <label class="form-label">Perfil</label>
+                                    <select name="perfil" class="form-select form-select-sm">
+                                        <?php foreach (['Administrador Master','Administrador','Advogado','Coordenador','Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'] as $perfilOpcao): ?>
+                                            <option value="<?=htmlspecialchars($perfilOpcao)?>" <?=$perfilUsuario===$perfilOpcao?'selected':''?>><?=htmlspecialchars($perfilOpcao)?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                <div class="col-12"><label class="form-label">Observações</label><textarea name="observacoes" class="form-control form-control-sm" rows="2"><?=htmlspecialchars($u['observacoes'] ?? '')?></textarea></div>
+                                <div class="col-12 text-end"><button class="btn btn-sm btn-primary"><i class="bi bi-floppy me-1"></i>Salvar alterações</button></div>
+                            </form>
+                        </td>
+                    </tr>
+
+                    <tr class="collapse bg-light" id="senha<?= (int)$u['id'] ?>">
+                        <td colspan="5">
+                            <form method="POST" class="d-flex gap-2 justify-content-end align-items-center p-2">
+                                <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                <input type="hidden" name="acao_cfg" value="resetar_senha_usuario">
+                                <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
+                                <span class="small text-muted">Política atual: mínimo de 6 caracteres.</span>
+                                <input type="password" name="nova_senha" class="form-control form-control-sm" style="max-width:260px" minlength="6" placeholder="Nova senha" required>
+                                <button class="btn btn-primary btn-sm">Redefinir senha</button>
+                            </form>
+                        </td>
+                    </tr>
                     <?php endforeach; ?>
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <div class="card shadow-sm border-0 mt-4">
+            <div class="card-header bg-dark text-white"><i class="bi bi-diagram-3 me-1"></i> Preparação de Permissões</div>
+            <div class="card-body">
+                <div class="row g-2">
+                    <?php foreach (['Dashboard','Jurídico','Financeiro','Agenda','Documentos','Modelos','Configurações','LOG','Lixeira','CIJ','IA','Administração'] as $moduloPermissao): ?>
+                        <div class="col-md-4"><div class="border rounded p-2 bg-light"><i class="bi bi-check2-circle text-success me-1"></i><?=htmlspecialchars($moduloPermissao)?></div></div>
+                    <?php endforeach; ?>
+                </div>
+                <div class="form-text mt-3">A matriz ACL completa será ativada em etapa própria, após o fechamento da estrutura administrativa.</div>
             </div>
         </div>
     </div>
@@ -949,33 +4181,1550 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'sistema'): ?>
-<div class="row g-4">
-    <div class="col-lg-6">
+<div class="alert alert-warning border-0 shadow-sm">
+    <i class="bi bi-shield-lock me-1"></i>
+    Área exclusiva do usuário MASTER. As configurações abaixo preparam o ROJEX.AI para produção e modelo SaaS sem ativar integrações externas nesta etapa.
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
         <div class="card shadow-sm border-0 h-100">
-            <div class="card-header bg-dark text-white"><i class="bi bi-sliders me-1"></i> Parâmetros Gerais</div>
             <div class="card-body">
-                <form method="POST" class="row g-3">
-                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
-                    <input type="hidden" name="acao_cfg" value="salvar_sistema">
-                    <div class="col-md-6"><label class="form-label">Alertar prazos em até X dias</label><input type="number" min="1" max="60" name="dias_alerta_prazos" class="form-control" value="<?=htmlspecialchars($cfg['dias_alerta_prazos'])?>"></div>
-                    <div class="col-md-6"><label class="form-label">Itens por página</label><input type="number" min="10" max="100" name="itens_por_pagina" class="form-control" value="<?=htmlspecialchars($cfg['itens_por_pagina'])?>"></div>
-                    <div class="col-12"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="modo_debug" value="1" <?=$cfg['modo_debug']==='1'?'checked':''?>><label class="form-check-label">Modo debug controlado</label></div><div class="form-text">Em produção, mantenha desativado para não exibir detalhes técnicos ao usuário.</div></div>
-                    <div class="col-12"><button class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Salvar parâmetros</button></div>
-                </form>
+                <small class="text-muted">SAÚDE DO SISTEMA</small>
+                <h3 class="mb-1 <?=$percentualSaude>=85?'text-success':($percentualSaude>=60?'text-warning':'text-danger')?>"><?=$percentualSaude?>%</h3>
+                <div class="progress" style="height:7px"><div class="progress-bar" style="width:<?=$percentualSaude?>%"></div></div>
             </div>
         </div>
     </div>
-    <div class="col-lg-6">
+    <div class="col-md-3">
         <div class="card shadow-sm border-0 h-100">
-            <div class="card-header bg-dark text-white"><i class="bi bi-database-check me-1"></i> Resumo do Banco</div>
+            <div class="card-body">
+                <small class="text-muted">AMBIENTE</small>
+                <h4 class="mb-0 text-uppercase"><?=htmlspecialchars($cfg['ambiente_sistema'])?></h4>
+                <small>ROJEX.AI <?=htmlspecialchars($cfg['versao_sistema'])?></small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <small class="text-muted">LICENÇA</small>
+                <h4 class="mb-0 text-capitalize"><?=htmlspecialchars($cfg['status_licenca'])?></h4>
+                <small class="text-capitalize"><?=htmlspecialchars($cfg['plano_licenca'])?></small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <small class="text-muted">ARMAZENAMENTO DO SERVIDOR</small>
+                <h4 class="mb-0"><?=sgl_formatar_bytes($espacoLivreDisco)?></h4>
+                <small>livres de <?=sgl_formatar_bytes($espacoTotalDisco)?></small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<form method="POST">
+    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+    <input type="hidden" name="acao_cfg" value="salvar_sistema">
+
+    <div class="row g-4">
+        <div class="col-xl-6">
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-dark text-white"><i class="bi bi-sliders me-1"></i> Sistema e Ambiente</div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">Ambiente</label>
+                            <select name="ambiente_sistema" class="form-select">
+                                <option value="desenvolvimento" <?=$cfg['ambiente_sistema']==='desenvolvimento'?'selected':''?>>Desenvolvimento</option>
+                                <option value="homologacao" <?=$cfg['ambiente_sistema']==='homologacao'?'selected':''?>>Homologação</option>
+                                <option value="producao" <?=$cfg['ambiente_sistema']==='producao'?'selected':''?>>Produção</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3"><label class="form-label">Versão ROJEX</label><input name="versao_sistema" class="form-control" maxlength="30" value="<?=htmlspecialchars($cfg['versao_sistema'])?>"></div>
+                        <div class="col-md-3"><label class="form-label">Versão SQL</label><input name="versao_banco" class="form-control" maxlength="30" value="<?=htmlspecialchars($cfg['versao_banco'])?>"></div>
+                        <div class="col-md-6"><label class="form-label">Alertar prazos em até X dias</label><input type="number" min="1" max="60" name="dias_alerta_prazos" class="form-control" value="<?=htmlspecialchars($cfg['dias_alerta_prazos'])?>"></div>
+                        <div class="col-md-6"><label class="form-label">Itens por página</label><input type="number" min="10" max="100" name="itens_por_pagina" class="form-control" value="<?=htmlspecialchars($cfg['itens_por_pagina'])?>"></div>
+                        <div class="col-12">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" name="modo_debug" value="1" <?=$cfg['modo_debug']==='1'?'checked':''?>>
+                                <label class="form-check-label">Modo debug controlado</label>
+                            </div>
+                            <div class="form-text">Mantenha desativado quando o ambiente for Produção.</div>
+                        </div>
+                        <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="modo_manutencao_preparado" value="1" <?=$cfg['modo_manutencao_preparado']==='1'?'checked':''?>><label class="form-check-label">Preparar manutenção</label></div></div>
+                        <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="cache_aplicacao_preparado" value="1" <?=$cfg['cache_aplicacao_preparado']==='1'?'checked':''?>><label class="form-check-label">Preparar cache</label></div></div>
+                        <div class="col-md-4"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="backup_automatico_preparado" value="1" <?=$cfg['backup_automatico_preparado']==='1'?'checked':''?>><label class="form-check-label">Preparar backup</label></div></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-dark text-white"><i class="bi bi-fingerprint me-1"></i> Identidade da Instalação</div>
+                <div class="card-body">
+                    <div class="mb-3"><label class="form-label">ID da instalação</label><input class="form-control bg-light" readonly value="<?=htmlspecialchars($cfg['identificador_instalacao'])?>"></div>
+                    <div class="mb-3"><label class="form-label">Tenant ID</label><input class="form-control bg-light" readonly value="<?=htmlspecialchars($cfg['tenant_id'])?>"></div>
+                    <div><label class="form-label">Chave técnica da instalação</label><input class="form-control bg-light" readonly value="<?=htmlspecialchars($cfg['chave_instalacao'])?>"></div>
+                    <div class="form-text mt-2">Identificadores permanentes gerados localmente. A ativação online ficará para a fase de produção.</div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-dark text-white"><i class="bi bi-cloud-check me-1"></i> Infraestrutura SaaS</div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6"><label class="form-label">Domínio</label><input name="dominio_saas" class="form-control" maxlength="180" value="<?=htmlspecialchars($cfg['dominio_saas'])?>" placeholder="exemplo.com.br"></div>
+                        <div class="col-md-6"><label class="form-label">Subdomínio</label><input name="subdominio_saas" class="form-control" maxlength="120" value="<?=htmlspecialchars($cfg['subdominio_saas'])?>" placeholder="cliente.rojex.ai"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-6">
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-dark text-white"><i class="bi bi-award me-1"></i> Licenciamento</div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">Plano</label>
+                            <select name="plano_licenca" class="form-select">
+                                <option value="starter" <?=$cfg['plano_licenca']==='starter'?'selected':''?>>Starter</option>
+                                <option value="professional" <?=$cfg['plano_licenca']==='professional'?'selected':''?>>Professional</option>
+                                <option value="enterprise" <?=$cfg['plano_licenca']==='enterprise'?'selected':''?>>Enterprise</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Situação</label>
+                            <select name="status_licenca" class="form-select">
+                                <option value="ativa" <?=$cfg['status_licenca']==='ativa'?'selected':''?>>Ativa</option>
+                                <option value="teste" <?=$cfg['status_licenca']==='teste'?'selected':''?>>Em teste</option>
+                                <option value="suspensa" <?=$cfg['status_licenca']==='suspensa'?'selected':''?>>Suspensa</option>
+                                <option value="expirada" <?=$cfg['status_licenca']==='expirada'?'selected':''?>>Expirada</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6"><label class="form-label">Data de ativação</label><input type="date" name="data_ativacao_licenca" class="form-control" value="<?=htmlspecialchars($cfg['data_ativacao_licenca'])?>"></div>
+                        <div class="col-md-6"><label class="form-label">Próxima renovação</label><input type="date" name="data_renovacao_licenca" class="form-control" value="<?=htmlspecialchars($cfg['data_renovacao_licenca'])?>"></div>
+                        <div class="col-md-6"><label class="form-label">Limite de usuários</label><input type="number" min="1" max="100" name="limite_usuarios_licenca" class="form-control" value="<?=htmlspecialchars($cfg['limite_usuarios_licenca'])?>"></div>
+                        <div class="col-md-6"><label class="form-label">Armazenamento contratado (GB)</label><input type="number" min="1" max="10000" name="limite_armazenamento_gb" class="form-control" value="<?=htmlspecialchars($cfg['limite_armazenamento_gb'])?>"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-dark text-white"><i class="bi bi-stars me-1"></i> Preparação para IA</div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">Provedor planejado</label>
+                            <select name="provedor_ia" class="form-select">
+                                <option value="nao_definido" <?=$cfg['provedor_ia']==='nao_definido'?'selected':''?>>Não definido</option>
+                                <option value="openai" <?=$cfg['provedor_ia']==='openai'?'selected':''?>>OpenAI</option>
+                                <option value="anthropic" <?=$cfg['provedor_ia']==='anthropic'?'selected':''?>>Anthropic</option>
+                                <option value="google" <?=$cfg['provedor_ia']==='google'?'selected':''?>>Google Gemini</option>
+                                <option value="deepseek" <?=$cfg['provedor_ia']==='deepseek'?'selected':''?>>DeepSeek</option>
+                                <option value="outro" <?=$cfg['provedor_ia']==='outro'?'selected':''?>>Outro</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Status da integração</label>
+                            <select name="status_integracao_ia" class="form-select">
+                                <option value="desativada" <?=$cfg['status_integracao_ia']==='desativada'?'selected':''?>>Desativada</option>
+                                <option value="preparada" <?=$cfg['status_integracao_ia']==='preparada'?'selected':''?>>Estrutura preparada</option>
+                                <option value="ativa" <?=$cfg['status_integracao_ia']==='ativa'?'selected':''?>>Ativa</option>
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <div class="alert alert-info small mb-0">
+                                As chaves de API não são gravadas nesta tela. Na produção, serão armazenadas fora do código, em variável de ambiente segura.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm border-0 mb-4">
+                <div class="card-header bg-dark text-white"><i class="bi bi-grid me-1"></i> Recursos da Licença</div>
+                <div class="card-body">
+                    <div class="row g-2">
+                        <?php foreach ([
+                            'recurso_portal_cliente' => 'Portal do Cliente',
+                            'recurso_assinatura_digital' => 'Assinatura Digital',
+                            'recurso_whatsapp' => 'WhatsApp',
+                            'recurso_email_automatico' => 'E-mails automáticos',
+                            'recurso_cnj' => 'Integração CNJ',
+                            'recurso_bi' => 'BI Executivo',
+                            'recurso_cij' => 'Centro de Inteligência Jurídica',
+                            'recurso_ia' => 'Integração com IA',
+                        ] as $chaveRecurso => $nomeRecurso): ?>
+                        <div class="col-md-6">
+                            <div class="form-check form-switch border rounded p-3 ps-5 bg-light">
+                                <input class="form-check-input" type="checkbox" name="<?=$chaveRecurso?>" value="1" <?=$cfg[$chaveRecurso]==='1'?'checked':''?>>
+                                <label class="form-check-label"><?=htmlspecialchars($nomeRecurso)?></label>
+                            </div>
+                        </div>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="text-end mb-4">
+        <button class="btn btn-primary btn-lg"><i class="bi bi-floppy me-1"></i>Salvar Sistema Enterprise</button>
+    </div>
+</form>
+
+<div class="row g-4">
+    <div class="col-xl-6">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white"><i class="bi bi-heart-pulse me-1"></i> Saúde do Servidor</div>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <tbody>
+                        <tr><th>PHP</th><td><?=htmlspecialchars(PHP_VERSION)?></td><td><span class="badge bg-success">OK</span></td></tr>
+                        <tr><th>MySQL/MariaDB</th><td><?=htmlspecialchars($versaoBancoServidor)?></td><td><span class="badge bg-success">OK</span></td></tr>
+                        <tr><th>Servidor web</th><td><?=htmlspecialchars($servidorWeb)?></td><td><span class="badge bg-success">Ativo</span></td></tr>
+                        <tr><th>Charset do banco</th><td><?=htmlspecialchars($charsetBanco)?></td><td><span class="badge <?=$charsetBanco==='utf8mb4'?'bg-success':'bg-warning text-dark'?>"><?=htmlspecialchars($charsetBanco)?></span></td></tr>
+                        <tr><th>Timezone PHP</th><td><?=htmlspecialchars($timezonePhp)?></td><td><span class="badge bg-secondary">Informativo</span></td></tr>
+                        <tr><th>Memória PHP</th><td><?=htmlspecialchars($limiteMemoriaPhp)?></td><td><span class="badge bg-secondary">Limite</span></td></tr>
+                        <tr><th>Upload máximo</th><td><?=htmlspecialchars($uploadMaximoPhp)?> / POST <?=htmlspecialchars($postMaximoPhp)?></td><td><span class="badge bg-secondary">Limite</span></td></tr>
+                        <tr><th>Tempo máximo</th><td><?=htmlspecialchars($tempoExecucaoPhp)?> segundo(s)</td><td><span class="badge bg-secondary">Limite</span></td></tr>
+                        <tr><th>Disco utilizado</th><td><?=sgl_formatar_bytes($espacoUsadoDisco)?> de <?=sgl_formatar_bytes($espacoTotalDisco)?></td><td><span class="badge <?=$percentualDisco<85?'bg-success':'bg-warning text-dark'?>"><?=$percentualDisco?>%</span></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-6">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white"><i class="bi bi-shield-check me-1"></i> Segurança e Integridade</div>
             <div class="card-body">
                 <div class="row g-2">
-                    <?php foreach($backup_resumo as $tb => $qt): ?>
-                    <div class="col-md-6"><div class="border rounded p-2 bg-light d-flex justify-content-between"><span><?=htmlspecialchars($tb)?></span><strong><?=$qt?></strong></div></div>
+                    <?php foreach ($segurancaSistema as $nomeCheck => $statusCheck): ?>
+                    <div class="col-md-6">
+                        <div class="border rounded p-3 d-flex justify-content-between align-items-center">
+                            <span><?=htmlspecialchars($nomeCheck)?></span>
+                            <span class="badge <?=$statusCheck?'bg-success':'bg-warning text-dark'?>"><?=$statusCheck?'OK':'Atenção'?></span>
+                        </div>
+                    </div>
                     <?php endforeach; ?>
                 </div>
-                <div class="alert alert-info mt-3 mb-0"><i class="bi bi-info-circle me-1"></i>Backup automático e exportação completa serão integrados na próxima fase de produção/DevOps.</div>
+                <?php if (!$httpsAtivo): ?>
+                    <div class="alert alert-warning small mt-3 mb-0">
+                        HTTPS aparece como atenção porque o sistema ainda está em localhost. Na Hostinger, deverá ser ativado com certificado SSL.
+                    </div>
+                <?php endif; ?>
             </div>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow-sm border-0 mt-4">
+    <div class="card-header bg-dark text-white"><i class="bi bi-clipboard-data me-1"></i> Diagnóstico Geral dos Módulos</div>
+    <div class="card-body">
+        <div class="row g-2">
+            <?php foreach ($diagnosticoModulos as $nomeDiagnostico => $totalDiagnostico): ?>
+            <div class="col-md-3">
+                <div class="border rounded p-3 bg-light d-flex justify-content-between align-items-center">
+                    <span><?=htmlspecialchars($nomeDiagnostico)?></span>
+                    <strong><?=number_format((int)$totalDiagnostico, 0, ',', '.')?></strong>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <div class="alert alert-info small mt-3 mb-0">
+            Backup automático, atualização remota, ativação online da licença e gestão multi-tenant serão implementados na Sprint 4.1.3, sem execução automática nesta etapa.
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+
+<?php if ($tab_ativa === 'administracao'): ?>
+<div class="alert alert-primary border-0 shadow-sm d-flex align-items-start gap-2">
+    <i class="bi bi-shield-lock-fill fs-4"></i>
+    <div>
+        <strong>Administração Enterprise — acesso exclusivo MASTER</strong>
+        <div class="small">Base central da operação SaaS. Nesta primeira etapa, o painel é seguro e informativo: nenhuma licença, escritório, backup ou atualização é executado automaticamente.</div>
+    </div>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><small class="text-muted">ESCRITÓRIOS</small><h3 class="mb-0 text-primary"><?=number_format($totalEscritoriosSaas,0,',','.')?></h3><small class="text-success"><?=$totalEscritoriosAtivos?> ativo(s)</small></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><small class="text-muted">LICENÇAS</small><h3 class="mb-0 text-success"><?=number_format($totalLicencasSaas,0,',','.')?></h3><small class="text-muted"><?=$totalLicencasAtivas?> ativa(s)</small></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><small class="text-muted">USUÁRIOS DESLIGADOS</small><h3 class="mb-0 text-warning"><?=number_format($totalUsuariosDesligados,0,',','.')?></h3><small class="text-muted">histórico preservado</small></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><small class="text-muted">SAÚDE CONSOLIDADA</small><h3 class="mb-0 <?=$percentualSaude>=85?'text-success':'text-warning'?>"><?=$percentualSaude?>%</h3><small class="text-muted">ambiente atual</small></div></div></div>
+</div>
+
+<div class="row g-4">
+    <div class="col-xl-8">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white"><i class="bi bi-grid-1x2-fill me-1"></i> Central Administrativa SaaS</div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <?php foreach ([
+                        ['Central de Licenças','Planos, limites, vigência, suspensão e renovação.','bi-key-fill',$totalLicencasSaas],
+                        ['Gestão de Escritórios','Cadastro multi-tenant e situação operacional.','bi-buildings-fill',$totalEscritoriosSaas],
+                        ['Usuários Desligados','Consulta do histórico preservado para auditoria.','bi-person-x-fill',$totalUsuariosDesligados],
+                        ['Relatórios Administrativos','Preparação para exportações PDF e Excel.','bi-file-earmark-bar-graph-fill',0],
+                        ['Saúde Consolidada','Servidor, banco, segurança, disco e módulos.','bi-heart-pulse-fill',$percentualSaude],
+                        ['Ferramentas de Manutenção','Rotinas controladas, auditáveis e exclusivas MASTER.','bi-tools',0],
+                        ['Estrutura de Backup','Inventário de backups e futuras políticas automáticas.','bi-database-fill-down',$totalBackupsRegistrados],
+                        ['Atualizações do Sistema','Controle de versões e implantação segura.','bi-cloud-arrow-down-fill',$totalAtualizacoesPendentes],
+                    ] as $blocoAdmin): ?>
+                    <div class="col-md-6">
+                        <div class="border rounded p-3 h-100 bg-light">
+                            <div class="d-flex justify-content-between align-items-start gap-2">
+                                <div>
+                                    <h6 class="mb-1"><i class="bi <?=$blocoAdmin[2]?> me-1 text-primary"></i><?=htmlspecialchars($blocoAdmin[0])?></h6>
+                                    <p class="small text-muted mb-0"><?=htmlspecialchars($blocoAdmin[1])?></p>
+                                </div>
+                                <span class="badge bg-secondary"><?=is_int($blocoAdmin[3]) ? $blocoAdmin[3] : htmlspecialchars((string)$blocoAdmin[3])?></span>
+                            </div>
+                        </div>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-4">
+        <div class="card shadow-sm border-0 mb-4">
+            <div class="card-header bg-dark text-white"><i class="bi bi-diagram-3-fill me-1"></i> Identidade SaaS</div>
+            <div class="card-body small">
+                <div class="mb-2"><span class="text-muted">Tenant:</span><br><code><?=htmlspecialchars($cfg['tenant_id'])?></code></div>
+                <div class="mb-2"><span class="text-muted">Instalação:</span><br><code><?=htmlspecialchars($cfg['identificador_instalacao'])?></code></div>
+                <div class="mb-2"><span class="text-muted">Plano atual:</span> <strong><?=htmlspecialchars(strtoupper($cfg['plano_licenca']))?></strong></div>
+                <div><span class="text-muted">Status:</span> <span class="badge <?=$cfg['status_licenca']==='ativa'?'bg-success':'bg-warning text-dark'?>"><?=htmlspecialchars($cfg['status_licenca'])?></span></div>
+            </div>
+        </div>
+        <div class="card shadow-sm border-0">
+            <div class="card-header bg-dark text-white"><i class="bi bi-lock-fill me-1"></i> Segurança da Etapa</div>
+            <div class="card-body small">
+                <p class="mb-2"><i class="bi bi-check-circle-fill text-success me-1"></i>Acesso validado pelo MASTER técnico.</p>
+                <p class="mb-2"><i class="bi bi-check-circle-fill text-success me-1"></i>Tabelas criadas sem apagar ou alterar registros existentes.</p>
+                <p class="mb-2"><i class="bi bi-check-circle-fill text-success me-1"></i>Sem comunicação externa ou atualização remota.</p>
+                <p class="mb-0"><i class="bi bi-check-circle-fill text-success me-1"></i>Pronto para receber a Central de Licenças no próximo arquivo homologado.</p>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="card shadow-sm border-0 mt-4">
+    <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-key-fill me-1"></i> Central de Licenças</span>
+        <span class="badge bg-light text-primary"><?=count($licencasSaas)?> licença(s)</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-info small border-0">
+            A licença vinculada ao tenant desta instalação permanece sincronizada com as configurações antigas, garantindo compatibilidade com os módulos existentes.
+        </div>
+        <form method="post" class="row g-3 mb-4">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="salvar_licenca_saas">
+            <input type="hidden" name="licenca_id" value="<?=(int)($licencaEditar['id'] ?? 0)?>">
+            <div class="col-lg-4">
+                <label class="form-label">Escritório / tenant</label>
+                <select name="escritorio_id" class="form-select" required>
+                    <option value="">Selecione</option>
+                    <?php foreach ($escritoriosSaas as $escritorioLicenca): ?>
+                        <option value="<?=(int)$escritorioLicenca['id']?>" <?=((int)($licencaEditar['escritorio_id'] ?? $escritorioAtualSaasId)===(int)$escritorioLicenca['id'])?'selected':''?>>
+                            <?=htmlspecialchars($escritorioLicenca['nome'])?> — <?=htmlspecialchars($escritorioLicenca['tenant_id'])?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-lg-4">
+                <label class="form-label">Chave da licença</label>
+                <input type="text" name="chave_licenca" class="form-control font-monospace" maxlength="120" required value="<?=htmlspecialchars((string)($licencaEditar['chave_licenca'] ?? ''))?>" placeholder="ROJEX-LICENCA-...">
+            </div>
+            <div class="col-lg-2">
+                <label class="form-label">Plano</label>
+                <select name="plano_licenca_saas" class="form-select">
+                    <?php foreach (['starter'=>'Starter','professional'=>'Professional','enterprise'=>'Enterprise'] as $valorPlano=>$nomePlano): ?>
+                        <option value="<?=$valorPlano?>" <?=(($licencaEditar['plano'] ?? 'enterprise')===$valorPlano)?'selected':''?>><?=$nomePlano?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-lg-2">
+                <label class="form-label">Status</label>
+                <select name="status_licenca_saas" class="form-select">
+                    <?php foreach (['teste'=>'Teste','ativa'=>'Ativa','suspensa'=>'Suspensa','expirada'=>'Expirada','cancelada'=>'Cancelada'] as $valorStatus=>$nomeStatus): ?>
+                        <option value="<?=$valorStatus?>" <?=(($licencaEditar['status'] ?? 'teste')===$valorStatus)?'selected':''?>><?=$nomeStatus?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-3"><label class="form-label">Limite de usuários</label><input type="number" name="limite_usuarios_saas" class="form-control" min="1" max="1000" value="<?=(int)($licencaEditar['limite_usuarios'] ?? 100)?>"></div>
+            <div class="col-md-3"><label class="form-label">Armazenamento (GB)</label><input type="number" name="limite_armazenamento_saas" class="form-control" min="1" max="100000" value="<?=(int)($licencaEditar['limite_armazenamento_gb'] ?? 50)?>"></div>
+            <div class="col-md-3"><label class="form-label">Ativação</label><input type="date" name="ativada_em" class="form-control" value="<?=htmlspecialchars((string)($licencaEditar['ativada_em'] ?? ''))?>"></div>
+            <div class="col-md-3"><label class="form-label">Renovação</label><input type="date" name="renovacao_em" class="form-control" value="<?=htmlspecialchars((string)($licencaEditar['renovacao_em'] ?? ''))?>"></div>
+            <div class="col-12"><label class="form-label">Observações administrativas</label><textarea name="observacoes_licenca" class="form-control" rows="2" maxlength="1500"><?=htmlspecialchars((string)($licencaEditar['observacoes'] ?? ''))?></textarea></div>
+            <div class="col-12 d-flex gap-2">
+                <button class="btn btn-primary"><i class="bi bi-save me-1"></i><?=$licencaEditar?'Atualizar licença':'Cadastrar licença'?></button>
+                <?php if ($licencaEditar): ?><a href="?mod=configuracoes&tab=administracao" class="btn btn-outline-secondary">Cancelar edição</a><?php endif; ?>
+            </div>
+        </form>
+
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light"><tr><th>Escritório</th><th>Chave</th><th>Plano</th><th>Status</th><th>Limites</th><th>Vigência</th><th class="text-end">Ações</th></tr></thead>
+                <tbody>
+                <?php if (!$licencasSaas): ?>
+                    <tr><td colspan="7" class="text-center text-muted py-4">Nenhuma licença cadastrada.</td></tr>
+                <?php else: foreach ($licencasSaas as $licencaItem):
+                    $statusBadge = ['ativa'=>'success','teste'=>'info','suspensa'=>'warning','expirada'=>'danger','cancelada'=>'secondary'][$licencaItem['status']] ?? 'secondary';
+                ?>
+                    <tr>
+                        <td><strong><?=htmlspecialchars((string)($licencaItem['escritorio_nome'] ?? 'Sem vínculo'))?></strong><br><small class="text-muted"><?=htmlspecialchars((string)($licencaItem['tenant_id'] ?? '-'))?></small></td>
+                        <td><code><?=htmlspecialchars($licencaItem['chave_licenca'])?></code></td>
+                        <td><?=htmlspecialchars(ucfirst($licencaItem['plano']))?></td>
+                        <td><span class="badge bg-<?=$statusBadge?>"><?=htmlspecialchars($licencaItem['status'])?></span></td>
+                        <td><small><?=(int)$licencaItem['limite_usuarios']?> usuário(s)<br><?=(int)$licencaItem['limite_armazenamento_gb']?> GB</small></td>
+                        <td><small>Ativação: <?=htmlspecialchars($licencaItem['ativada_em'] ?: '-')?><br>Renovação: <?=htmlspecialchars($licencaItem['renovacao_em'] ?: '-')?></small></td>
+                        <td class="text-end">
+                            <a class="btn btn-sm btn-outline-primary" href="?mod=configuracoes&tab=administracao&editar_licenca=<?=(int)$licencaItem['id']?>" title="Editar"><i class="bi bi-pencil"></i></a>
+                            <div class="dropdown d-inline-block">
+                                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">Status</button>
+                                <ul class="dropdown-menu dropdown-menu-end">
+                                    <?php foreach (['ativa'=>'Ativar','teste'=>'Colocar em teste','suspensa'=>'Suspender','expirada'=>'Marcar expirada','cancelada'=>'Cancelar'] as $statusAcao=>$rotuloAcao): ?>
+                                    <li><form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_licenca_saas"><input type="hidden" name="licenca_id" value="<?=(int)$licencaItem['id']?>"><input type="hidden" name="novo_status" value="<?=$statusAcao?>"><button class="dropdown-item" onclick="return confirm('Confirma a alteração do status desta licença?')"><?=$rotuloAcao?></button></form></li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            </div>
+                        </td>
+                    </tr>
+                <?php endforeach; endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+
+<?php if ($tab_ativa === 'administracao'): ?>
+<div class="card shadow-sm border-0 mt-4">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-buildings-fill me-1"></i> Gestão de Escritórios — Multi-Tenant</span>
+        <span class="badge bg-light text-dark"><?=count($escritoriosSaas)?> resultado(s)</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-warning small border-0">
+            Esta etapa administra o cadastro central dos tenants. O isolamento físico/lógico dos dados dos módulos será aplicado em etapa específica de migração, sem misturar registros atuais.
+        </div>
+
+        <form method="get" class="row g-2 mb-4">
+            <input type="hidden" name="mod" value="configuracoes">
+            <input type="hidden" name="tab" value="administracao">
+            <div class="col-lg-5"><input type="search" name="escritorio_q" class="form-control" value="<?=htmlspecialchars($escritorioBusca)?>" placeholder="Buscar por nome, tenant, documento ou responsável"></div>
+            <div class="col-lg-2"><select name="escritorio_status" class="form-select"><option value="">Todos os status</option><?php foreach(['implantacao'=>'Implantação','ativo'=>'Ativo','suspenso'=>'Suspenso','bloqueado'=>'Bloqueado','encerrado'=>'Encerrado'] as $v=>$n): ?><option value="<?=$v?>" <?=$escritorioStatusFiltro===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
+            <div class="col-lg-2"><select name="escritorio_plano" class="form-select"><option value="">Todos os planos</option><?php foreach(['starter'=>'Starter','professional'=>'Professional','enterprise'=>'Enterprise'] as $v=>$n): ?><option value="<?=$v?>" <?=$escritorioPlanoFiltro===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
+            <div class="col-lg-3 d-flex gap-2"><button class="btn btn-outline-primary flex-grow-1"><i class="bi bi-search"></i> Filtrar</button><a href="?mod=configuracoes&tab=administracao" class="btn btn-outline-secondary">Limpar</a></div>
+        </form>
+
+        <form method="post" class="row g-3 border rounded p-3 bg-light mb-4">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="salvar_escritorio_saas">
+            <input type="hidden" name="escritorio_saas_id" value="<?=(int)($escritorioEditar['id'] ?? 0)?>">
+            <div class="col-12"><h6 class="mb-0"><?=$escritorioEditar?'Editar escritório':'Cadastrar novo escritório'?></h6></div>
+            <div class="col-lg-4"><label class="form-label">Nome do escritório *</label><input name="nome_escritorio_saas" class="form-control" maxlength="180" required value="<?=htmlspecialchars((string)($escritorioEditar['nome'] ?? ''))?>"></div>
+            <div class="col-lg-4"><label class="form-label">Tenant ID</label><input name="tenant_id_saas" class="form-control font-monospace" maxlength="80" value="<?=htmlspecialchars((string)($escritorioEditar['tenant_id'] ?? ''))?>" placeholder="Gerado automaticamente se vazio"></div>
+            <div class="col-lg-4"><label class="form-label">CPF/CNPJ</label><input name="documento_escritorio_saas" class="form-control" maxlength="30" value="<?=htmlspecialchars((string)($escritorioEditar['documento'] ?? ''))?>"></div>
+            <div class="col-lg-3"><label class="form-label">Responsável</label><input name="responsavel_escritorio_saas" class="form-control" maxlength="140" value="<?=htmlspecialchars((string)($escritorioEditar['responsavel'] ?? ''))?>"></div>
+            <div class="col-lg-3"><label class="form-label">E-mail</label><input type="email" name="email_escritorio_saas" class="form-control" maxlength="140" value="<?=htmlspecialchars((string)($escritorioEditar['email'] ?? ''))?>"></div>
+            <div class="col-lg-2"><label class="form-label">Telefone</label><input name="telefone_escritorio_saas" class="form-control" maxlength="40" value="<?=htmlspecialchars((string)($escritorioEditar['telefone'] ?? ''))?>"></div>
+            <div class="col-lg-2"><label class="form-label">Cidade</label><input name="cidade_escritorio_saas" class="form-control" maxlength="100" value="<?=htmlspecialchars((string)($escritorioEditar['cidade'] ?? ''))?>"></div>
+            <div class="col-lg-2"><label class="form-label">UF</label><input name="uf_escritorio_saas" class="form-control text-uppercase" maxlength="2" value="<?=htmlspecialchars((string)($escritorioEditar['uf'] ?? ''))?>"></div>
+            <div class="col-lg-4"><label class="form-label">Subdomínio</label><input name="subdominio_escritorio_saas" class="form-control" maxlength="180" value="<?=htmlspecialchars((string)($escritorioEditar['subdominio'] ?? ''))?>" placeholder="cliente.rojex.ai"></div>
+            <div class="col-lg-2"><label class="form-label">Plano</label><select name="plano_escritorio_saas" class="form-select"><?php foreach(['starter'=>'Starter','professional'=>'Professional','enterprise'=>'Enterprise'] as $v=>$n): ?><option value="<?=$v?>" <?=($escritorioEditar['plano'] ?? 'enterprise')===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
+            <div class="col-lg-2"><label class="form-label">Status</label><select name="status_escritorio_saas" class="form-select"><?php foreach(['implantacao'=>'Implantação','ativo'=>'Ativo','suspenso'=>'Suspenso','bloqueado'=>'Bloqueado','encerrado'=>'Encerrado'] as $v=>$n): ?><option value="<?=$v?>" <?=($escritorioEditar['status'] ?? 'implantacao')===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
+            <div class="col-lg-4"><label class="form-label">Observações</label><input name="observacoes_escritorio_saas" class="form-control" maxlength="1500" value="<?=htmlspecialchars((string)($escritorioEditar['observacoes'] ?? ''))?>"></div>
+            <div class="col-12 d-flex gap-2"><button class="btn btn-dark"><i class="bi bi-save me-1"></i><?=$escritorioEditar?'Atualizar escritório':'Cadastrar escritório'?></button><?php if($escritorioEditar): ?><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=administracao">Cancelar edição</a><?php endif; ?></div>
+        </form>
+
+        <div class="table-responsive">
+            <table class="table table-hover align-middle">
+                <thead class="table-light"><tr><th>Escritório / Tenant</th><th>Responsável</th><th>Plano</th><th>Status</th><th>Licenças</th><th>Atualização</th><th class="text-end">Ações</th></tr></thead>
+                <tbody>
+                <?php if(!$escritoriosSaas): ?><tr><td colspan="7" class="text-center text-muted py-4">Nenhum escritório encontrado.</td></tr>
+                <?php else: foreach($escritoriosSaas as $eItem):
+                    $badgeE=['ativo'=>'success','implantacao'=>'info','suspenso'=>'warning','bloqueado'=>'danger','encerrado'=>'secondary'][$eItem['status']] ?? 'secondary';
+                ?>
+                <tr>
+                    <td><strong><?=htmlspecialchars($eItem['nome'])?></strong><br><code><?=htmlspecialchars($eItem['tenant_id'])?></code><br><small class="text-muted"><?=htmlspecialchars(trim(($eItem['cidade'] ?? '').' '.($eItem['uf'] ?? '')) ?: '-')?></small></td>
+                    <td><?=htmlspecialchars($eItem['responsavel'] ?: '-')?><br><small class="text-muted"><?=htmlspecialchars($eItem['email'] ?: '-')?></small></td>
+                    <td><?=htmlspecialchars(ucfirst($eItem['plano']))?></td>
+                    <td><span class="badge bg-<?=$badgeE?>"><?=htmlspecialchars($eItem['status'])?></span></td>
+                    <td><small><?=(int)$eItem['total_licencas']?> total<br><?=(int)$eItem['licencas_ativas']?> ativa(s)</small></td>
+                    <td><small><?=!empty($eItem['atualizado_em'])?date('d/m/Y H:i',strtotime($eItem['atualizado_em'])):'-'?></small></td>
+                    <td class="text-end">
+                        <a href="?mod=configuracoes&tab=administracao&editar_escritorio=<?=(int)$eItem['id']?>" class="btn btn-sm btn-outline-primary" title="Editar"><i class="bi bi-pencil"></i></a>
+                        <div class="dropdown d-inline-block">
+                            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">Status</button>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <?php foreach(['implantacao'=>'Implantação','ativo'=>'Ativar','suspenso'=>'Suspender','bloqueado'=>'Bloquear','encerrado'=>'Encerrar'] as $v=>$n): ?>
+                                <li><form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_escritorio_saas"><input type="hidden" name="escritorio_saas_id" value="<?=(int)$eItem['id']?>"><input type="hidden" name="novo_status_escritorio" value="<?=$v?>"><button class="dropdown-item" <?=$eItem['status']===$v?'disabled':''?> onclick="return confirm('Confirmar alteração do status deste escritório?')"><?=$n?></button></form></li>
+                                <?php endforeach; ?>
+                            </ul>
+                        </div>
+                    </td>
+                </tr>
+                <?php endforeach; endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<?php endif; ?>
+
+
+
+
+<?php if ($tab_ativa === 'saude'): ?>
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-heart-pulse-fill me-1"></i> Painel de Saúde Consolidado Enterprise</span>
+        <span class="badge <?=$pontuacaoSaudeConsolidada>=85?'bg-success':($pontuacaoSaudeConsolidada>=65?'bg-warning text-dark':'bg-danger')?>"><?=$pontuacaoSaudeConsolidada?>%</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-info border-0">
+            Diagnóstico técnico do ambiente atual. Itens de localhost podem aparecer como atenção e devem ser revistos antes do deploy na Hostinger.
+        </div>
+
+        <div class="row g-3 mb-4">
+            <div class="col-md-3"><div class="card border-success h-100"><div class="card-body"><small class="text-muted">EXCELENTE</small><h2 class="text-success mb-0"><?=$quantidadeExcelenteSaude?></h2></div></div></div>
+            <div class="col-md-3"><div class="card border-warning h-100"><div class="card-body"><small class="text-muted">ATENÇÃO</small><h2 class="text-warning mb-0"><?=$quantidadeAtencaoSaude?></h2></div></div></div>
+            <div class="col-md-3"><div class="card border-danger h-100"><div class="card-body"><small class="text-muted">CRÍTICO</small><h2 class="text-danger mb-0"><?=$quantidadeCriticoSaude?></h2></div></div></div>
+            <div class="col-md-3"><div class="card border-primary h-100"><div class="card-body"><small class="text-muted">TEMPO DO DIAGNÓSTICO</small><h2 class="text-primary mb-0"><?=number_format($tempoRespostaDiagnosticoMs,2,',','.')?> ms</h2></div></div></div>
+        </div>
+
+        <div class="row g-4 mb-4">
+            <div class="col-xl-6">
+                <div class="card h-100 border-0 bg-light">
+                    <div class="card-body">
+                        <h6><i class="bi bi-database me-1"></i> Banco de Dados</h6>
+                        <div class="table-responsive"><table class="table table-sm mb-0">
+                            <tr><th>Versão</th><td><?=htmlspecialchars($versaoBancoServidor)?></td></tr>
+                            <tr><th>Tabelas</th><td><?=$totalTabelasBanco?></td></tr>
+                            <tr><th>Tamanho estimado</th><td><?=sgl_formatar_bytes($tamanhoBancoBytes)?></td></tr>
+                            <tr><th>Charset</th><td><?=htmlspecialchars($charsetBanco)?></td></tr>
+                            <tr><th>Consulta de diagnóstico</th><td><?=number_format($tempoConsultaMs,2,',','.')?> ms</td></tr>
+                        </table></div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-xl-6">
+                <div class="card h-100 border-0 bg-light">
+                    <div class="card-body">
+                        <h6><i class="bi bi-cpu me-1"></i> Servidor e PHP</h6>
+                        <div class="table-responsive"><table class="table table-sm mb-0">
+                            <tr><th>Servidor</th><td><?=htmlspecialchars($servidorWeb)?></td></tr>
+                            <tr><th>PHP</th><td><?=htmlspecialchars(PHP_VERSION)?></td></tr>
+                            <tr><th>Memória atual / pico</th><td><?=sgl_formatar_bytes($memoriaAtualBytes)?> / <?=sgl_formatar_bytes($memoriaPicoBytes)?></td></tr>
+                            <tr><th>Disco livre</th><td><?=sgl_formatar_bytes($espacoLivreDisco)?></td></tr>
+                            <tr><th>Timezone</th><td><?=htmlspecialchars($timezonePhp)?></td></tr>
+                        </table></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-hover align-middle">
+                <thead class="table-dark"><tr><th>Categoria</th><th>Verificação</th><th>Resultado</th><th>Status</th><th>Recomendação</th></tr></thead>
+                <tbody>
+                <?php foreach ($checksSaudeConsolidada as $checkSaude): 
+                    $classeSaude = $checkSaude['nivel']==='excelente'?'bg-success':($checkSaude['nivel']==='atencao'?'bg-warning text-dark':'bg-danger');
+                    $rotuloSaude = $checkSaude['nivel']==='excelente'?'Excelente':($checkSaude['nivel']==='atencao'?'Atenção':'Crítico');
+                ?>
+                    <tr>
+                        <td><?=htmlspecialchars($checkSaude['categoria'])?></td>
+                        <td><strong><?=htmlspecialchars($checkSaude['item'])?></strong></td>
+                        <td><?=htmlspecialchars($checkSaude['valor'])?></td>
+                        <td><span class="badge <?=$classeSaude?>"><?=$rotuloSaude?></span></td>
+                        <td><small><?=htmlspecialchars($checkSaude['recomendacao'])?></small></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <div class="alert alert-secondary small mb-0">
+            Este painel é somente diagnóstico. Nenhuma configuração do servidor, banco ou hospedagem é alterada automaticamente.
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+
+
+
+
+<?php if ($tab_ativa === 'atualizacoes'): ?>
+<div class="row g-3 mb-4">
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <small class="text-muted">VERSÃO INSTALADA</small>
+                <h3 class="mb-1"><?=htmlspecialchars($versaoSistemaAtual)?></h3>
+                <span class="badge bg-primary"><?=htmlspecialchars($ambienteSistemaAtual)?></span>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <small class="text-muted">PHP</small>
+                <h4 class="mb-1"><?=htmlspecialchars(PHP_VERSION)?></h4>
+                <small class="text-muted">Ambiente atual</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <small class="text-muted">BANCO</small>
+                <h6 class="mb-1 text-break"><?=htmlspecialchars($versaoBancoAtual)?></h6>
+                <small class="text-muted">MySQL/MariaDB</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-body">
+                <small class="text-muted">BACKUP RECENTE</small>
+                <h5 class="mb-1"><?=$backupAtualizacaoRecente['ok']?'Disponível':'Necessário'?></h5>
+                <span class="badge <?=$backupAtualizacaoRecente['ok']?'bg-success':'bg-warning text-dark'?>">
+                    <?=$backupAtualizacaoRecente['ok']?'Íntegro':'Atenção'?>
+                </span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-arrow-repeat me-1"></i> Central de Atualizações Enterprise</span>
+        <span class="badge bg-light text-dark">MASTER</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-info border-0">
+            <strong>Modo seguro:</strong> esta etapa cadastra versões, mantém o changelog e simula compatibilidade.
+            Nenhum arquivo do sistema é substituído automaticamente.
+        </div>
+
+        <form method="post" class="row g-3">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="salvar_atualizacao">
+            <input type="hidden" name="atualizacao_id" id="atualizacao_id" value="0">
+
+            <div class="col-md-3">
+                <label class="form-label">Versão *</label>
+                <input type="text" name="atualizacao_versao" id="atualizacao_versao" class="form-control" placeholder="Ex.: 4.1.3" required>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Título *</label>
+                <input type="text" name="atualizacao_titulo" id="atualizacao_titulo" class="form-control" placeholder="Nome da versão" required>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Tipo</label>
+                <select name="atualizacao_tipo" id="atualizacao_tipo" class="form-select">
+                    <option value="melhoria">Melhoria</option>
+                    <option value="correcao">Correção</option>
+                    <option value="seguranca">Segurança</option>
+                    <option value="banco">Banco de dados</option>
+                    <option value="interface">Interface</option>
+                    <option value="integracao">Integração</option>
+                </select>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Status</label>
+                <select name="atualizacao_status" id="atualizacao_status" class="form-select">
+                    <option value="planejada">Planejada</option>
+                    <option value="disponivel">Disponível</option>
+                    <option value="homologacao">Homologação</option>
+                    <option value="instalada">Instalada</option>
+                    <option value="cancelada">Cancelada</option>
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Impacto</label>
+                <select name="atualizacao_impacto" id="atualizacao_impacto" class="form-select">
+                    <option value="baixo">Baixo</option>
+                    <option value="medio">Médio</option>
+                    <option value="alto">Alto</option>
+                    <option value="critico">Crítico</option>
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Publicação</label>
+                <input type="datetime-local" name="atualizacao_publicada_em" id="atualizacao_publicada_em" class="form-control">
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">PHP mínimo</label>
+                <input type="text" name="atualizacao_php_minimo" id="atualizacao_php_minimo" class="form-control" value="8.0.0">
+            </div>
+            <div class="col-md-4">
+                <label class="form-label">Banco mínimo</label>
+                <input type="text" name="atualizacao_banco_minimo" id="atualizacao_banco_minimo" class="form-control" placeholder="Ex.: MariaDB 10.4">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Arquivos estimados</label>
+                <input type="number" name="atualizacao_arquivos_estimados" id="atualizacao_arquivos_estimados" class="form-control" min="0" value="0">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Tamanho (MB)</label>
+                <input type="number" step="0.01" name="atualizacao_tamanho_mb" id="atualizacao_tamanho_mb" class="form-control" min="0" value="0">
+            </div>
+
+            <div class="col-12">
+                <label class="form-label">Descrição</label>
+                <textarea name="atualizacao_descricao" id="atualizacao_descricao" class="form-control" rows="2"></textarea>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Changelog</label>
+                <textarea name="atualizacao_changelog" id="atualizacao_changelog" class="form-control" rows="5" placeholder="- Nova funcionalidade&#10;- Correção realizada"></textarea>
+            </div>
+            <div class="col-md-6">
+                <label class="form-label">Requisitos e observações</label>
+                <textarea name="atualizacao_requisitos" id="atualizacao_requisitos" class="form-control" rows="5"></textarea>
+            </div>
+
+            <div class="col-md-6">
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" name="atualizacao_obrigatoria" value="1" id="atualizacao_obrigatoria">
+                    <label class="form-check-label" for="atualizacao_obrigatoria">
+                        Atualização obrigatória
+                    </label>
+                </div>
+            </div>
+            <div class="col-md-6 d-flex gap-2 justify-content-md-end">
+                <button type="button" class="btn btn-outline-secondary" onclick="rojexLimparAtualizacao()">
+                    Limpar
+                </button>
+                <button class="btn btn-primary">
+                    <i class="bi bi-save me-1"></i> Salvar atualização
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<?php if (is_array($atualizacaoPreview)): ?>
+<div class="card shadow-sm border-primary mb-4">
+    <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-clipboard-check me-1"></i> Simulação de compatibilidade — <?=htmlspecialchars($atualizacaoPreview['versao'])?></span>
+        <span class="badge bg-light text-primary"><?=$atualizacaoPreview['percentual']?>%</span>
+    </div>
+    <div class="card-body">
+        <div class="alert <?=$atualizacaoPreview['status']==='compativel'?'alert-success':($atualizacaoPreview['status']==='atencao'?'alert-warning':'alert-danger')?>">
+            <strong>Status:</strong> <?=htmlspecialchars(strtoupper($atualizacaoPreview['status']))?>.
+            Esta simulação não alterou arquivos, banco de dados ou versão instalada.
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-hover align-middle">
+                <thead>
+                    <tr><th>Verificação</th><th>Atual</th><th>Requisito</th><th>Status</th><th>Recomendação</th></tr>
+                </thead>
+                <tbody>
+                <?php foreach ($atualizacaoPreview['checks'] as $checkAtualizacao): ?>
+                    <tr>
+                        <td class="fw-semibold"><?=htmlspecialchars($checkAtualizacao['titulo'])?></td>
+                        <td><?=htmlspecialchars((string)$checkAtualizacao['atual'])?></td>
+                        <td><?=htmlspecialchars((string)$checkAtualizacao['requerido'])?></td>
+                        <td>
+                            <span class="badge <?=$checkAtualizacao['ok']?'bg-success':'bg-warning text-dark'?>">
+                                <?=$checkAtualizacao['ok']?'Aprovado':'Atenção'?>
+                            </span>
+                        </td>
+                        <td><small><?=htmlspecialchars($checkAtualizacao['recomendacao'])?></small></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+<div class="card shadow-sm border-0">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-clock-history me-1"></i> Histórico e changelog</span>
+        <span class="badge bg-light text-dark"><?=count($atualizacoesLista)?></span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Versão</th><th>Título</th><th>Tipo</th><th>Status</th>
+                        <th>Impacto</th><th>Compatibilidade</th><th>Publicação</th><th>Ações</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php if (!$atualizacoesLista): ?>
+                    <tr><td colspan="8" class="text-center text-muted py-4">Nenhuma atualização cadastrada.</td></tr>
+                <?php else: foreach ($atualizacoesLista as $itemAtualizacao): ?>
+                    <tr>
+                        <td>
+                            <strong><?=htmlspecialchars($itemAtualizacao['versao'])?></strong>
+                            <?php if ((int)$itemAtualizacao['obrigatoria'] === 1): ?>
+                                <span class="badge bg-danger ms-1">Obrigatória</span>
+                            <?php endif; ?>
+                        </td>
+                        <td>
+                            <?=htmlspecialchars($itemAtualizacao['titulo'])?>
+                            <?php if (!empty($itemAtualizacao['changelog'])): ?>
+                                <details class="small mt-1">
+                                    <summary class="text-primary">Ver changelog</summary>
+                                    <div class="border rounded p-2 mt-1 bg-light" style="white-space:pre-wrap"><?=htmlspecialchars($itemAtualizacao['changelog'])?></div>
+                                </details>
+                            <?php endif; ?>
+                        </td>
+                        <td><span class="badge bg-secondary"><?=htmlspecialchars($itemAtualizacao['tipo'] ?: 'melhoria')?></span></td>
+                        <td>
+                            <?php
+                            $classeStatusAtualizacao = match ((string)$itemAtualizacao['status']) {
+                                'instalada' => 'bg-success',
+                                'disponivel' => 'bg-primary',
+                                'homologacao' => 'bg-warning text-dark',
+                                'cancelada' => 'bg-danger',
+                                default => 'bg-secondary',
+                            };
+                            ?>
+                            <span class="badge <?=$classeStatusAtualizacao?>"><?=htmlspecialchars($itemAtualizacao['status'])?></span>
+                        </td>
+                        <td><?=htmlspecialchars($itemAtualizacao['impacto'] ?: 'baixo')?></td>
+                        <td>
+                            <?php
+                            $compatibilidade = (string)($itemAtualizacao['compatibilidade_status'] ?? '');
+                            $classeCompatibilidade = $compatibilidade === 'compativel'
+                                ? 'bg-success'
+                                : ($compatibilidade === 'incompativel' ? 'bg-danger' : 'bg-secondary');
+                            ?>
+                            <span class="badge <?=$classeCompatibilidade?>"><?=htmlspecialchars($compatibilidade ?: 'não verificada')?></span>
+                        </td>
+                        <td>
+                            <small>
+                                <?=$itemAtualizacao['publicada_em']
+                                    ? htmlspecialchars(date('d/m/Y H:i', strtotime($itemAtualizacao['publicada_em'])))
+                                    : '—'?>
+                            </small>
+                        </td>
+                        <td>
+                            <div class="d-flex flex-wrap gap-1">
+                                <button
+                                    type="button"
+                                    class="btn btn-sm btn-outline-secondary"
+                                    onclick='rojexEditarAtualizacao(<?=json_encode([
+                                        "id" => (int)$itemAtualizacao["id"],
+                                        "versao" => (string)$itemAtualizacao["versao"],
+                                        "titulo" => (string)$itemAtualizacao["titulo"],
+                                        "descricao" => (string)($itemAtualizacao["descricao"] ?? ""),
+                                        "tipo" => (string)($itemAtualizacao["tipo"] ?? "melhoria"),
+                                        "status" => (string)$itemAtualizacao["status"],
+                                        "impacto" => (string)($itemAtualizacao["impacto"] ?? "baixo"),
+                                        "php_minimo" => (string)($itemAtualizacao["versao_php_minima"] ?? "8.0.0"),
+                                        "banco_minimo" => (string)($itemAtualizacao["versao_banco_minima"] ?? ""),
+                                        "arquivos" => (int)($itemAtualizacao["arquivos_estimados"] ?? 0),
+                                        "tamanho_mb" => round(((int)($itemAtualizacao["tamanho_estimado_bytes"] ?? 0)) / 1048576, 2),
+                                        "publicada_em" => $itemAtualizacao["publicada_em"]
+                                            ? date("Y-m-d\\TH:i", strtotime($itemAtualizacao["publicada_em"]))
+                                            : "",
+                                        "changelog" => (string)($itemAtualizacao["changelog"] ?? ""),
+                                        "requisitos" => (string)($itemAtualizacao["requisitos"] ?? ""),
+                                        "obrigatoria" => (int)$itemAtualizacao["obrigatoria"],
+                                    ], JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_AMP|JSON_HEX_QUOT)?>)'>
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+
+                                <form method="post" class="d-inline">
+                                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                    <input type="hidden" name="acao_cfg" value="simular_atualizacao">
+                                    <input type="hidden" name="atualizacao_id" value="<?=(int)$itemAtualizacao['id']?>">
+                                    <button class="btn btn-sm btn-outline-primary" title="Simular compatibilidade">
+                                        <i class="bi bi-search"></i>
+                                    </button>
+                                </form>
+
+                                <form method="post" class="d-inline">
+                                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                    <input type="hidden" name="acao_cfg" value="alterar_status_atualizacao">
+                                    <input type="hidden" name="atualizacao_id" value="<?=(int)$itemAtualizacao['id']?>">
+                                    <select name="novo_status_atualizacao" class="form-select form-select-sm" onchange="this.form.submit()">
+                                        <?php foreach (['planejada','disponivel','homologacao','instalada','cancelada'] as $statusOpcao): ?>
+                                            <option value="<?=$statusOpcao?>" <?=$itemAtualizacao['status']===$statusOpcao?'selected':''?>><?=$statusOpcao?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                <?php endforeach; endif; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+function rojexLimparAtualizacao() {
+    const ids = [
+        'atualizacao_id','atualizacao_versao','atualizacao_titulo','atualizacao_descricao',
+        'atualizacao_changelog','atualizacao_requisitos','atualizacao_banco_minimo',
+        'atualizacao_arquivos_estimados','atualizacao_tamanho_mb','atualizacao_publicada_em'
+    ];
+    ids.forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.value = id === 'atualizacao_id' ? '0' : (id === 'atualizacao_arquivos_estimados' || id === 'atualizacao_tamanho_mb' ? '0' : '');
+    });
+    document.getElementById('atualizacao_php_minimo').value = '8.0.0';
+    document.getElementById('atualizacao_tipo').value = 'melhoria';
+    document.getElementById('atualizacao_status').value = 'planejada';
+    document.getElementById('atualizacao_impacto').value = 'baixo';
+    document.getElementById('atualizacao_obrigatoria').checked = false;
+}
+
+function rojexEditarAtualizacao(dados) {
+    document.getElementById('atualizacao_id').value = dados.id || 0;
+    document.getElementById('atualizacao_versao').value = dados.versao || '';
+    document.getElementById('atualizacao_titulo').value = dados.titulo || '';
+    document.getElementById('atualizacao_descricao').value = dados.descricao || '';
+    document.getElementById('atualizacao_tipo').value = dados.tipo || 'melhoria';
+    document.getElementById('atualizacao_status').value = dados.status || 'planejada';
+    document.getElementById('atualizacao_impacto').value = dados.impacto || 'baixo';
+    document.getElementById('atualizacao_php_minimo').value = dados.php_minimo || '8.0.0';
+    document.getElementById('atualizacao_banco_minimo').value = dados.banco_minimo || '';
+    document.getElementById('atualizacao_arquivos_estimados').value = dados.arquivos || 0;
+    document.getElementById('atualizacao_tamanho_mb').value = dados.tamanho_mb || 0;
+    document.getElementById('atualizacao_publicada_em').value = dados.publicada_em || '';
+    document.getElementById('atualizacao_changelog').value = dados.changelog || '';
+    document.getElementById('atualizacao_requisitos').value = dados.requisitos || '';
+    document.getElementById('atualizacao_obrigatoria').checked = Number(dados.obrigatoria || 0) === 1;
+    window.scrollTo({top: 0, behavior: 'smooth'});
+}
+</script>
+<?php endif; ?>
+
+
+<?php if ($tab_ativa === 'backup'): ?>
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-cloud-arrow-up-fill me-1"></i> Estrutura de Backup Enterprise</span>
+        <span class="badge bg-light text-dark">MASTER</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-info border-0">
+            <strong>Armazenamento protegido:</strong> os arquivos são gravados em
+            <code>storage/backups</code>, com bloqueio de acesso direto pelo navegador.
+            A restauração automática ainda não é executada nesta etapa.
+        </div>
+
+        <?php if (!$backupZipDisponivel): ?>
+        <div class="alert alert-warning">
+            A extensão <strong>ZipArchive</strong> não está disponível. O backup do banco em SQL funcionará,
+            mas os backups de arquivos e o backup completo dependerão da ativação da extensão ZIP no PHP.
+        </div>
+        <?php endif; ?>
+
+        <form method="post" class="row g-3 align-items-end">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="simular_backup">
+
+            <div class="col-md-8">
+                <label class="form-label fw-semibold">Tipo de backup</label>
+                <select name="backup_tipo" class="form-select">
+                    <option value="banco">Banco de dados — arquivo SQL</option>
+                    <option value="arquivos">Arquivos operacionais — arquivo ZIP</option>
+                    <option value="completo">Completo — banco e arquivos em ZIP</option>
+                </select>
+                <div class="form-text">Primeiro será exibida uma simulação, sem criação de arquivos.</div>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label invisible" aria-hidden="true">Ação</label>
+                <button class="btn btn-primary w-100">
+                    <i class="bi bi-eye me-1"></i> Simular backup
+                </button>
+                <div class="form-text invisible" aria-hidden="true">Alinhamento</div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<?php if (is_array($backupPreview)): ?>
+<div class="card shadow-sm border-primary mb-4">
+    <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-clipboard-check me-1"></i> Prévia do backup</span>
+        <span class="badge bg-light text-primary">válida por 30 minutos</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                    <small class="text-muted">TIPO</small>
+                    <h5 class="mb-0 text-uppercase"><?=htmlspecialchars($backupPreview['tipo'])?></h5>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                    <small class="text-muted">TABELAS</small>
+                    <h4 class="mb-0"><?=(int)$backupPreview['tabelas']?></h4>
+                    <small><?=sgl_formatar_bytes((float)$backupPreview['estimativa_banco_bytes'])?> estimados</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                    <small class="text-muted">ARQUIVOS</small>
+                    <h4 class="mb-0"><?=(int)$backupPreview['arquivos_quantidade']?></h4>
+                    <small><?=sgl_formatar_bytes((float)$backupPreview['arquivos_bytes'])?></small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                    <small class="text-muted">ZIP</small>
+                    <h5 class="mb-0"><?=$backupPreview['zip_disponivel']?'Disponível':'Indisponível'?></h5>
+                </div>
+            </div>
+        </div>
+
+        <form method="post" class="row g-3 align-items-end">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="executar_backup">
+            <input type="hidden" name="backup_hash" value="<?=htmlspecialchars((string)$backupPreview['hash'])?>">
+
+            <div class="col-md-8">
+                <label class="form-label fw-semibold">Confirmação obrigatória</label>
+                <input type="text" name="confirmacao_backup" class="form-control" autocomplete="off" placeholder="Digite BACKUP">
+                <div class="form-text">O backup será gerado com os parâmetros exatos desta simulação.</div>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label invisible" aria-hidden="true">Ação</label>
+                <button class="btn btn-success w-100" onclick="return confirm('Confirma a criação do backup?')">
+                    <i class="bi bi-cloud-arrow-up me-1"></i> Criar backup
+                </button>
+                <div class="form-text invisible" aria-hidden="true">Alinhamento</div>
+            </div>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
+
+<?php if (is_array($backupUltimoResultado)): ?>
+<div class="alert alert-success shadow-sm">
+    <h6 class="alert-heading"><i class="bi bi-check-circle-fill me-1"></i> Backup criado e verificado</h6>
+    <div class="row g-2 small">
+        <div class="col-md-3">Tipo: <strong><?=htmlspecialchars($backupUltimoResultado['tipo'])?></strong></div>
+        <div class="col-md-3">Arquivo: <strong><?=htmlspecialchars($backupUltimoResultado['arquivo'])?></strong></div>
+        <div class="col-md-3">Tamanho: <strong><?=sgl_formatar_bytes((float)$backupUltimoResultado['tamanho'])?></strong></div>
+        <div class="col-md-3">Itens: <strong><?=(int)$backupUltimoResultado['quantidade']?></strong></div>
+    </div>
+    <div class="small mt-2"><strong>SHA-256:</strong> <code><?=htmlspecialchars($backupUltimoResultado['hash'])?></code></div>
+</div>
+<?php endif; ?>
+
+<div class="row g-4">
+    <div class="col-xl-4">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white"><i class="bi bi-shield-lock me-1"></i> Segurança do backup</div>
+            <div class="card-body small">
+                <p><i class="bi bi-check-circle-fill text-success me-1"></i>Acesso exclusivo do MASTER.</p>
+                <p><i class="bi bi-check-circle-fill text-success me-1"></i>CSRF e confirmação textual obrigatórios.</p>
+                <p><i class="bi bi-check-circle-fill text-success me-1"></i>Hash SHA-256 gerado após a criação.</p>
+                <p><i class="bi bi-check-circle-fill text-success me-1"></i>Arquivos armazenados fora das pastas públicas usuais.</p>
+                <p class="mb-0"><i class="bi bi-check-circle-fill text-success me-1"></i>Nenhuma restauração é executada automaticamente.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-8">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-clock-history me-1"></i> Histórico de backups</span>
+                <span class="badge bg-light text-dark"><?=count($backupsRecentes)?></span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Data</th><th>Escopo</th><th>Arquivo</th><th>Tamanho</th>
+                                <th>Status</th><th>Integridade</th><th>Ação</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php if (!$backupsRecentes): ?>
+                            <tr><td colspan="7" class="text-center text-muted py-4">Nenhum backup registrado.</td></tr>
+                        <?php else: foreach ($backupsRecentes as $backupItem): ?>
+                            <tr>
+                                <td><small><?=htmlspecialchars(date('d/m/Y H:i', strtotime($backupItem['criado_em'])))?></small></td>
+                                <td><span class="badge bg-secondary"><?=htmlspecialchars($backupItem['escopo'] ?: '-')?></span></td>
+                                <td>
+                                    <small class="d-block text-break"><?=htmlspecialchars($backupItem['nome_original'] ?: basename((string)$backupItem['arquivo']))?></small>
+                                    <small class="text-muted"><?=htmlspecialchars($backupItem['responsavel_nome'] ?: 'Sistema')?></small>
+                                </td>
+                                <td><?=sgl_formatar_bytes((float)($backupItem['tamanho_bytes'] ?? 0))?></td>
+                                <td>
+                                    <span class="badge <?=$backupItem['status']==='concluido'?'bg-success':'bg-danger'?>">
+                                        <?=htmlspecialchars($backupItem['status'])?>
+                                    </span>
+                                </td>
+                                <td>
+                                    <?php
+                                    $statusIntegridade = (string)($backupItem['verificacao_status'] ?? '');
+                                    $classeIntegridade = $statusIntegridade === 'integro' ? 'bg-success' : ($statusIntegridade === 'ausente' || $statusIntegridade === 'divergente' ? 'bg-danger' : 'bg-secondary');
+                                    ?>
+                                    <span class="badge <?=$classeIntegridade?>"><?=htmlspecialchars($statusIntegridade ?: 'não verificado')?></span>
+                                </td>
+                                <td>
+                                    <?php if (!empty($backupItem['arquivo'])): ?>
+                                    <form method="post" class="d-inline">
+                                        <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                        <input type="hidden" name="acao_cfg" value="verificar_backup">
+                                        <input type="hidden" name="backup_id" value="<?=(int)$backupItem['id']?>">
+                                        <button class="btn btn-sm btn-outline-primary">
+                                            <i class="bi bi-shield-check"></i> Verificar
+                                        </button>
+                                    </form>
+                                    <?php else: ?>
+                                    <span class="text-muted">—</span>
+                                    <?php endif; ?>
+                                </td>
+                            </tr>
+                        <?php endforeach; endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+
+<?php if ($tab_ativa === 'manutencao'): ?>
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-tools me-1"></i> Ferramentas de Manutenção Enterprise</span>
+        <span class="badge bg-light text-dark">MASTER</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-warning border-0">
+            <strong>Execução controlada:</strong> nenhuma ação é realizada durante a simulação.
+            Para executar, é obrigatório revisar a prévia e digitar <code>MANUTENCAO</code>.
+        </div>
+
+        <form method="post" class="row g-3">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="simular_manutencao">
+
+            <div class="col-12">
+                <label class="form-label fw-semibold">Rotinas para simular</label>
+                <div class="row g-3">
+                    <?php foreach ([
+                        'temporarios' => ['bi-file-earmark-x','Arquivos temporários','Mapeia apenas extensões temporárias em diretórios previamente autorizados.'],
+                        'logs_antigos' => ['bi-clock-history','Logs antigos','Calcula eventos anteriores ao período informado, preservando no mínimo os 1.000 mais recentes.'],
+                        'analisar_banco' => ['bi-search','Analisar banco','Executa ANALYZE TABLE para atualizar estatísticas do otimizador.'],
+                        'otimizar_banco' => ['bi-database-gear','Otimizar banco','Executa OPTIMIZE TABLE somente após confirmação explícita.'],
+                        'permissoes' => ['bi-shield-check','Verificar permissões','Confere existência e gravação das pastas operacionais sem alterá-las.'],
+                    ] as $valorRotina => $dadosRotina): ?>
+                    <div class="col-md-6 col-xl-4">
+                        <label class="border rounded p-3 h-100 d-block bg-light">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="manutencao_acoes[]" value="<?=$valorRotina?>" id="rotina_<?=$valorRotina?>">
+                                <span class="form-check-label fw-semibold">
+                                    <i class="bi <?=$dadosRotina[0]?> me-1 text-primary"></i><?=$dadosRotina[1]?>
+                                </span>
+                            </div>
+                            <div class="small text-muted mt-2"><?=$dadosRotina[2]?></div>
+                        </label>
+                    </div>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Excluir logs anteriores a</label>
+                <select name="manutencao_dias_logs" class="form-select">
+                    <option value="90">90 dias</option>
+                    <option value="180">180 dias</option>
+                    <option value="365" selected>1 ano</option>
+                    <option value="730">2 anos</option>
+                    <option value="1825">5 anos</option>
+                </select>
+                <div class="form-text">Os 1.000 eventos mais recentes são sempre preservados.</div>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label">Idade mínima dos temporários</label>
+                <select name="manutencao_idade_temporarios" class="form-select">
+                    <option value="24">24 horas</option>
+                    <option value="72" selected>72 horas</option>
+                    <option value="168">7 dias</option>
+                    <option value="720">30 dias</option>
+                </select>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label invisible" aria-hidden="true">Ação</label>
+                <button class="btn btn-primary w-100">
+                    <i class="bi bi-eye me-1"></i> Simular manutenção
+                </button>
+                <div class="form-text invisible" aria-hidden="true">Alinhamento</div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<?php if (is_array($manutencaoPreview)): ?>
+<div class="card shadow-sm border-primary mb-4">
+    <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-clipboard-check me-1"></i> Prévia da manutenção — Dry Run</span>
+        <span class="badge bg-light text-primary">válida por 30 minutos</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                    <small class="text-muted">TEMPORÁRIOS</small>
+                    <h4 class="mb-0"><?=(int)($manutencaoPreview['temporarios']['quantidade'] ?? 0)?></h4>
+                    <small><?=sgl_formatar_bytes((float)($manutencaoPreview['temporarios']['bytes'] ?? 0))?></small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                    <small class="text-muted">LOGS ANTIGOS</small>
+                    <h4 class="mb-0"><?=number_format((int)($manutencaoPreview['logs_antigos'] ?? 0),0,',','.')?></h4>
+                    <small>candidatos à limpeza</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                    <small class="text-muted">TABELAS</small>
+                    <h4 class="mb-0"><?=count($manutencaoPreview['tabelas'] ?? [])?></h4>
+                    <small>para análise/otimização</small>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="border rounded p-3 h-100">
+                    <small class="text-muted">ROTINAS</small>
+                    <h4 class="mb-0"><?=count($manutencaoPreview['acoes'] ?? [])?></h4>
+                    <small><?=htmlspecialchars(implode(', ', $manutencaoPreview['acoes'] ?? []))?></small>
+                </div>
+            </div>
+        </div>
+
+        <?php if (!empty($manutencaoPreview['permissoes'])): ?>
+        <div class="table-responsive mb-4">
+            <table class="table table-sm align-middle">
+                <thead><tr><th>Pasta</th><th>Existe</th><th>Gravável</th></tr></thead>
+                <tbody>
+                <?php foreach ($manutencaoPreview['permissoes'] as $pasta => $situacao): ?>
+                    <tr>
+                        <td><code><?=htmlspecialchars($pasta)?></code></td>
+                        <td><?=$situacao['existe']?'<span class="badge bg-success">Sim</span>':'<span class="badge bg-danger">Não</span>'?></td>
+                        <td><?=$situacao['gravavel']?'<span class="badge bg-success">Sim</span>':'<span class="badge bg-warning text-dark">Não</span>'?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php endif; ?>
+
+        <form method="post" class="row g-3 align-items-end">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="executar_manutencao">
+            <input type="hidden" name="manutencao_hash" value="<?=htmlspecialchars((string)$manutencaoPreview['hash'])?>">
+            <div class="col-md-8">
+                <label class="form-label fw-semibold">Confirmação obrigatória</label>
+                <input type="text" name="confirmacao_manutencao" class="form-control" autocomplete="off" placeholder="Digite MANUTENCAO">
+                <div class="form-text">A execução utilizará exatamente os parâmetros desta simulação.</div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label invisible" aria-hidden="true">Ação</label>
+                <button class="btn btn-danger w-100" onclick="return confirm('Confirma a execução das rotinas simuladas?')">
+                    <i class="bi bi-play-circle me-1"></i> Executar manutenção
+                </button>
+                <div class="form-text invisible" aria-hidden="true">Alinhamento</div>
+            </div>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
+
+<?php if (is_array($manutencaoUltimoResultado)): ?>
+<div class="alert <?=$manutencaoUltimoResultado['falhas']?'alert-warning':'alert-success'?> shadow-sm">
+    <h6 class="alert-heading"><i class="bi bi-check-circle me-1"></i> Resultado da última execução</h6>
+    <div class="row g-2 small">
+        <div class="col-md-3">Temporários: <strong><?=(int)$manutencaoUltimoResultado['temporarios_excluidos']?></strong></div>
+        <div class="col-md-3">Espaço: <strong><?=sgl_formatar_bytes((float)$manutencaoUltimoResultado['temporarios_bytes'])?></strong></div>
+        <div class="col-md-3">Logs: <strong><?=(int)$manutencaoUltimoResultado['logs_excluidos']?></strong></div>
+        <div class="col-md-3">Tabelas: <strong><?=(int)$manutencaoUltimoResultado['tabelas_analisadas']?> analisadas / <?=(int)$manutencaoUltimoResultado['tabelas_otimizadas']?> otimizadas</strong></div>
+    </div>
+    <?php if (!empty($manutencaoUltimoResultado['falhas'])): ?>
+        <hr><ul class="mb-0 small"><?php foreach (array_slice($manutencaoUltimoResultado['falhas'],0,10) as $falha): ?><li><?=htmlspecialchars($falha)?></li><?php endforeach; ?></ul>
+    <?php endif; ?>
+</div>
+<?php endif; ?>
+
+<div class="row g-4">
+    <div class="col-xl-5">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white"><i class="bi bi-shield-lock me-1"></i> Escopo de segurança</div>
+            <div class="card-body small">
+                <p><i class="bi bi-check-circle-fill text-success me-1"></i>Somente o MASTER pode simular ou executar.</p>
+                <p><i class="bi bi-check-circle-fill text-success me-1"></i>CSRF e confirmação textual obrigatórios.</p>
+                <p><i class="bi bi-check-circle-fill text-success me-1"></i>Temporários limitados a diretórios e extensões autorizados.</p>
+                <p><i class="bi bi-check-circle-fill text-success me-1"></i>Sessões PHP, documentos, uploads jurídicos e backups não são removidos.</p>
+                <p class="mb-0"><i class="bi bi-check-circle-fill text-success me-1"></i>Todas as execuções são registradas no LOG e no histórico de manutenção.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-7">
+        <div class="card shadow-sm border-0 h-100">
+            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                <span><i class="bi bi-clock-history me-1"></i> Histórico recente</span>
+                <span class="badge bg-light text-dark"><?=count($manutencoesRecentes)?></span>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle mb-0">
+                        <thead class="table-light"><tr><th>Data</th><th>Tipo</th><th>Modo</th><th>Status</th><th>Responsável</th></tr></thead>
+                        <tbody>
+                        <?php if (!$manutencoesRecentes): ?>
+                            <tr><td colspan="5" class="text-center text-muted py-4">Nenhuma manutenção registrada.</td></tr>
+                        <?php else: foreach ($manutencoesRecentes as $historicoManutencao): ?>
+                            <tr>
+                                <td><small><?=htmlspecialchars(date('d/m/Y H:i', strtotime($historicoManutencao['criado_em'])))?></small></td>
+                                <td><?=htmlspecialchars($historicoManutencao['tipo'])?></td>
+                                <td><span class="badge bg-secondary"><?=htmlspecialchars($historicoManutencao['modo'])?></span></td>
+                                <td><span class="badge <?=$historicoManutencao['status']==='concluida'?'bg-success':'bg-warning text-dark'?>"><?=htmlspecialchars($historicoManutencao['status'])?></span></td>
+                                <td><?=htmlspecialchars($historicoManutencao['executado_por_nome'] ?: 'Sistema')?></td>
+                            </tr>
+                        <?php endforeach; endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+
+<?php if ($tab_ativa === 'relatorios'): ?>
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-file-earmark-bar-graph-fill me-1"></i> Relatórios Administrativos Enterprise</span>
+        <span class="badge bg-primary">Acesso MASTER</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-info border-0">
+            Gere relatórios consolidados da operação SaaS. A exportação em PDF abre a tela de impressão do navegador; selecione <strong>Salvar como PDF</strong>. O Excel é baixado em formato compatível com o Microsoft Excel.
+        </div>
+
+        <form method="GET" class="row g-3 align-items-end mb-4">
+            <input type="hidden" name="mod" value="configuracoes">
+            <input type="hidden" name="tab" value="relatorios">
+            <div class="col-md-4">
+                <label class="form-label">Relatório</label>
+                <select name="relatorio_tipo" class="form-select">
+                    <option value="resumo" <?=$relatorioTipo==='resumo'?'selected':''?>>Resumo consolidado</option>
+                    <option value="escritorios" <?=$relatorioTipo==='escritorios'?'selected':''?>>Escritórios SaaS</option>
+                    <option value="licencas" <?=$relatorioTipo==='licencas'?'selected':''?>>Licenças SaaS</option>
+                    <option value="usuarios" <?=$relatorioTipo==='usuarios'?'selected':''?>>Usuários</option>
+                    <option value="desligados" <?=$relatorioTipo==='desligados'?'selected':''?>>Usuários desligados</option>
+                    <option value="saude" <?=$relatorioTipo==='saude'?'selected':''?>>Saúde do sistema</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Data inicial</label>
+                <input type="date" name="relatorio_data_inicio" class="form-control" value="<?=htmlspecialchars($relatorioDataInicio)?>">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Data final</label>
+                <input type="date" name="relatorio_data_fim" class="form-control" value="<?=htmlspecialchars($relatorioDataFim)?>">
+            </div>
+            <div class="col-md-2 d-grid">
+                <button class="btn btn-outline-primary"><i class="bi bi-funnel me-1"></i> Aplicar</button>
+            </div>
+        </form>
+
+        <div class="row g-3 mb-4">
+            <div class="col-md-3"><div class="card border-0 bg-light h-100"><div class="card-body"><small class="text-muted">ESCRITÓRIOS</small><h3 class="mb-0"><?=count($escritoriosSaas)?></h3></div></div></div>
+            <div class="col-md-3"><div class="card border-0 bg-light h-100"><div class="card-body"><small class="text-muted">LICENÇAS</small><h3 class="mb-0"><?=count($licencasSaas)?></h3></div></div></div>
+            <div class="col-md-3"><div class="card border-0 bg-light h-100"><div class="card-body"><small class="text-muted">USUÁRIOS ATIVOS</small><h3 class="mb-0"><?=$totalAtivos?></h3></div></div></div>
+            <div class="col-md-3"><div class="card border-0 bg-light h-100"><div class="card-body"><small class="text-muted">SAÚDE</small><h3 class="mb-0 <?=$percentualSaude>=85?'text-success':'text-warning'?>"><?=$percentualSaude?>%</h3></div></div></div>
+        </div>
+
+        <?php
+        $queryRelatorio = http_build_query([
+            'mod' => 'configuracoes',
+            'tab' => 'relatorios',
+            'relatorio_tipo' => $relatorioTipo,
+            'relatorio_data_inicio' => $relatorioDataInicio,
+            'relatorio_data_fim' => $relatorioDataFim,
+        ]);
+        ?>
+        <div class="d-flex flex-wrap gap-2 mb-4">
+            <button type="button" class="btn btn-danger" onclick="rojexGerarPdfRelatorio()">
+                <i class="bi bi-file-earmark-pdf-fill me-1"></i> Gerar PDF
+            </button>
+            <button type="button" class="btn btn-success" onclick="rojexExportarExcelRelatorio()">
+                <i class="bi bi-file-earmark-excel-fill me-1"></i> Exportar Excel
+            </button>
+            <a href="?mod=configuracoes&tab=relatorios" class="btn btn-outline-secondary">
+                <i class="bi bi-arrow-counterclockwise me-1"></i> Limpar filtros
+            </a>
+        </div>
+
+
+
+        <div id="rojex-relatorio-exportacao" class="d-none">
+            <div class="cabecalho-relatorio">
+                <h1>ROJEX.AI — <?=htmlspecialchars($tituloRelatorio, ENT_QUOTES, 'UTF-8')?></h1>
+                <div class="meta"><?=htmlspecialchars($periodoDescricao, ENT_QUOTES, 'UTF-8')?> | Emitido em <?=date('d/m/Y H:i')?></div>
+            </div>
+            <?=rojex_relatorio_html_tabela($cabecalhosRelatorio, $linhasRelatorio)?>
+            <div class="rodape-relatorio">Relatório administrativo emitido pelo ROJEX.AI ERP Jurídico Enterprise.</div>
+        </div>
+
+        <script>
+        function rojexHtmlRelatorioCompleto() {
+            const origem = document.getElementById('rojex-relatorio-exportacao');
+            if (!origem) return '';
+            return `<!doctype html><html lang="pt-BR"><head><meta charset="UTF-8">
+                <title><?=htmlspecialchars($tituloRelatorio, ENT_QUOTES, 'UTF-8')?></title>
+                <style>
+                    @page { size: A4 landscape; margin: 10mm; }
+                    * { box-sizing: border-box; }
+                    body { margin: 0; font-family: Arial, sans-serif; color: #222; font-size: 10px; background: #fff; }
+                    h1 { color: #1a3c5e; font-size: 22px; margin: 0 0 5px; }
+                    .meta { margin-bottom: 14px; color: #555; }
+                    table { width: 100%; border-collapse: collapse; table-layout: auto; }
+                    th, td { border: 1px solid #aaa; padding: 5px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+                    th { background: #1a3c5e; color: #fff; }
+                    tr { break-inside: avoid; page-break-inside: avoid; }
+                    .rodape-relatorio { margin-top: 12px; font-size: 8px; color: #666; }
+                </style></head><body>${origem.innerHTML}</body></html>`;
+        }
+
+        function rojexGerarPdfRelatorio() {
+            const html = rojexHtmlRelatorioCompleto();
+            if (!html) return;
+            const janela = window.open('', '_blank', 'width=1200,height=850');
+            if (!janela) {
+                alert('Permita a abertura de pop-ups para gerar o PDF.');
+                return;
+            }
+            janela.document.open();
+            janela.document.write(html);
+            janela.document.close();
+            janela.focus();
+            setTimeout(function () { janela.print(); }, 500);
+        }
+
+        function rojexExportarExcelRelatorio() {
+            const html = rojexHtmlRelatorioCompleto();
+            if (!html) return;
+            const blob = new Blob(['\ufeff' + html], {type: 'application/vnd.ms-excel;charset=utf-8;'});
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = '<?=htmlspecialchars($nomeArquivoRelatorio, ENT_QUOTES, 'UTF-8')?>.xls';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+        }
+        </script>
+
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle">
+                <thead class="table-dark">
+                    <tr><th>Relatório disponível</th><th>Conteúdo</th><th>Origem</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>Resumo consolidado</td><td>KPIs administrativos e situação geral</td><td>Configurações, SaaS, usuários e saúde</td></tr>
+                    <tr><td>Escritórios SaaS</td><td>Tenant, plano, status, responsável e licenças</td><td>escritorios_saas</td></tr>
+                    <tr><td>Licenças SaaS</td><td>Chave, vínculo, limites, status e renovação</td><td>licencas_saas</td></tr>
+                    <tr><td>Usuários</td><td>Cadastro, perfil, status e último acesso</td><td>usuarios</td></tr>
+                    <tr><td>Usuários desligados</td><td>Desligamento, responsável, data e auditoria</td><td>usuarios + usuarios_historico</td></tr>
+                    <tr><td>Saúde do sistema</td><td>PHP, banco, HTTPS, disco e controles de segurança</td><td>Diagnóstico local</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+
+<?php if ($tab_ativa === 'desligados'): ?>
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-person-x-fill me-1"></i> Histórico de Usuários Desligados</span>
+        <span><?=count($usuariosDesligados)?> desligado(s) localizado(s)</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-info border-0 small">
+            Os cadastros permanecem preservados para auditoria e eventual comprovação futura. Senhas nunca são armazenadas no histórico.
+        </div>
+        <form method="get" class="row g-3 align-items-end mb-4">
+            <input type="hidden" name="mod" value="configuracoes"><input type="hidden" name="tab" value="desligados">
+            <div class="col-lg-4"><label class="form-label">Pesquisar</label><input type="search" name="desligado_q" class="form-control" value="<?=htmlspecialchars($desligadoBusca)?>" placeholder="Nome, login, e-mail, perfil ou responsável"></div>
+            <div class="col-lg-2"><label class="form-label">Data inicial</label><input type="date" name="desligado_data_inicio" class="form-control" value="<?=htmlspecialchars($desligadoDataInicio)?>"></div>
+            <div class="col-lg-2"><label class="form-label">Data final</label><input type="date" name="desligado_data_fim" class="form-control" value="<?=htmlspecialchars($desligadoDataFim)?>"></div>
+            <div class="col-lg-2"><label class="form-label">Evento</label><select name="desligado_acao" class="form-select"><option value="">Todos</option><option value="ENCERRAMENTO_DE_VINCULO" <?=$desligadoAcao==='ENCERRAMENTO_DE_VINCULO'?'selected':''?>>Encerramento</option></select></div>
+            <div class="col-lg-2 d-flex gap-2"><button class="btn btn-outline-primary flex-grow-1"><i class="bi bi-search"></i> Filtrar</button><a href="?mod=configuracoes&tab=desligados" class="btn btn-outline-secondary">Limpar</a></div>
+        </form>
+
+        <h6 class="mb-3">Cadastros atualmente desligados</h6>
+        <div class="table-responsive mb-4"><table class="table table-hover align-middle">
+            <thead class="table-light"><tr><th>Usuário</th><th>Perfil / Departamento</th><th>Desligamento</th><th>Responsável</th><th>Último acesso</th><th>Status</th></tr></thead>
+            <tbody>
+            <?php if(!$usuariosDesligados): ?><tr><td colspan="6" class="text-center text-muted py-4">Nenhum usuário desligado encontrado.</td></tr>
+            <?php else: foreach($usuariosDesligados as $u): ?>
+            <tr>
+                <td><strong><?=htmlspecialchars((string)$u['nome'])?></strong><br><small class="text-muted"><?=htmlspecialchars((string)$u['usuario'])?> · <?=htmlspecialchars((string)($u['email'] ?: '-'))?></small></td>
+                <td><?=htmlspecialchars((string)$u['perfil'])?><br><small class="text-muted"><?=htmlspecialchars((string)($u['departamento'] ?? '-'))?><?=!empty($u['cargo'])?' · '.htmlspecialchars((string)$u['cargo']):''?></small></td>
+                <td><?=!empty($u['desligado_em'])?date('d/m/Y H:i',strtotime($u['desligado_em'])):'-'?></td>
+                <td><?=htmlspecialchars((string)($u['desligado_por_nome'] ?? 'Não identificado'))?></td>
+                <td><?=!empty($u['ultimo_login'])?date('d/m/Y H:i',strtotime($u['ultimo_login'])):'-'?></td>
+                <td><span class="badge bg-secondary"><?=htmlspecialchars((string)($u['vinculo_status'] ?? 'inativo'))?></span></td>
+            </tr>
+            <?php endforeach; endif; ?>
+            </tbody>
+        </table></div>
+
+        <h6 class="mb-3">Snapshots de auditoria</h6>
+        <div class="accordion" id="accordionHistoricoDesligados">
+        <?php if(!$historicoUsuariosDesligados): ?><div class="text-center text-muted py-4">Nenhum snapshot histórico encontrado.</div>
+        <?php else: foreach($historicoUsuariosDesligados as $h): $snap=$h['snapshot']; ?>
+            <div class="accordion-item">
+                <h2 class="accordion-header"><button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#hist<?=$h['id']?>">
+                    <span class="me-3"><strong><?=htmlspecialchars((string)($snap['nome'] ?? 'Usuário #'.$h['usuario_id']))?></strong></span>
+                    <span class="badge bg-secondary me-3"><?=htmlspecialchars((string)$h['acao'])?></span>
+                    <small class="text-muted"><?=date('d/m/Y H:i',strtotime($h['criado_em']))?> · por <?=htmlspecialchars((string)($h['realizado_por_nome'] ?? 'Sistema'))?></small>
+                </button></h2>
+                <div id="hist<?=$h['id']?>" class="accordion-collapse collapse" data-bs-parent="#accordionHistoricoDesligados"><div class="accordion-body">
+                    <div class="row g-3 small">
+                        <?php foreach(['usuario'=>'Login','email'=>'E-mail','perfil'=>'Perfil','telefone'=>'Telefone','cargo'=>'Cargo','departamento'=>'Departamento','vinculo_status'=>'Vínculo','desligado_em'=>'Desligado em'] as $k=>$rot): ?>
+                        <div class="col-md-3"><span class="text-muted"><?=$rot?></span><br><strong><?=htmlspecialchars((string)($snap[$k] ?? '-'))?></strong></div>
+                        <?php endforeach; ?>
+                        <div class="col-12"><span class="text-muted">Observações preservadas</span><br><?=nl2br(htmlspecialchars((string)($snap['observacoes'] ?? '-')))?></div>
+                        <div class="col-12 text-muted">IP do evento: <?=htmlspecialchars((string)($h['ip'] ?? '-'))?> · ID original: <?=(int)$h['usuario_id']?></div>
+                    </div>
+                </div></div>
+            </div>
+        <?php endforeach; endif; ?>
         </div>
     </div>
 </div>
@@ -1137,31 +5886,91 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'logs'): ?>
-<div class="row g-4">
+<div class="card shadow-sm border-0 mb-4 d-print-none">
+    <div class="card-header bg-dark text-white"><i class="bi bi-funnel me-1"></i> Filtros e Relatório do LOG</div>
+    <div class="card-body">
+        <form method="GET" class="row g-3 align-items-end">
+            <input type="hidden" name="mod" value="configuracoes">
+            <input type="hidden" name="tab" value="logs">
+
+            <div class="col-md-2">
+                <label class="form-label">Data inicial</label>
+                <input type="date" name="log_data_inicio" class="form-control" value="<?=htmlspecialchars($logDataInicio)?>">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Data final</label>
+                <input type="date" name="log_data_fim" class="form-control" value="<?=htmlspecialchars($logDataFim)?>">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Usuário</label>
+                <select name="log_usuario" class="form-select">
+                    <option value="0">Todos os usuários</option>
+                    <?php foreach ($usuarios as $usuarioFiltro): ?>
+                        <option value="<?=(int)$usuarioFiltro['id']?>" <?=$logUsuario===(int)$usuarioFiltro['id']?'selected':''?>>
+                            <?=htmlspecialchars($usuarioFiltro['nome'] . ' (' . $usuarioFiltro['usuario'] . ')')?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Módulo</label>
+                <select name="log_modulo" class="form-select">
+                    <option value="">Todos os módulos</option>
+                    <?php foreach ($logModulosDisponiveis as $moduloFiltro): ?>
+                        <option value="<?=htmlspecialchars($moduloFiltro)?>" <?=$logModulo===$moduloFiltro?'selected':''?>>
+                            <?=htmlspecialchars($moduloFiltro)?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-3 d-flex gap-2">
+                <button class="btn btn-primary flex-fill"><i class="bi bi-search me-1"></i>Filtrar</button>
+                <a href="?mod=configuracoes&tab=logs" class="btn btn-outline-secondary" title="Limpar filtros"><i class="bi bi-x-lg"></i></a>
+                <button type="button" class="btn btn-danger" onclick="gerarPdfLogs()" title="Abrir impressão para salvar em PDF">
+                    <i class="bi bi-file-earmark-pdf me-1"></i>Gerar PDF
+                </button>
+            </div>
+        </form>
+
+        <div class="form-text mt-3">
+            Sem datas informadas, o relatório inclui o LOG desde o primeiro registro. O botão PDF abre a impressão do navegador, permitindo selecionar <strong>Salvar como PDF</strong>.
+        </div>
+    </div>
+</div>
+
+<div class="row g-4 d-print-none">
     <div class="col-lg-8">
         <div class="card shadow-sm border-0">
             <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-clock-history me-1"></i> Últimos Logs do Sistema</span>
-                <span class="badge bg-light text-dark"><?= (int)$totalLogs ?> registro(s)</span>
+                <span><i class="bi bi-clock-history me-1"></i> Logs filtrados</span>
+                <span class="badge bg-light text-dark"><?=count($logsRelatorio)?> encontrado(s)</span>
             </div>
-            <div class="table-responsive"><table class="table table-hover align-middle mb-0">
-                <thead class="table-light"><tr><th>Data</th><th>Quem fez</th><th>Perfil</th><th>Ação</th><th>Módulo</th><th>IP</th><th>Detalhes</th></tr></thead><tbody>
-                <?php if(empty($logs)): ?><tr><td colspan="7" class="text-center py-4 text-muted">Nenhum log registrado ainda.</td></tr><?php endif; ?>
-                <?php foreach($logs as $log): ?>
-                    <?php $quem = $log['responsavel_nome'] ?: ($log['responsavel_login'] ?: 'Sistema'); ?>
-                    <tr>
-                        <td><?=date('d/m/Y H:i', strtotime($log['criado_em']))?></td>
-                        <td><strong><?=htmlspecialchars($quem)?></strong></td>
-                        <td><?=htmlspecialchars($log['responsavel_perfil'] ?? '-')?></td>
-                        <td><strong><?=htmlspecialchars($log['acao'])?></strong></td>
-                        <td><?=htmlspecialchars($log['tabela'] ?? '-')?></td>
-                        <td><small><?=htmlspecialchars($log['ip'] ?? '-')?></small></td>
-                        <td><small><?=htmlspecialchars($log['detalhes'] ?? '-')?></small></td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody></table></div>
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead class="table-light"><tr><th>Data</th><th>Quem fez</th><th>Perfil</th><th>Ação</th><th>Módulo</th><th>IP</th><th>Detalhes</th></tr></thead>
+                    <tbody>
+                    <?php if(empty($logs)): ?><tr><td colspan="7" class="text-center py-4 text-muted">Nenhum log encontrado.</td></tr><?php endif; ?>
+                    <?php foreach($logs as $log): ?>
+                        <?php $quem = $log['responsavel_nome'] ?: ($log['responsavel_login'] ?: 'Sistema'); ?>
+                        <tr>
+                            <td><?=date('d/m/Y H:i', strtotime($log['criado_em']))?></td>
+                            <td><strong><?=htmlspecialchars($quem)?></strong></td>
+                            <td><?=htmlspecialchars($log['responsavel_perfil'] ?? '-')?></td>
+                            <td><strong><?=htmlspecialchars($log['acao'])?></strong></td>
+                            <td><?=htmlspecialchars($log['tabela'] ?? '-')?></td>
+                            <td><small><?=htmlspecialchars($log['ip'] ?? '-')?></small></td>
+                            <td><small><?=htmlspecialchars($log['detalhes'] ?? '-')?></small></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <?php if (count($logsRelatorio) > 100): ?>
+                <div class="card-footer text-muted small">A tela exibe os 100 registros mais recentes. O PDF inclui todos os <?=count($logsRelatorio)?> registros filtrados.</div>
+            <?php endif; ?>
         </div>
     </div>
+
     <div class="col-lg-4">
         <div class="card shadow-sm border-0">
             <div class="card-header bg-dark text-white"><i class="bi bi-clipboard-data me-1"></i> Inventário de Atualizações</div>
@@ -1178,13 +5987,118 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         </div>
     </div>
 </div>
+
+<div id="relatorioLogsImpressao" class="d-none d-print-block">
+    <div class="text-center mb-4">
+        <h2>ROJEX.AI — Relatório de Auditoria</h2>
+        <p class="mb-1"><strong>Escritório:</strong> <?=htmlspecialchars($cfg['nome_escritorio'])?></p>
+        <p class="mb-1"><strong>Período:</strong>
+            <?= $logDataInicio !== '' ? date('d/m/Y', strtotime($logDataInicio)) : 'Início dos registros' ?>
+            até
+            <?= $logDataFim !== '' ? date('d/m/Y', strtotime($logDataFim)) : date('d/m/Y') ?>
+        </p>
+        <p><strong>Total:</strong> <?=count($logsRelatorio)?> registro(s)</p>
+    </div>
+
+    <table class="table table-bordered table-sm">
+        <thead>
+            <tr><th>Data</th><th>Responsável</th><th>Perfil</th><th>Ação</th><th>Módulo</th><th>Registro</th><th>IP</th><th>Detalhes</th></tr>
+        </thead>
+        <tbody>
+        <?php foreach ($logsRelatorio as $log): ?>
+            <?php $quemRelatorio = $log['responsavel_nome'] ?: ($log['responsavel_login'] ?: 'Sistema'); ?>
+            <tr>
+                <td><?=date('d/m/Y H:i:s', strtotime($log['criado_em']))?></td>
+                <td><?=htmlspecialchars($quemRelatorio)?></td>
+                <td><?=htmlspecialchars($log['responsavel_perfil'] ?? '-')?></td>
+                <td><?=htmlspecialchars($log['acao'])?></td>
+                <td><?=htmlspecialchars($log['tabela'] ?? '-')?></td>
+                <td><?=htmlspecialchars($log['registro_id'] ?? '-')?></td>
+                <td><?=htmlspecialchars($log['ip'] ?? '-')?></td>
+                <td><?=htmlspecialchars($log['detalhes'] ?? '-')?></td>
+            </tr>
+        <?php endforeach; ?>
+        </tbody>
+    </table>
+
+    <div class="mt-4 small">
+        Relatório emitido em <?=date('d/m/Y H:i:s')?> pelo usuário MASTER
+        <?=htmlspecialchars($_SESSION['nome'] ?? $_SESSION['username'] ?? '')?>.
+    </div>
+</div>
 <?php endif; ?>
 </div>
 
+
+<style>
+@media print {
+    body * { visibility: hidden !important; }
+    #relatorioLogsImpressao, #relatorioLogsImpressao * { visibility: visible !important; }
+    #relatorioLogsImpressao {
+        display: block !important;
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        font-size: 9px;
+        color: #000;
+        background: #fff;
+    }
+    #relatorioLogsImpressao table { width: 100%; border-collapse: collapse; }
+    #relatorioLogsImpressao th, #relatorioLogsImpressao td {
+        border: 1px solid #777 !important;
+        padding: 3px !important;
+        vertical-align: top;
+        word-break: break-word;
+    }
+    @page { size: A4 landscape; margin: 8mm; }
+}
+</style>
+
 <script>
+function gerarPdfLogs(){
+    window.print();
+}
 function prevLogo(input){const f=input.files[0];if(!f)return;const r=new FileReader();r.onload=e=>{document.getElementById('prev_img').src=e.target.result;document.getElementById('prev_wrap').style.display='block';};r.readAsDataURL(f);}
-function syncCor(id){document.getElementById(id+'_txt').value=document.getElementById(id).value;document.getElementById('prev_'+id).style.background=document.getElementById(id).value;}
-function syncTxt(id){const v=document.getElementById(id+'_txt').value;if(/^#[0-9A-Fa-f]{6}$/.test(v)){document.getElementById(id).value=v;document.getElementById('prev_'+id).style.background=v;}}
+function syncCor(id){const color=document.getElementById(id);const txt=document.getElementById(id+'_txt');if(color&&txt)txt.value=color.value;}
+function syncTxt(id){
+    const txt=document.getElementById(id+'_txt');
+    const color=document.getElementById(id);
+    if(!txt||!color)return;
+    const v=txt.value;
+    if(/^#[0-9A-Fa-f]{6}$/.test(v)){color.value=v;}
+}
+function atualizarPreviewTema(){
+    const preview=document.getElementById('previewTemaEnterprise');
+    if(!preview)return;
+    const valor=id=>document.getElementById(id)?.value||'';
+    const primaria=valor('cor_primaria');
+    const secundaria=valor('cor_secundaria');
+    const accent=valor('cor_accent');
+    const fundo=valor('cor_fundo');
+    const texto=valor('cor_texto');
+    const modo=valor('tema_modo');
+    const densidade=valor('tema_densidade');
+    const bordas=valor('tema_bordas');
+    const fonte=valor('tema_fonte_percentual')||'100';
+    const raio=bordas==='retas'?'0px':(bordas==='arredondadas'?'18px':'8px');
+    const padding=densidade==='compacta'?'12px':'20px';
+    preview.style.borderRadius=raio;
+    preview.style.fontSize=fonte+'%';
+    preview.querySelector('.preview-tema-menu').style.cssText=`background:${primaria};color:#fff;padding:${densidade==='compacta'?'10px':'14px'};`;
+    preview.querySelector('.preview-tema-badge').style.background=accent;
+    const corpo=preview.querySelector('.preview-tema-corpo');
+    corpo.style.cssText=`background:${modo==='escuro'?'#151a21':fundo};color:${modo==='escuro'?'#f5f5f5':texto};padding:${padding};`;
+    const card=preview.querySelector('.preview-tema-card');
+    card.style.cssText=`background:${modo==='escuro'?'#222a35':'#ffffff'};color:${modo==='escuro'?'#f5f5f5':texto};padding:${padding};border-radius:${raio};border-left:4px solid ${secundaria}!important;`;
+    const btn=preview.querySelector('.preview-tema-btn');
+    btn.style.cssText=`background:${secundaria};color:#fff;border-radius:${raio};`;
+    const muted=preview.querySelector('.preview-tema-muted');
+    muted.style.opacity='.7';
+    const label=document.getElementById('temaFonteValor');
+    if(label)label.textContent=fonte+'%';
+}
+document.addEventListener('DOMContentLoaded', atualizarPreviewTema);
 
 const marcarTodosLixeira = document.getElementById('marcarTodosLixeira');
 if (marcarTodosLixeira) {

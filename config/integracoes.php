@@ -13,70 +13,217 @@ if (!function_exists('sgl_garantir_logs')) {
     function sgl_garantir_logs(mysqli $conn): void
     {
         $conn->query("CREATE TABLE IF NOT EXISTS logs_sistema (
-            id INT AUTO_INCREMENT PRIMARY KEY,
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             usuario_id INT NULL,
             usuario_nome VARCHAR(150) NULL,
             usuario_login VARCHAR(80) NULL,
             usuario_perfil VARCHAR(80) NULL,
-            acao VARCHAR(100) NOT NULL,
+            acao VARCHAR(120) NOT NULL,
+            tipo_acao VARCHAR(50) NULL,
+            modulo VARCHAR(100) NULL,
             tabela VARCHAR(80) NULL,
-            registro_id VARCHAR(40) NULL,
+            registro_id VARCHAR(80) NULL,
             detalhes TEXT NULL,
+            dados_anteriores LONGTEXT NULL,
+            dados_novos LONGTEXT NULL,
+            origem VARCHAR(80) NULL,
+            resultado VARCHAR(30) NOT NULL DEFAULT 'SUCESSO',
+            nivel VARCHAR(20) NOT NULL DEFAULT 'INFO',
             ip VARCHAR(45) NULL,
+            sessao_id VARCHAR(128) NULL,
+            user_agent VARCHAR(255) NULL,
             criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_logs_usuario (usuario_id),
+            INDEX idx_logs_acao (acao),
+            INDEX idx_logs_tipo_acao (tipo_acao),
+            INDEX idx_logs_modulo (modulo),
             INDEX idx_logs_tabela (tabela),
+            INDEX idx_logs_registro (registro_id),
+            INDEX idx_logs_resultado (resultado),
             INDEX idx_logs_data (criado_em)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-        // Compatibilidade com instalações que já possuíam logs_sistema sem dados do responsável.
-        if (function_exists('sgl_int_add_coluna')) {
-            sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_nome', "usuario_nome VARCHAR(150) NULL");
-            sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_login', "usuario_login VARCHAR(80) NULL");
-            sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_perfil', "usuario_perfil VARCHAR(80) NULL");
+        if (!function_exists('sgl_int_add_coluna')) {
+            return;
         }
+
+        // Evolução segura para bancos já existentes. Nenhuma coluna é recriada.
+        sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_nome', "usuario_nome VARCHAR(150) NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_login', "usuario_login VARCHAR(80) NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_perfil', "usuario_perfil VARCHAR(80) NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'tipo_acao', "tipo_acao VARCHAR(50) NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'modulo', "modulo VARCHAR(100) NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'dados_anteriores', "dados_anteriores LONGTEXT NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'dados_novos', "dados_novos LONGTEXT NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'origem', "origem VARCHAR(80) NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'resultado', "resultado VARCHAR(30) NOT NULL DEFAULT 'SUCESSO'");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'nivel', "nivel VARCHAR(20) NOT NULL DEFAULT 'INFO'");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'sessao_id', "sessao_id VARCHAR(128) NULL");
+        sgl_int_add_coluna($conn, 'logs_sistema', 'user_agent', "user_agent VARCHAR(255) NULL");
+    }
+}
+
+if (!function_exists('sgl_log_normalizar_json')) {
+    function sgl_log_normalizar_json($dados): ?string
+    {
+        if ($dados === null || $dados === '') {
+            return null;
+        }
+
+        if (is_string($dados)) {
+            return mb_substr($dados, 0, 65000, 'UTF-8');
+        }
+
+        $json = json_encode(
+            $dados,
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR
+        );
+
+        return $json === false ? null : mb_substr($json, 0, 65000, 'UTF-8');
     }
 }
 
 if (!function_exists('sgl_registrar_log')) {
-    function sgl_registrar_log(mysqli $conn, string $acao, ?string $tabela = null, ?string $registro_id = null, ?string $detalhes = null): void
-    {
+    /**
+     * Núcleo oficial de auditoria do ROJEX.AI.
+     *
+     * Os cinco primeiros parâmetros preservam compatibilidade com chamadas antigas.
+     * O sexto parâmetro permite enriquecer o evento sem alterar os módulos existentes.
+     */
+    function sgl_registrar_log(
+        mysqli $conn,
+        string $acao,
+        ?string $tabela = null,
+        ?string $registro_id = null,
+        ?string $detalhes = null,
+        array $contexto = []
+    ): void {
         try {
             sgl_garantir_logs($conn);
-            $usuario_id = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
-            $usuario_nome = $_SESSION['nome'] ?? 'Sistema';
-            $usuario_login = $_SESSION['username'] ?? null;
-            $usuario_perfil = $_SESSION['perfil'] ?? null;
-            $ip = $_SERVER['REMOTE_ADDR'] ?? null;
-            $detalhes = trim((string)($detalhes ?? '') . ' | Responsável: ' . $usuario_nome . ($usuario_perfil ? ' (' . $usuario_perfil . ')' : ''));
 
-            $stmt = $conn->prepare("INSERT INTO logs_sistema (usuario_id, usuario_nome, usuario_login, usuario_perfil, acao, tabela, registro_id, detalhes, ip) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            if ($stmt) {
-                $stmt->bind_param('issssssss', $usuario_id, $usuario_nome, $usuario_login, $usuario_perfil, $acao, $tabela, $registro_id, $detalhes, $ip);
-                @$stmt->execute();
-                @$stmt->close();
+            $usuario_id = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
+            $usuario_nome = trim((string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Sistema'));
+            $usuario_login = isset($_SESSION['username']) ? trim((string)$_SESSION['username']) : null;
+            $usuario_perfil = isset($_SESSION['perfil']) ? trim((string)$_SESSION['perfil']) : null;
+
+            $tipo_acao = strtoupper(trim((string)($contexto['tipo_acao'] ?? 'EVENTO')));
+            $modulo = trim((string)($contexto['modulo'] ?? ($tabela ?: 'Sistema')));
+            $origem = trim((string)($contexto['origem'] ?? 'Aplicação'));
+            $resultado = strtoupper(trim((string)($contexto['resultado'] ?? 'SUCESSO')));
+            $nivel = strtoupper(trim((string)($contexto['nivel'] ?? 'INFO')));
+
+            $tiposPermitidos = [
+                'INCLUSAO', 'EDICAO', 'EXCLUSAO', 'RESTAURACAO',
+                'EXCLUSAO_PERMANENTE', 'LOGIN', 'LOGOUT',
+                'RECIBO_AUTOMATICO', 'SINCRONIZACAO', 'EVENTO'
+            ];
+            if (!in_array($tipo_acao, $tiposPermitidos, true)) {
+                $tipo_acao = 'EVENTO';
             }
+
+            if (!in_array($resultado, ['SUCESSO', 'FALHA', 'NEGADO', 'PARCIAL'], true)) {
+                $resultado = 'SUCESSO';
+            }
+
+            if (!in_array($nivel, ['INFO', 'AVISO', 'ERRO', 'CRITICO'], true)) {
+                $nivel = 'INFO';
+            }
+
+            $ip = $_SERVER['REMOTE_ADDR'] ?? null;
+            $sessao_id = session_status() === PHP_SESSION_ACTIVE ? session_id() : null;
+            $user_agent = mb_substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255, 'UTF-8');
+
+            $dados_anteriores = sgl_log_normalizar_json($contexto['dados_anteriores'] ?? null);
+            $dados_novos = sgl_log_normalizar_json($contexto['dados_novos'] ?? null);
+
+            $acao = mb_substr(trim($acao), 0, 120, 'UTF-8');
+            $tabela = $tabela !== null ? mb_substr(trim($tabela), 0, 80, 'UTF-8') : null;
+            $registro_id = $registro_id !== null ? mb_substr(trim($registro_id), 0, 80, 'UTF-8') : null;
+            $detalhes = $detalhes !== null ? mb_substr(trim($detalhes), 0, 65000, 'UTF-8') : null;
+            $modulo = mb_substr($modulo, 0, 100, 'UTF-8');
+            $origem = mb_substr($origem, 0, 80, 'UTF-8');
+
+            $sql = "INSERT INTO logs_sistema (
+                        usuario_id, usuario_nome, usuario_login, usuario_perfil,
+                        acao, tipo_acao, modulo, tabela, registro_id, detalhes,
+                        dados_anteriores, dados_novos, origem, resultado, nivel,
+                        ip, sessao_id, user_agent
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+            $stmt = $conn->prepare($sql);
+            if (!$stmt) {
+                throw new RuntimeException('Falha ao preparar o registro de auditoria.');
+            }
+
+            $stmt->bind_param(
+                'isssssssssssssssss',
+                $usuario_id,
+                $usuario_nome,
+                $usuario_login,
+                $usuario_perfil,
+                $acao,
+                $tipo_acao,
+                $modulo,
+                $tabela,
+                $registro_id,
+                $detalhes,
+                $dados_anteriores,
+                $dados_novos,
+                $origem,
+                $resultado,
+                $nivel,
+                $ip,
+                $sessao_id,
+                $user_agent
+            );
+
+            if (!$stmt->execute()) {
+                throw new RuntimeException($stmt->error ?: 'Falha ao inserir o registro de auditoria.');
+            }
+
+            $stmt->close();
         } catch (Throwable $e) {
-            error_log('[SGL LOG] ' . $e->getMessage());
+            // O LOG nunca pode interromper a operação principal.
+            error_log('[ROJEX LOG ENTERPRISE] ' . $e->getMessage());
         }
     }
 }
 
-
 if (!function_exists('sgl_completar_logs_sem_responsavel')) {
+    /**
+     * Completa somente dados que possam ser confirmados pelo usuario_id gravado.
+     * Nunca atribui registros antigos ao usuário atualmente conectado.
+     */
     function sgl_completar_logs_sem_responsavel(mysqli $conn): void
     {
         try {
-            if (empty($_SESSION['user_id']) && empty($_SESSION['nome']) && empty($_SESSION['username'])) return;
             sgl_garantir_logs($conn);
-            $usuario_id = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : 0;
-            $usuario_nome = $conn->real_escape_string($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Usuário logado');
-            $usuario_login = $conn->real_escape_string($_SESSION['username'] ?? '');
-            $usuario_perfil = $conn->real_escape_string($_SESSION['perfil'] ?? '');
-            $uidSql = $usuario_id > 0 ? (string)$usuario_id : 'NULL';
-            $conn->query("UPDATE logs_sistema SET usuario_id = COALESCE(usuario_id, {$uidSql}), usuario_nome = IF(usuario_nome IS NULL OR usuario_nome='' OR usuario_nome='Sistema', '{$usuario_nome}', usuario_nome), usuario_login = IF(usuario_login IS NULL OR usuario_login='', '{$usuario_login}', usuario_login), usuario_perfil = IF(usuario_perfil IS NULL OR usuario_perfil='', '{$usuario_perfil}', usuario_perfil) WHERE usuario_nome IS NULL OR usuario_nome='' OR usuario_nome='Sistema' OR usuario_login IS NULL OR usuario_login=''");
+
+            $sql = "UPDATE logs_sistema l
+                    INNER JOIN usuarios u ON u.id = l.usuario_id
+                    SET
+                        l.usuario_nome = CASE
+                            WHEN l.usuario_nome IS NULL OR l.usuario_nome = '' THEN u.nome
+                            ELSE l.usuario_nome
+                        END,
+                        l.usuario_login = CASE
+                            WHEN l.usuario_login IS NULL OR l.usuario_login = '' THEN u.usuario
+                            ELSE l.usuario_login
+                        END,
+                        l.usuario_perfil = CASE
+                            WHEN l.usuario_perfil IS NULL OR l.usuario_perfil = '' THEN u.perfil
+                            ELSE l.usuario_perfil
+                        END
+                    WHERE l.usuario_id IS NOT NULL
+                      AND (
+                          l.usuario_nome IS NULL OR l.usuario_nome = ''
+                          OR l.usuario_login IS NULL OR l.usuario_login = ''
+                          OR l.usuario_perfil IS NULL OR l.usuario_perfil = ''
+                      )";
+
+            $conn->query($sql);
         } catch (Throwable $e) {
-            error_log('[SGL LOG BACKFILL] ' . $e->getMessage());
+            error_log('[ROJEX LOG BACKFILL] ' . $e->getMessage());
         }
     }
 }
@@ -287,7 +434,27 @@ if (!function_exists('sgl_gerar_recibo_de_conta_receber')) {
         $stmt->bind_param('ssssssssssssdss', $id, $numero, $clienteId, $nomeCliente, $cpfCnpj, $honorarioId, $parcelaId, $conta_receber_id, $dataHoje, $dataPagamento, $referente, $forma, $valor, $obs, $chave);
         if (@$stmt->execute()) {
             @$stmt->close();
-            sgl_registrar_log($conn, 'Gerou recibo automático', 'recibos', $id, 'Conta a receber: ' . $conta_receber_id);
+            sgl_registrar_log(
+                $conn,
+                'Gerou recibo automático',
+                'recibos',
+                $id,
+                'Conta a receber vinculada: ' . $conta_receber_id,
+                [
+                    'tipo_acao' => 'RECIBO_AUTOMATICO',
+                    'modulo' => 'Financeiro / Recibos',
+                    'origem' => 'Integração interna',
+                    'resultado' => 'SUCESSO',
+                    'nivel' => 'INFO',
+                    'dados_novos' => [
+                        'recibo_id' => $id,
+                        'numero' => $numero,
+                        'conta_receber_id' => $conta_receber_id,
+                        'valor' => $valor,
+                        'data_pagamento' => $dataPagamento,
+                    ],
+                ]
+            );
                 return $id;
         }
         @$stmt->close();
@@ -310,6 +477,13 @@ if (!function_exists('buscarReciboPorContaReceber')) {
             return $res->fetch_assoc();
         }
         return null;
+    }
+}
+
+if (!function_exists('sgl_buscar_recibo_por_conta_receber')) {
+    function sgl_buscar_recibo_por_conta_receber(mysqli $conn, string $conta_receber_id): ?array
+    {
+        return buscarReciboPorContaReceber($conn, $conta_receber_id);
     }
 }
 

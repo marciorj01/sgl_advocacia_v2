@@ -20,6 +20,36 @@ exigirLogin('auth/login.php');
 
 $conn = conectar();
 
+
+function sgl_doc_endpoint_log(
+    mysqli $conn,
+    string $acao,
+    ?string $registroId,
+    string $detalhes,
+    array $contexto = []
+): void {
+    if (!function_exists('sgl_registrar_log')) {
+        return;
+    }
+
+    sgl_registrar_log(
+        $conn,
+        $acao,
+        'documentos_arquivos',
+        $registroId,
+        $detalhes,
+        array_merge(
+            [
+                'modulo' => 'Documentos',
+                'origem' => 'Endpoint de documentos',
+                'resultado' => 'SUCESSO',
+                'nivel' => 'INFO',
+            ],
+            $contexto
+        )
+    );
+}
+
 $id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
 $modo = isset($_GET['modo']) ? trim((string)$_GET['modo']) : 'inline';
 if ($modo !== 'download') {
@@ -27,6 +57,22 @@ if ($modo !== 'download') {
 }
 
 if ($id <= 0) {
+    sgl_doc_endpoint_log(
+        $conn,
+        'Tentativa inválida de acesso a documento',
+        null,
+        'Acesso recusado por identificador inválido.',
+        [
+            'tipo_acao' => 'EVENTO',
+            'resultado' => 'NEGADO',
+            'nivel' => 'AVISO',
+            'dados_novos' => [
+                'id_informado' => $id,
+                'modo' => $modo,
+            ],
+        ]
+    );
+
     http_response_code(400);
     exit('Documento inválido.');
 }
@@ -60,13 +106,28 @@ try {
         INDEX idx_doc_deletado (deletado)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    $stmt = $conn->prepare("SELECT id, nome_original, caminho, mime_type, tamanho_bytes FROM documentos_arquivos WHERE id = ? AND COALESCE(deletado,0) = 0 LIMIT 1");
+    $stmt = $conn->prepare("SELECT id, codigo, titulo, categoria, cliente_id, processo_id, numero_processo, nome_original, caminho, extensao, mime_type, tamanho_bytes, hash_arquivo FROM documentos_arquivos WHERE id = ? AND COALESCE(deletado,0) = 0 LIMIT 1");
     $stmt->bind_param('i', $id);
     $stmt->execute();
     $doc = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
     if (!$doc) {
+        sgl_doc_endpoint_log(
+            $conn,
+            'Tentativa de acesso a documento inexistente',
+            (string)$id,
+            'Documento não localizado ou já enviado à lixeira.',
+            [
+                'tipo_acao' => 'EVENTO',
+                'resultado' => 'NEGADO',
+                'nivel' => 'AVISO',
+                'dados_novos' => [
+                    'modo' => $modo,
+                ],
+            ]
+        );
+
         http_response_code(404);
         exit('Documento não encontrado.');
     }
@@ -75,6 +136,23 @@ try {
     $arquivo = realpath(__DIR__ . '/' . $doc['caminho']);
 
     if (!$base || !$arquivo || !str_starts_with($arquivo, $base) || !is_file($arquivo)) {
+        sgl_doc_endpoint_log(
+            $conn,
+            'Falha ao acessar arquivo físico',
+            (string)$id,
+            'Registro localizado, mas o arquivo físico não está disponível ou o caminho é inválido.',
+            [
+                'tipo_acao' => 'EVENTO',
+                'resultado' => 'FALHA',
+                'nivel' => 'ERRO',
+                'dados_anteriores' => $doc,
+                'dados_novos' => [
+                    'modo' => $modo,
+                    'arquivo_resolvido' => $arquivo ?: null,
+                ],
+            ]
+        );
+
         http_response_code(404);
         exit('Arquivo físico não encontrado.');
     }
@@ -84,9 +162,31 @@ try {
     $mime = (string)($doc['mime_type'] ?: 'application/octet-stream');
     $tamanho = filesize($arquivo);
 
-    if (function_exists('sgl_registrar_log')) {
-        sgl_registrar_log($conn, $modo === 'download' ? 'DOWNLOAD_DOCUMENTO' : 'VISUALIZAR_DOCUMENTO', 'documentos_arquivos', (string)$id, 'Arquivo acessado: ' . $nomeOriginal);
-    }
+    sgl_doc_endpoint_log(
+        $conn,
+        $modo === 'download' ? 'Documento baixado' : 'Documento visualizado',
+        (string)$id,
+        ($modo === 'download' ? 'Download realizado: ' : 'Visualização realizada: ') . $nomeOriginal,
+        [
+            'tipo_acao' => 'EVENTO',
+            'origem' => $modo === 'download' ? 'Download de documento' : 'Visualização de documento',
+            'dados_novos' => [
+                'id' => (int)$doc['id'],
+                'codigo' => (string)($doc['codigo'] ?? ''),
+                'titulo' => (string)($doc['titulo'] ?? ''),
+                'categoria' => (string)($doc['categoria'] ?? ''),
+                'cliente_id' => $doc['cliente_id'] ?? null,
+                'processo_id' => $doc['processo_id'] ?? null,
+                'numero_processo' => $doc['numero_processo'] ?? null,
+                'nome_original' => $nomeOriginal,
+                'extensao' => $doc['extensao'] ?? null,
+                'mime_type' => $mime,
+                'tamanho_bytes' => $tamanho,
+                'hash_arquivo' => $doc['hash_arquivo'] ?? null,
+                'modo' => $modo,
+            ],
+        ]
+    );
 
     if (ob_get_level()) {
         while (ob_get_level()) {
@@ -105,6 +205,27 @@ try {
     exit;
 } catch (Throwable $e) {
     error_log('[SGL DOCUMENTO ARQUIVO] ' . $e->getMessage());
+
+    try {
+        sgl_doc_endpoint_log(
+            $conn,
+            'Falha técnica ao abrir documento',
+            $id > 0 ? (string)$id : null,
+            'O endpoint não conseguiu concluir a entrega do arquivo.',
+            [
+                'tipo_acao' => 'EVENTO',
+                'resultado' => 'FALHA',
+                'nivel' => 'ERRO',
+                'dados_novos' => [
+                    'modo' => $modo,
+                    'erro_tecnico' => mb_substr($e->getMessage(), 0, 500, 'UTF-8'),
+                ],
+            ]
+        );
+    } catch (Throwable $eLog) {
+        error_log('[SGL DOCUMENTO ARQUIVO LOG] ' . $eLog->getMessage());
+    }
+
     http_response_code(500);
     exit('Não foi possível abrir o documento.');
 }

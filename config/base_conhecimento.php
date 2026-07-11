@@ -1,4 +1,8 @@
 <?php
+declare(strict_types=1);
+
+ini_set('display_errors', '1');
+error_reporting(E_ALL);
 /**
  * config/base_conhecimento.php
  * Base de Conhecimento do ROJEX.AI
@@ -14,8 +18,6 @@
  * - Este arquivo não executa INSERT, UPDATE ou DELETE.
  * - Nenhum módulo existente depende dele nesta primeira etapa.
  */
-
-declare(strict_types=1);
 
 if (!function_exists('rojex_kb_identificador_valido')) {
     /**
@@ -1998,6 +2000,291 @@ if (!function_exists('rojex_kb_resumo_documentos')) {
             'provas' => $provas,
             'armazenamento_bytes' => $armazenamento,
         ];
+    }
+}
+
+
+
+
+if (!function_exists('rojex_kb_limpar_termo_financeiro')) {
+    function rojex_kb_limpar_termo_financeiro(string $termo): string
+    {
+        $limpo = mb_strtolower(trim($termo), 'UTF-8');
+        if ($limpo === '') return '';
+
+        $limpo = preg_replace(
+            '/\b(financeiro|finanças|financas|conta|contas|pagar|receber|despesa|despesas|receita|receitas|pagamento|pagamentos|recebimento|recebimentos|localizar|buscar|pesquisar|mostrar|mostre|qual|quais|rojex|ai)\b/iu',
+            ' ',
+            $limpo
+        );
+
+        return trim((string)preg_replace('/\s+/u', ' ', (string)$limpo));
+    }
+}
+
+if (!function_exists('rojex_kb_contas_pagar_por_termo')) {
+    function rojex_kb_contas_pagar_por_termo(mysqli $conn, string $termo, int $limite = 20): array
+    {
+        if (!rojex_kb_tabela_existe($conn, 'contas_pagar')) return [];
+
+        $termo = trim($termo);
+        if ($termo === '') return [];
+
+        $limpo = rojex_kb_limpar_termo_financeiro($termo);
+        if ($limpo === '') $limpo = $termo;
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'contas_pagar');
+        $temBanco = rojex_kb_tabela_existe($conn, 'bancos_caixa') && in_array('banco_id', $colunas, true);
+
+        $campos = array_values(array_intersect(
+            ['id','descricao','categoria','fornecedor','forma_pagamento','status','mes_referencia','observacoes'],
+            $colunas
+        ));
+
+        if ($campos === []) return [];
+
+        $where = [];
+        $params = [];
+        $types = '';
+        $like = '%' . $limpo . '%';
+
+        foreach ($campos as $campo) {
+            $where[] = "cp.`{$campo}` LIKE ?";
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($temBanco) {
+            $where[] = 'b.nome LIKE ?';
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(cp.deletado,0)=0'
+            : '';
+
+        $sql = "SELECT cp.*"
+            . ($temBanco ? ", COALESCE(b.nome,'') AS banco_nome" : ", '' AS banco_nome")
+            . " FROM contas_pagar cp "
+            . ($temBanco ? "LEFT JOIN bancos_caixa b ON b.id=cp.banco_id " : "")
+            . "WHERE (" . implode(' OR ', $where) . ")"
+            . $filtroLixeira
+            . " ORDER BY COALESCE(cp.data_vencimento,'2999-12-31') ASC, cp.id DESC"
+            . " LIMIT " . rojex_kb_limite($limite, 20, 200);
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_contas_receber_por_termo')) {
+    function rojex_kb_contas_receber_por_termo(mysqli $conn, string $termo, int $limite = 20): array
+    {
+        if (!rojex_kb_tabela_existe($conn, 'contas_receber')) return [];
+
+        $termo = trim($termo);
+        if ($termo === '') return [];
+
+        $limpo = rojex_kb_limpar_termo_financeiro($termo);
+        if ($limpo === '') $limpo = $termo;
+
+        $colunas = rojex_kb_colunas_tabela($conn, 'contas_receber');
+        $temCliente = rojex_kb_tabela_existe($conn, 'clientes') && in_array('cliente_id', $colunas, true);
+        $temBanco = rojex_kb_tabela_existe($conn, 'bancos_caixa') && in_array('banco_id', $colunas, true);
+
+        $campos = array_values(array_intersect(
+            ['id','descricao','cliente_id','forma_recebimento','status','mes_referencia','observacoes'],
+            $colunas
+        ));
+
+        $where = [];
+        $params = [];
+        $types = '';
+        $like = '%' . $limpo . '%';
+
+        foreach ($campos as $campo) {
+            $where[] = "cr.`{$campo}` LIKE ?";
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($temCliente) {
+            $where[] = 'c.nome LIKE ?';
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($temBanco) {
+            $where[] = 'b.nome LIKE ?';
+            $params[] = $like;
+            $types .= 's';
+        }
+
+        if ($where === []) return [];
+
+        $filtroLixeira = in_array('deletado', $colunas, true)
+            ? ' AND COALESCE(cr.deletado,0)=0'
+            : '';
+
+        $sql = "SELECT cr.*"
+            . ($temCliente ? ", COALESCE(c.nome,'') AS cliente_nome" : ", '' AS cliente_nome")
+            . ($temBanco ? ", COALESCE(b.nome,'') AS banco_nome" : ", '' AS banco_nome")
+            . " FROM contas_receber cr "
+            . ($temCliente ? "LEFT JOIN clientes c ON c.id=cr.cliente_id " : "")
+            . ($temBanco ? "LEFT JOIN bancos_caixa b ON b.id=cr.banco_id " : "")
+            . "WHERE (" . implode(' OR ', $where) . ")"
+            . $filtroLixeira
+            . " ORDER BY COALESCE(cr.data_vencimento,'2999-12-31') ASC, cr.id DESC"
+            . " LIMIT " . rojex_kb_limite($limite, 20, 200);
+
+        return rojex_kb_consultar($conn, $sql, $types, $params);
+    }
+}
+
+if (!function_exists('rojex_kb_financeiro_vencidos')) {
+    function rojex_kb_financeiro_vencidos(mysqli $conn, ?string $data = null, int $limite = 100): array
+    {
+        $data = $data ?: date('Y-m-d');
+        $limite = rojex_kb_limite($limite, 100, 500);
+        $saida = ['contas_pagar' => [], 'contas_receber' => []];
+
+        if (rojex_kb_tabela_existe($conn, 'contas_pagar')) {
+            $cols = rojex_kb_colunas_tabela($conn, 'contas_pagar');
+            $filtro = in_array('deletado', $cols, true) ? ' AND COALESCE(deletado,0)=0' : '';
+            $saida['contas_pagar'] = rojex_kb_consultar(
+                $conn,
+                "SELECT * FROM contas_pagar
+                 WHERE data_vencimento < ?
+                   AND status IN ('Pendente','Parcial'){$filtro}
+                 ORDER BY data_vencimento ASC, id DESC
+                 LIMIT {$limite}",
+                's',
+                [$data]
+            );
+        }
+
+        if (rojex_kb_tabela_existe($conn, 'contas_receber')) {
+            $cols = rojex_kb_colunas_tabela($conn, 'contas_receber');
+            $filtro = in_array('deletado', $cols, true) ? ' AND COALESCE(deletado,0)=0' : '';
+            $saida['contas_receber'] = rojex_kb_consultar(
+                $conn,
+                "SELECT * FROM contas_receber
+                 WHERE data_vencimento < ?
+                   AND status IN ('Pendente','Parcial'){$filtro}
+                 ORDER BY data_vencimento ASC, id DESC
+                 LIMIT {$limite}",
+                's',
+                [$data]
+            );
+        }
+
+        return $saida;
+    }
+}
+
+if (!function_exists('rojex_kb_bancos_caixa')) {
+    function rojex_kb_bancos_caixa(mysqli $conn, bool $somenteAtivos = true): array
+    {
+        if (!rojex_kb_tabela_existe($conn, 'bancos_caixa')) return [];
+
+        $cols = rojex_kb_colunas_tabela($conn, 'bancos_caixa');
+        $where = $somenteAtivos && in_array('ativo', $cols, true)
+            ? ' WHERE ativo=1'
+            : '';
+
+        return rojex_kb_consultar(
+            $conn,
+            'SELECT * FROM bancos_caixa' . $where . ' ORDER BY nome ASC'
+        );
+    }
+}
+
+if (!function_exists('rojex_kb_resumo_financeiro')) {
+    function rojex_kb_resumo_financeiro(mysqli $conn, ?string $data = null): array
+    {
+        $data = $data ?: date('Y-m-d');
+        $inicio = date('Y-m-01', strtotime($data));
+        $fim = date('Y-m-t', strtotime($data));
+
+        $r = [
+            'pagar_aberto' => 0.0,
+            'receber_aberto' => 0.0,
+            'pago_mes' => 0.0,
+            'recebido_mes' => 0.0,
+            'vencidas_pagar' => 0,
+            'vencidas_receber' => 0,
+            'saldo_estimado' => 0.0,
+        ];
+
+        if (rojex_kb_tabela_existe($conn, 'contas_pagar')) {
+            $cols = rojex_kb_colunas_tabela($conn, 'contas_pagar');
+            $base = in_array('deletado', $cols, true)
+                ? ' WHERE COALESCE(deletado,0)=0'
+                : ' WHERE 1=1';
+
+            $r['pagar_aberto'] = rojex_kb_total(
+                $conn,
+                "SELECT COALESCE(SUM(valor_pendente),0) AS total
+                 FROM contas_pagar{$base}
+                 AND status IN ('Pendente','Parcial')"
+            );
+
+            $r['pago_mes'] = rojex_kb_total(
+                $conn,
+                "SELECT COALESCE(SUM(valor_pago),0) AS total
+                 FROM contas_pagar{$base}
+                 AND data_pagamento BETWEEN ? AND ?",
+                'ss',
+                [$inicio, $fim]
+            );
+
+            $r['vencidas_pagar'] = (int)rojex_kb_total(
+                $conn,
+                "SELECT COUNT(*) AS total
+                 FROM contas_pagar{$base}
+                 AND status IN ('Pendente','Parcial')
+                 AND data_vencimento < ?",
+                's',
+                [$data]
+            );
+        }
+
+        if (rojex_kb_tabela_existe($conn, 'contas_receber')) {
+            $cols = rojex_kb_colunas_tabela($conn, 'contas_receber');
+            $base = in_array('deletado', $cols, true)
+                ? ' WHERE COALESCE(deletado,0)=0'
+                : ' WHERE 1=1';
+
+            $r['receber_aberto'] = rojex_kb_total(
+                $conn,
+                "SELECT COALESCE(SUM(CASE WHEN valor_pendente>0 THEN valor_pendente ELSE valor END),0) AS total
+                 FROM contas_receber{$base}
+                 AND status IN ('Pendente','Parcial')"
+            );
+
+            $r['recebido_mes'] = rojex_kb_total(
+                $conn,
+                "SELECT COALESCE(SUM(CASE WHEN valor_pago>0 THEN valor_pago ELSE valor END),0) AS total
+                 FROM contas_receber{$base}
+                 AND status IN ('Recebido','Pago','Quitada')
+                 AND data_recebimento BETWEEN ? AND ?",
+                'ss',
+                [$inicio, $fim]
+            );
+
+            $r['vencidas_receber'] = (int)rojex_kb_total(
+                $conn,
+                "SELECT COUNT(*) AS total
+                 FROM contas_receber{$base}
+                 AND status IN ('Pendente','Parcial')
+                 AND data_vencimento < ?",
+                's',
+                [$data]
+            );
+        }
+
+        $r['saldo_estimado'] = (float)$r['receber_aberto'] - (float)$r['pagar_aberto'];
+        return $r;
     }
 }
 

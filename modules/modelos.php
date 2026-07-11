@@ -4,6 +4,7 @@
  * Biblioteca Jurídica Profissional: modelos, variáveis, favoritos, versionamento e geração.
  */
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
 $csrf = gerarTokenCsrf();
 
 function sgl_mod_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool {
@@ -14,7 +15,11 @@ function sgl_mod_coluna_existe(mysqli $conn, string $tabela, string $coluna): bo
 }
 function sgl_mod_garantir_coluna(mysqli $conn, string $tabela, string $coluna, string $definicao): void {
     if (!sgl_mod_coluna_existe($conn, $tabela, $coluna)) {
-        try { $conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}"); } catch (Throwable $e) {}
+        if (!$conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}")) {
+            throw new RuntimeException(
+                "Falha ao garantir a coluna {$tabela}.{$coluna}: " . $conn->error
+            );
+        }
     }
 }
 function sgl_modelos_garantir_tabelas(mysqli $conn): void {
@@ -36,9 +41,22 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
         INDEX idx_modelos_status (status),
         INDEX idx_modelos_deletado (deletado)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+    // Compatibilidade completa com bancos antigos/restaurados: garante as colunas usadas pelo módulo principal.
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'codigo', "codigo VARCHAR(20) NULL AFTER id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'titulo', "titulo VARCHAR(180) NOT NULL DEFAULT 'Modelo sem título' AFTER codigo");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'categoria', "categoria VARCHAR(80) NOT NULL DEFAULT 'Outros' AFTER titulo");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'area_direito', "area_direito VARCHAR(80) NULL AFTER categoria");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'conteudo', "conteudo LONGTEXT NULL AFTER area_direito");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'observacoes', "observacoes TEXT NULL AFTER conteudo");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'status', "status VARCHAR(20) NOT NULL DEFAULT 'Ativo' AFTER observacoes");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'favorito', "favorito TINYINT(1) NOT NULL DEFAULT 0 AFTER status");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'versao_atual', "versao_atual INT NOT NULL DEFAULT 1 AFTER favorito");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'criado_por', "criado_por INT NULL AFTER versao_atual");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'atualizado_por', "atualizado_por INT NULL AFTER criado_por");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'ultimo_uso_em', "ultimo_uso_em DATETIME NULL AFTER atualizado_por");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0 AFTER ultimo_uso_em");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'criado_em', "criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER deletado");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'atualizado_em', "atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER criado_em");
 
     $conn->query("CREATE TABLE IF NOT EXISTS modelos_documentos_versoes (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -53,6 +71,17 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_modelo_versao (modelo_id, versao)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    // Compatibilidade com bancos antigos/restaurados: garante a estrutura completa do versionamento.
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'modelo_id', "modelo_id INT NOT NULL DEFAULT 0 AFTER id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'versao', "versao INT NOT NULL DEFAULT 1 AFTER modelo_id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'titulo', "titulo VARCHAR(180) NOT NULL DEFAULT 'Modelo sem título' AFTER versao");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'categoria', "categoria VARCHAR(80) NOT NULL DEFAULT 'Outros' AFTER titulo");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'area_direito', "area_direito VARCHAR(80) NULL AFTER categoria");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'conteudo', "conteudo LONGTEXT NULL AFTER area_direito");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'observacoes', "observacoes TEXT NULL AFTER conteudo");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'criado_por', "criado_por INT NULL AFTER observacoes");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'criado_em', "criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER criado_por");
 
     $conn->query("CREATE TABLE IF NOT EXISTS modelos_documentos_gerados (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -85,6 +114,61 @@ function sgl_modelos_codigo(mysqli $conn): string {
 }
 function sgl_modelos_categorias(): array { return ['Contrato','Petição','Procuração','Declaração','Termo','Notificação','Requerimento','Recurso','Manifestação','Parecer','Documento administrativo','Outros']; }
 function sgl_modelos_areas(): array { return ['Previdenciário','Trabalhista','Cível','Família','Consumidor','Criminal','Tributário','Empresarial','Imobiliário','Administrativo','Bancário','Contratual','LGPD','Digital','Geral']; }
+
+
+function sgl_modelos_buscar_auditoria(mysqli $conn, int $id): ?array {
+    $stmt = $conn->prepare("SELECT * FROM modelos_documentos WHERE id = ? LIMIT 1");
+    if (!$stmt) return null;
+
+    $stmt->bind_param('i', $id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $modelo = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    return $modelo;
+}
+
+function sgl_modelos_buscar_gerado_auditoria(mysqli $conn, int $id): ?array {
+    $stmt = $conn->prepare("SELECT * FROM modelos_documentos_gerados WHERE id = ? LIMIT 1");
+    if (!$stmt) return null;
+
+    $stmt->bind_param('i', $id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $gerado = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    return $gerado;
+}
+
+function sgl_modelos_registrar_log(
+    mysqli $conn,
+    string $acao,
+    string $tabela,
+    ?string $registroId,
+    string $detalhes,
+    array $contexto = []
+): void {
+    if (!function_exists('sgl_registrar_log')) return;
+
+    sgl_registrar_log(
+        $conn,
+        $acao,
+        $tabela,
+        $registroId,
+        $detalhes,
+        array_merge(
+            [
+                'modulo' => 'Modelos Jurídicos',
+                'origem' => 'Módulo Modelos Jurídicos',
+                'resultado' => 'SUCESSO',
+                'nivel' => 'INFO',
+            ],
+            $contexto
+        )
+    );
+}
 
 function sgl_modelos_templates_padrao(): array {
     return [
@@ -188,6 +272,18 @@ $uid = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!validarTokenCsrf($_POST['csrf'] ?? '')) {
         $erro = 'Falha de segurança. Atualize a página e tente novamente.';
+        sgl_modelos_registrar_log(
+            $conn,
+            'Tentativa inválida no módulo de modelos',
+            'modelos_documentos',
+            null,
+            'Ação bloqueada por token CSRF inválido.',
+            [
+                'tipo_acao' => 'EVENTO',
+                'resultado' => 'NEGADO',
+                'nivel' => 'AVISO',
+            ]
+        );
     } else {
         $acao = $_POST['acao'] ?? '';
         if ($acao === 'salvar') {
@@ -201,51 +297,245 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $favorito = isset($_POST['favorito']) ? 1 : 0;
             if ($titulo === '' || $conteudo === '') {
                 $erro = 'Informe título e conteúdo do modelo.';
+                sgl_modelos_registrar_log(
+                    $conn,
+                    'Falha ao salvar modelo',
+                    'modelos_documentos',
+                    $id > 0 ? (string)$id : null,
+                    'Operação recusada porque título ou conteúdo não foi informado.',
+                    [
+                        'tipo_acao' => $id > 0 ? 'EDICAO' : 'INCLUSAO',
+                        'resultado' => 'NEGADO',
+                        'nivel' => 'AVISO',
+                    ]
+                );
             } elseif ($id > 0) {
-                $stmt = $conn->prepare("SELECT * FROM modelos_documentos WHERE id=? LIMIT 1");
-                $stmt->bind_param('i', $id); $stmt->execute(); $modeloAntigo = $stmt->get_result()->fetch_assoc(); $stmt->close();
-                if ($modeloAntigo) sgl_modelos_registrar_versao($conn, $modeloAntigo, $uid);
-                $novaVersao = ((int)($modeloAntigo['versao_atual'] ?? 1)) + 1;
-                $stmt = $conn->prepare("UPDATE modelos_documentos SET titulo=?, categoria=?, area_direito=?, conteudo=?, observacoes=?, status=?, favorito=?, versao_atual=?, atualizado_por=? WHERE id=?");
-                $stmt->bind_param('ssssssiiii', $titulo, $categoria, $area, $conteudo, $observacoes, $status, $favorito, $novaVersao, $uid, $id);
-                $stmt->execute(); $stmt->close();
-                if (function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'ATUALIZAR_MODELO', 'modelos_documentos', (string)$id, "Modelo atualizado: {$titulo}");
-                $mensagem = 'Modelo atualizado e versão anterior preservada.';
+                $modeloAntigo = sgl_modelos_buscar_auditoria($conn, $id);
+
+                if (!$modeloAntigo) {
+                    $erro = 'Modelo não encontrado para edição.';
+                    sgl_modelos_registrar_log(
+                        $conn,
+                        'Falha ao atualizar modelo',
+                        'modelos_documentos',
+                        (string)$id,
+                        'O modelo não foi localizado.',
+                        [
+                            'tipo_acao' => 'EDICAO',
+                            'resultado' => 'FALHA',
+                            'nivel' => 'ERRO',
+                        ]
+                    );
+                } else {
+                    sgl_modelos_registrar_versao($conn, $modeloAntigo, $uid);
+                    $novaVersao = ((int)($modeloAntigo['versao_atual'] ?? 1)) + 1;
+
+                    $stmt = $conn->prepare("UPDATE modelos_documentos SET titulo=?, categoria=?, area_direito=?, conteudo=?, observacoes=?, status=?, favorito=?, versao_atual=?, atualizado_por=? WHERE id=?");
+                    $stmt->bind_param('ssssssiiii', $titulo, $categoria, $area, $conteudo, $observacoes, $status, $favorito, $novaVersao, $uid, $id);
+                    $ok = $stmt->execute();
+                    $stmt->close();
+
+                    if ($ok) {
+                        sgl_modelos_registrar_log(
+                            $conn,
+                            'Modelo atualizado',
+                            'modelos_documentos',
+                            (string)$id,
+                            "Modelo atualizado: {$titulo}",
+                            [
+                                'tipo_acao' => 'EDICAO',
+                                'origem' => 'Edição de modelos',
+                                'dados_anteriores' => $modeloAntigo,
+                                'dados_novos' => sgl_modelos_buscar_auditoria($conn, $id),
+                            ]
+                        );
+                        $mensagem = 'Modelo atualizado e versão anterior preservada.';
+                    } else {
+                        sgl_modelos_registrar_log(
+                            $conn,
+                            'Falha ao atualizar modelo',
+                            'modelos_documentos',
+                            (string)$id,
+                            'A atualização não foi concluída.',
+                            [
+                                'tipo_acao' => 'EDICAO',
+                                'resultado' => 'FALHA',
+                                'nivel' => 'ERRO',
+                                'dados_anteriores' => $modeloAntigo,
+                            ]
+                        );
+                        $erro = 'Não foi possível atualizar o modelo.';
+                    }
+                }
             } else {
                 $codigo = sgl_modelos_codigo($conn);
                 $stmt = $conn->prepare("INSERT INTO modelos_documentos (codigo,titulo,categoria,area_direito,conteudo,observacoes,status,favorito,criado_por,atualizado_por) VALUES (?,?,?,?,?,?,?,?,?,?)");
                 $stmt->bind_param('sssssssiii', $codigo, $titulo, $categoria, $area, $conteudo, $observacoes, $status, $favorito, $uid, $uid);
-                $stmt->execute(); $novoId = $stmt->insert_id; $stmt->close();
-                if (function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'CRIAR_MODELO', 'modelos_documentos', (string)$novoId, "Modelo criado: {$codigo} - {$titulo}");
-                $mensagem = 'Modelo cadastrado com sucesso.';
+                $ok = $stmt->execute();
+                $novoId = $stmt->insert_id;
+                $stmt->close();
+
+                if ($ok && $novoId > 0) {
+                    sgl_modelos_registrar_log(
+                        $conn,
+                        'Modelo incluído',
+                        'modelos_documentos',
+                        (string)$novoId,
+                        "Modelo criado: {$codigo} - {$titulo}",
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'origem' => 'Cadastro de modelos',
+                            'dados_novos' => sgl_modelos_buscar_auditoria($conn, $novoId),
+                        ]
+                    );
+                    $mensagem = 'Modelo cadastrado com sucesso.';
+                } else {
+                    sgl_modelos_registrar_log(
+                        $conn,
+                        'Falha ao incluir modelo',
+                        'modelos_documentos',
+                        null,
+                        'O modelo não foi gravado no banco.',
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'resultado' => 'FALHA',
+                            'nivel' => 'ERRO',
+                            'dados_novos' => [
+                                'codigo' => $codigo,
+                                'titulo' => $titulo,
+                                'categoria' => $categoria,
+                                'area_direito' => $area,
+                                'status' => $status,
+                                'favorito' => $favorito,
+                            ],
+                        ]
+                    );
+                    $erro = 'Não foi possível cadastrar o modelo.';
+                }
             }
         }
         if ($acao === 'excluir') {
             $id = (int)($_POST['id'] ?? 0);
-            $stmt = $conn->prepare("UPDATE modelos_documentos SET deletado=1 WHERE id=?"); $stmt->bind_param('i',$id); $stmt->execute(); $stmt->close();
-            if (function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'EXCLUIR_MODELO', 'modelos_documentos', (string)$id, 'Modelo movido para lixeira.');
-            $mensagem = 'Modelo movido para a lixeira.';
+            $dadosAnteriores = sgl_modelos_buscar_auditoria($conn, $id);
+
+            $stmt = $conn->prepare("UPDATE modelos_documentos SET deletado=1 WHERE id=? AND deletado=0");
+            $stmt->bind_param('i', $id);
+            $ok = $stmt->execute();
+            $afetadas = $stmt->affected_rows;
+            $stmt->close();
+
+            if ($ok && $afetadas > 0) {
+                sgl_modelos_registrar_log(
+                    $conn,
+                    'Modelo movido para a lixeira',
+                    'modelos_documentos',
+                    (string)$id,
+                    'Exclusão lógica do modelo.',
+                    [
+                        'tipo_acao' => 'EXCLUSAO',
+                        'origem' => 'Biblioteca de modelos',
+                        'nivel' => 'AVISO',
+                        'dados_anteriores' => $dadosAnteriores,
+                        'dados_novos' => sgl_modelos_buscar_auditoria($conn, $id),
+                    ]
+                );
+                $mensagem = 'Modelo movido para a lixeira.';
+            } else {
+                sgl_modelos_registrar_log(
+                    $conn,
+                    'Falha ao mover modelo para a lixeira',
+                    'modelos_documentos',
+                    (string)$id,
+                    'O registro não foi alterado.',
+                    [
+                        'tipo_acao' => 'EXCLUSAO',
+                        'resultado' => 'FALHA',
+                        'nivel' => 'ERRO',
+                        'dados_anteriores' => $dadosAnteriores,
+                    ]
+                );
+                $erro = 'Não foi possível mover o modelo para a lixeira.';
+            }
         }
         if ($acao === 'duplicar') {
             $id = (int)($_POST['id'] ?? 0);
-            $stmt = $conn->prepare("SELECT * FROM modelos_documentos WHERE id=? LIMIT 1"); $stmt->bind_param('i',$id); $stmt->execute(); $modelo=$stmt->get_result()->fetch_assoc(); $stmt->close();
+            $modelo = sgl_modelos_buscar_auditoria($conn, $id);
+
             if ($modelo) {
-                $codigo = sgl_modelos_codigo($conn); $titulo = 'Cópia de ' . $modelo['titulo'];
+                $codigo = sgl_modelos_codigo($conn);
+                $titulo = 'Cópia de ' . $modelo['titulo'];
                 $stmt = $conn->prepare("INSERT INTO modelos_documentos (codigo,titulo,categoria,area_direito,conteudo,observacoes,status,favorito,criado_por,atualizado_por) VALUES (?,?,?,?,?,?,?,?,?,?)");
-                $fav = 0; $stmt->bind_param('sssssssiii', $codigo, $titulo, $modelo['categoria'], $modelo['area_direito'], $modelo['conteudo'], $modelo['observacoes'], $modelo['status'], $fav, $uid, $uid);
-                $stmt->execute(); $novoId=$stmt->insert_id; $stmt->close();
-                if (function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'DUPLICAR_MODELO', 'modelos_documentos', (string)$novoId, "Modelo duplicado a partir do ID {$id}");
-                $mensagem = 'Modelo duplicado com sucesso.';
+                $fav = 0;
+                $stmt->bind_param('sssssssiii', $codigo, $titulo, $modelo['categoria'], $modelo['area_direito'], $modelo['conteudo'], $modelo['observacoes'], $modelo['status'], $fav, $uid, $uid);
+                $ok = $stmt->execute();
+                $novoId = $stmt->insert_id;
+                $stmt->close();
+
+                if ($ok && $novoId > 0) {
+                    sgl_modelos_registrar_log(
+                        $conn,
+                        'Modelo duplicado',
+                        'modelos_documentos',
+                        (string)$novoId,
+                        "Modelo duplicado a partir do ID {$id}.",
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'origem' => 'Duplicação de modelos',
+                            'dados_anteriores' => $modelo,
+                            'dados_novos' => sgl_modelos_buscar_auditoria($conn, $novoId),
+                        ]
+                    );
+                    $mensagem = 'Modelo duplicado com sucesso.';
+                } else {
+                    $erro = 'Não foi possível duplicar o modelo.';
+                }
+            } else {
+                $erro = 'Modelo de origem não encontrado.';
             }
         }
         if ($acao === 'favorito') {
             $id = (int)($_POST['id'] ?? 0);
-            $conn->query("UPDATE modelos_documentos SET favorito = IF(COALESCE(favorito,0)=1,0,1) WHERE id=" . $id);
-            $mensagem = 'Favorito atualizado.';
+            $dadosAnteriores = sgl_modelos_buscar_auditoria($conn, $id);
+            $ok = $conn->query("UPDATE modelos_documentos SET favorito = IF(COALESCE(favorito,0)=1,0,1) WHERE id=" . $id);
+
+            if ($ok && $conn->affected_rows > 0) {
+                $dadosNovos = sgl_modelos_buscar_auditoria($conn, $id);
+                $ativado = !empty($dadosNovos['favorito']);
+
+                sgl_modelos_registrar_log(
+                    $conn,
+                    $ativado ? 'Modelo marcado como favorito' : 'Modelo removido dos favoritos',
+                    'modelos_documentos',
+                    (string)$id,
+                    $ativado ? 'Favorito ativado.' : 'Favorito removido.',
+                    [
+                        'tipo_acao' => 'EDICAO',
+                        'origem' => 'Biblioteca de modelos',
+                        'dados_anteriores' => $dadosAnteriores,
+                        'dados_novos' => $dadosNovos,
+                    ]
+                );
+                $mensagem = 'Favorito atualizado.';
+            } else {
+                $erro = 'Não foi possível atualizar o favorito.';
+            }
         }
         if ($acao === 'importar_padrao') {
             $qtde = sgl_modelos_importar_padrao($conn, $uid);
-            if (function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'IMPORTAR_MODELOS_PADRAO', 'modelos_documentos', '', "Modelos padrão importados: {$qtde}");
+            sgl_modelos_registrar_log(
+                $conn,
+                'Biblioteca padrão importada',
+                'modelos_documentos',
+                null,
+                "Modelos padrão importados: {$qtde}.",
+                [
+                    'tipo_acao' => 'SINCRONIZACAO',
+                    'origem' => 'Importação da biblioteca padrão',
+                    'dados_novos' => [
+                        'quantidade_importada' => $qtde,
+                    ],
+                ]
+            );
             $mensagem = $qtde > 0 ? "{$qtde} modelo(s) padrão importado(s) com sucesso." : 'Os modelos padrão já estavam cadastrados.';
         }
         if ($acao === 'salvar_gerado') {
@@ -257,10 +547,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($modeloId && $conteudoFinal !== '') {
                 $stmt = $conn->prepare("INSERT INTO modelos_documentos_gerados (modelo_id,cliente_id,processo_id,titulo,conteudo_final,gerado_por) VALUES (?,?,?,?,?,?)");
                 $stmt->bind_param('iiissi', $modeloId, $clienteId, $processoId, $tituloGerado, $conteudoFinal, $uid);
-                $stmt->execute(); $geradoId = $stmt->insert_id; $stmt->close();
-                $conn->query("UPDATE modelos_documentos SET ultimo_uso_em=NOW() WHERE id=".(int)$modeloId);
-                if (function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'GERAR_DOCUMENTO_MODELO', 'modelos_documentos_gerados', (string)$geradoId, "Documento gerado a partir do modelo {$modeloId}");
-                $mensagem = 'Documento gerado salvo no histórico.';
+                $ok = $stmt->execute();
+                $geradoId = $stmt->insert_id;
+                $stmt->close();
+
+                if ($ok && $geradoId > 0) {
+                    $conn->query("UPDATE modelos_documentos SET ultimo_uso_em=NOW() WHERE id=".(int)$modeloId);
+
+                    sgl_modelos_registrar_log(
+                        $conn,
+                        'Documento gerado a partir de modelo',
+                        'modelos_documentos_gerados',
+                        (string)$geradoId,
+                        "Documento gerado a partir do modelo {$modeloId}.",
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'origem' => 'Geração de documentos',
+                            'dados_novos' => sgl_modelos_buscar_gerado_auditoria($conn, $geradoId),
+                        ]
+                    );
+                    $mensagem = 'Documento gerado salvo no histórico.';
+                } else {
+                    sgl_modelos_registrar_log(
+                        $conn,
+                        'Falha ao gerar documento a partir de modelo',
+                        'modelos_documentos_gerados',
+                        null,
+                        'O histórico do documento não foi salvo.',
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'resultado' => 'FALHA',
+                            'nivel' => 'ERRO',
+                            'dados_novos' => [
+                                'modelo_id' => $modeloId,
+                                'cliente_id' => $clienteId,
+                                'processo_id' => $processoId,
+                                'titulo' => $tituloGerado,
+                            ],
+                        ]
+                    );
+                    $erro = 'Não foi possível salvar o documento gerado.';
+                }
             }
         }
     }

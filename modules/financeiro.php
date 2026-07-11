@@ -8,14 +8,6 @@ sgl_integracao_garantir_recibos($conn);
 if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
 $csrf_token_fin = function_exists('gerarTokenCsrf') ? gerarTokenCsrf() : '';
 
-if (!function_exists('buscarReciboPorContaReceber') && function_exists('sgl_buscar_recibo_por_conta_receber')) {
-    function buscarReciboPorContaReceber(mysqli $conn, string $conta_receber_id): ?array
-    {
-        return sgl_buscar_recibo_por_conta_receber($conn, $conta_receber_id);
-    }
-}
-
-
 $aba  = $_GET['aba'] ?? 'cp';     // cp = contas a pagar, cr = receber
 $acao = $_GET['acao'] ?? 'listar'; // listar | novo_cp | editar_cp | novo_cr | editar_cr | lixeira
 $msg  = '';
@@ -169,7 +161,7 @@ function brlParaFloatFin(string $valor): float
     if ($v === '') return 0.0;
 
     // Aceita: 1000,00 | 1.000,00 | R$ 1.000,00 | 1000.00 | 1,000.00
-    $v = str_replace(["Â ", 'R$', 'r$', ' '], '', $v);
+    $v = str_replace(["Â ", 'R$', 'r$', ' '], '', $v);
     $v = preg_replace('/[^0-9,\.\-]/', '', $v);
     if ($v === '' || $v === '-' || $v === ',' || $v === '.') return 0.0;
 
@@ -1369,9 +1361,14 @@ if ($acao === 'bancos') {
                                        onchange="atualizarPreviewParcelasCP();">
                             </div>
                             <div class="col-md-2">
-                                <label class="form-label">Forma Pagamento</label>
-                                <input type="text" name="forma_pagamento" class="form-control"
-                                       value="<?= htmlspecialchars($conta_cp['forma_pagamento'] ?? '') ?>">
+                                <label class="form-label">Forma de Pagamento</label>
+                                <select name="forma_pagamento" class="form-select">
+                                    <?php foreach (['','PIX','Dinheiro','Cartão','Transferência','Boleto','Cheque','Outro'] as $forma): ?>
+                                        <option value="<?= htmlspecialchars($forma) ?>" <?= ($conta_cp['forma_pagamento'] ?? '') === $forma ? 'selected' : '' ?>>
+                                            <?= $forma === '' ? 'Selecione' : htmlspecialchars($forma) ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
                             </div>
                             <div class="col-md-3">
                                 <label class="form-label">Banco/Caixa</label>

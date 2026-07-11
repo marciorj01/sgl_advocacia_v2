@@ -5,6 +5,7 @@
  */
 
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
 
 // Correção preventiva Fase 5: garante colunas usadas por este módulo sem apagar dados.
 @$conn->query("ALTER TABLE advogados ADD COLUMN IF NOT EXISTS cpf VARCHAR(20) NULL AFTER nome");
@@ -121,7 +122,7 @@ function advogadoExisteOab(mysqli $conn, string $oab, string $uf, ?string $ignor
 function salvarAdvogado(mysqli $conn, string $id, array $a): bool {
     $sql = "INSERT INTO advogados (
         id, nome, cpf, oab, oab_uf, especialidade, telefone, email, status, observacoes, data_cadastro
-    ) VALUES (?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, CURDATE())";
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param(
         'ssssssssss',
@@ -133,7 +134,7 @@ function salvarAdvogado(mysqli $conn, string $id, array $a): bool {
 
 function atualizarAdvogado(mysqli $conn, string $id, array $a): bool {
     $sql = "UPDATE advogados SET
-        nome = ?, cpf = NULLIF(?, ''), oab = ?, oab_uf = ?, especialidade = ?,
+        nome = ?, cpf = ?, oab = ?, oab_uf = ?, especialidade = ?,
         telefone = ?, email = ?, status = ?, observacoes = ?
         WHERE id = ? AND deletado = 0";
     $stmt = $conn->prepare($sql);
@@ -143,6 +144,22 @@ function atualizarAdvogado(mysqli $conn, string $id, array $a): bool {
         $a['telefone'], $a['email'], $a['status'], $a['observacoes'], $id
     );
     return $stmt->execute();
+}
+
+
+function buscarAdvogadoAuditoria(mysqli $conn, string $id): ?array {
+    $stmt = $conn->prepare('SELECT * FROM advogados WHERE id = ? LIMIT 1');
+    if (!$stmt) {
+        return null;
+    }
+
+    $stmt->bind_param('s', $id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $advogado = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    return $advogado;
 }
 
 $advogado_editar = null;
@@ -174,6 +191,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_advogado']) |
         } elseif (isset($_POST['salvar_advogado'])) {
             $id = gerarIdAdvogado($conn);
             if (salvarAdvogado($conn, $id, $a)) {
+                if (function_exists('sgl_registrar_log')) {
+                    sgl_registrar_log(
+                        $conn,
+                        'Advogado incluído',
+                        'advogados',
+                        $id,
+                        'Novo advogado cadastrado: ' . $a['nome'],
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'modulo' => 'Advogados',
+                            'origem' => 'Cadastro de advogados',
+                            'resultado' => 'SUCESSO',
+                            'nivel' => 'INFO',
+                            'dados_novos' => buscarAdvogadoAuditoria($conn, $id) ?? $a,
+                        ]
+                    );
+                }
+
                 $msg = "<div class='alert alert-success'>✅ Advogado <strong>" . h($id) . "</strong> cadastrado com sucesso.</div>";
                 $acao = 'listar';
             } else {
@@ -183,7 +218,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_advogado']) |
             }
         } else {
             $id = (string)($_POST['id'] ?? '');
+            $dadosAnteriores = buscarAdvogadoAuditoria($conn, $id);
+
             if (atualizarAdvogado($conn, $id, $a)) {
+                if (function_exists('sgl_registrar_log')) {
+                    sgl_registrar_log(
+                        $conn,
+                        'Advogado atualizado',
+                        'advogados',
+                        $id,
+                        'Dados do advogado atualizados: ' . $a['nome'],
+                        [
+                            'tipo_acao' => 'EDICAO',
+                            'modulo' => 'Advogados',
+                            'origem' => 'Edição de advogados',
+                            'resultado' => 'SUCESSO',
+                            'nivel' => 'INFO',
+                            'dados_anteriores' => $dadosAnteriores,
+                            'dados_novos' => buscarAdvogadoAuditoria($conn, $id) ?? $a,
+                        ]
+                    );
+                }
+
                 $msg = "<div class='alert alert-success'>✅ Advogado <strong>" . h($id) . "</strong> atualizado com sucesso.</div>";
                 $acao = 'listar';
             } else {
@@ -201,10 +257,56 @@ if (isset($_GET['excluir'])) {
         $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Tente novamente.</div>';
     } else {
         $id = (string)$_GET['excluir'];
+        $dadosAnteriores = buscarAdvogadoAuditoria($conn, $id);
+
         $stmt = $conn->prepare("UPDATE advogados SET deletado = 1, status = 'Excluído' WHERE id = ?");
         $stmt->bind_param('s', $id);
-        $stmt->execute();
-        $msg = "<div class='alert alert-warning'>🗑️ Advogado <strong>" . h($id) . "</strong> movido para a lixeira.</div>";
+        $okExcluir = $stmt->execute();
+        $linhasAfetadas = $stmt->affected_rows;
+        $stmt->close();
+
+        if ($okExcluir && $linhasAfetadas > 0) {
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Advogado movido para a lixeira',
+                    'advogados',
+                    $id,
+                    'Exclusão lógica do advogado: ' . (string)($dadosAnteriores['nome'] ?? $id),
+                    [
+                        'tipo_acao' => 'EXCLUSAO',
+                        'modulo' => 'Advogados',
+                        'origem' => 'Lista de advogados',
+                        'resultado' => 'SUCESSO',
+                        'nivel' => 'AVISO',
+                        'dados_anteriores' => $dadosAnteriores,
+                        'dados_novos' => buscarAdvogadoAuditoria($conn, $id),
+                    ]
+                );
+            }
+
+            $msg = "<div class='alert alert-warning'>🗑️ Advogado <strong>" . h($id) . "</strong> movido para a lixeira.</div>";
+        } else {
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Falha ao mover advogado para a lixeira',
+                    'advogados',
+                    $id,
+                    'O registro não foi alterado.',
+                    [
+                        'tipo_acao' => 'EXCLUSAO',
+                        'modulo' => 'Advogados',
+                        'origem' => 'Lista de advogados',
+                        'resultado' => 'FALHA',
+                        'nivel' => 'ERRO',
+                        'dados_anteriores' => $dadosAnteriores,
+                    ]
+                );
+            }
+
+            $msg = "<div class='alert alert-danger'>Não foi possível mover o advogado para a lixeira.</div>";
+        }
     }
     $acao = 'listar';
 }

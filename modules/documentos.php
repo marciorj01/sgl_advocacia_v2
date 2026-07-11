@@ -5,6 +5,7 @@
  */
 
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
 
 if (session_status() !== PHP_SESSION_ACTIVE) {
     session_start();
@@ -80,6 +81,51 @@ function sgl_doc_categoria_lista(): array {
     return ['Documento pessoal','Procuração','Contrato','Petição','Prova','Audiência','Financeiro','Recibo','Documento do processo','Outros'];
 }
 
+
+function sgl_doc_buscar_auditoria(mysqli $conn, int $id): ?array {
+    $stmt = $conn->prepare("SELECT * FROM documentos_arquivos WHERE id = ? LIMIT 1");
+    if (!$stmt) {
+        return null;
+    }
+
+    $stmt->bind_param('i', $id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $doc = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    return $doc;
+}
+
+function sgl_doc_registrar_log(
+    mysqli $conn,
+    string $acao,
+    ?string $registroId,
+    string $detalhes,
+    array $contexto = []
+): void {
+    if (!function_exists('sgl_registrar_log')) {
+        return;
+    }
+
+    sgl_registrar_log(
+        $conn,
+        $acao,
+        'documentos_arquivos',
+        $registroId,
+        $detalhes,
+        array_merge(
+            [
+                'modulo' => 'Documentos',
+                'origem' => 'Módulo Documentos',
+                'resultado' => 'SUCESSO',
+                'nivel' => 'INFO',
+            ],
+            $contexto
+        )
+    );
+}
+
 sgl_doc_garantir_tabela($conn);
 $mensagem = null;
 $erro = null;
@@ -94,12 +140,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $acao = $_POST['acao'] ?? '';
         if ($acao === 'excluir') {
             $id = (int)($_POST['id'] ?? 0);
-            $stmt = $conn->prepare("UPDATE documentos_arquivos SET deletado = 1, status = 'Excluído' WHERE id = ?");
+            $dadosAnteriores = $id > 0 ? sgl_doc_buscar_auditoria($conn, $id) : null;
+
+            $stmt = $conn->prepare("UPDATE documentos_arquivos SET deletado = 1, status = 'Excluído' WHERE id = ? AND deletado = 0");
             $stmt->bind_param('i', $id);
-            $stmt->execute();
+            $ok = $stmt->execute();
+            $afetadas = $stmt->affected_rows;
             $stmt->close();
-            if (function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'EXCLUIR_DOCUMENTO', 'documentos_arquivos', (string)$id, 'Documento movido para lixeira.');
-            $mensagem = 'Documento movido para a lixeira.';
+
+            if ($ok && $afetadas > 0) {
+                sgl_doc_registrar_log(
+                    $conn,
+                    'Documento movido para a lixeira',
+                    (string)$id,
+                    'Exclusão lógica do documento.',
+                    [
+                        'tipo_acao' => 'EXCLUSAO',
+                        'origem' => 'Lista de documentos',
+                        'nivel' => 'AVISO',
+                        'dados_anteriores' => $dadosAnteriores,
+                        'dados_novos' => sgl_doc_buscar_auditoria($conn, $id),
+                    ]
+                );
+                $mensagem = 'Documento movido para a lixeira.';
+            } else {
+                sgl_doc_registrar_log(
+                    $conn,
+                    'Falha ao mover documento para a lixeira',
+                    $id > 0 ? (string)$id : null,
+                    'O registro não foi alterado.',
+                    [
+                        'tipo_acao' => 'EXCLUSAO',
+                        'origem' => 'Lista de documentos',
+                        'resultado' => 'FALHA',
+                        'nivel' => 'ERRO',
+                        'dados_anteriores' => $dadosAnteriores,
+                    ]
+                );
+                $erro = 'Não foi possível mover o documento para a lixeira.';
+            }
         }
         if ($acao === 'upload') {
             $titulo = trim($_POST['titulo'] ?? '');
@@ -107,18 +186,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $cliente_id = trim($_POST['cliente_id'] ?? '');
             $processo_id = trim($_POST['processo_id'] ?? '');
             $descricao = trim($_POST['descricao'] ?? '');
-            if ($titulo === '') $erro = 'Informe um título para o documento.';
-            if (empty($_FILES['arquivo']) || $_FILES['arquivo']['error'] !== UPLOAD_ERR_OK) $erro = $erro ?: 'Selecione um arquivo válido.';
+            if ($titulo === '') {
+                $erro = 'Informe um título para o documento.';
+                sgl_doc_registrar_log(
+                    $conn,
+                    'Falha no upload de documento',
+                    null,
+                    'Upload recusado: título não informado.',
+                    [
+                        'tipo_acao' => 'INCLUSAO',
+                        'origem' => 'Upload de documentos',
+                        'resultado' => 'NEGADO',
+                        'nivel' => 'AVISO',
+                    ]
+                );
+            }
+            if (empty($_FILES['arquivo']) || $_FILES['arquivo']['error'] !== UPLOAD_ERR_OK) {
+                $erro = $erro ?: 'Selecione um arquivo válido.';
+                sgl_doc_registrar_log(
+                    $conn,
+                    'Falha no upload de documento',
+                    null,
+                    'Upload recusado: arquivo ausente ou inválido.',
+                    [
+                        'tipo_acao' => 'INCLUSAO',
+                        'origem' => 'Upload de documentos',
+                        'resultado' => 'NEGADO',
+                        'nivel' => 'AVISO',
+                    ]
+                );
+            }
             if (!$erro) {
                 $file = $_FILES['arquivo'];
                 $max = 15 * 1024 * 1024; // 15 MB
                 if ($file['size'] > $max) {
                     $erro = 'Arquivo muito grande. Limite atual: 15 MB.';
+                    sgl_doc_registrar_log(
+                        $conn,
+                        'Falha no upload de documento',
+                        null,
+                        'Upload recusado: arquivo acima de 15 MB.',
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'origem' => 'Upload de documentos',
+                            'resultado' => 'NEGADO',
+                            'nivel' => 'AVISO',
+                            'dados_novos' => [
+                                'nome_original' => (string)($file['name'] ?? ''),
+                                'tamanho_bytes' => (int)($file['size'] ?? 0),
+                            ],
+                        ]
+                    );
                 } else {
                     $original = $file['name'];
                     $ext = strtolower(pathinfo($original, PATHINFO_EXTENSION));
                     if (!in_array($ext, sgl_doc_ext_permitidas(), true)) {
                         $erro = 'Tipo de arquivo não permitido.';
+                        sgl_doc_registrar_log(
+                            $conn,
+                            'Falha no upload de documento',
+                            null,
+                            'Upload recusado: extensão não permitida.',
+                            [
+                                'tipo_acao' => 'INCLUSAO',
+                                'origem' => 'Upload de documentos',
+                                'resultado' => 'NEGADO',
+                                'nivel' => 'AVISO',
+                                'dados_novos' => [
+                                    'nome_original' => $original,
+                                    'extensao' => $ext,
+                                ],
+                            ]
+                        );
                     } else {
                         $finfo = new finfo(FILEINFO_MIME_TYPE);
                         $mime = $finfo->file($file['tmp_name']) ?: 'application/octet-stream';
@@ -130,6 +269,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $destRel = $dirRel . '/' . $safeName;
                         if (!move_uploaded_file($file['tmp_name'], $destAbs)) {
                             $erro = 'Não foi possível salvar o arquivo.';
+                            sgl_doc_registrar_log(
+                                $conn,
+                                'Falha no upload de documento',
+                                null,
+                                'Falha ao mover o arquivo para o diretório definitivo.',
+                                [
+                                    'tipo_acao' => 'INCLUSAO',
+                                    'origem' => 'Upload de documentos',
+                                    'resultado' => 'FALHA',
+                                    'nivel' => 'ERRO',
+                                    'dados_novos' => [
+                                        'nome_original' => $original,
+                                        'extensao' => $ext,
+                                        'mime_type' => $mime,
+                                    ],
+                                ]
+                            );
                         } else {
                             $codigo = sgl_doc_novo_codigo($conn);
                             $hash = hash_file('sha256', $destAbs);
@@ -148,11 +304,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $stmt = $conn->prepare("INSERT INTO documentos_arquivos (codigo,titulo,categoria,cliente_id,processo_id,numero_processo,descricao,nome_original,nome_arquivo,caminho,extensao,mime_type,tamanho_bytes,hash_arquivo,usuario_id,usuario_nome) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
                             $tamanho = (int)$file['size'];
                             $stmt->bind_param('ssssssssssssisis', $codigo,$titulo,$categoria,$cliente_id_db,$processo_id_db,$numero_processo,$descricao,$original,$safeName,$destRel,$ext,$mime,$tamanho,$hash,$uid,$unome);
-                            $stmt->execute();
+                            $okInsert = $stmt->execute();
                             $novoId = $stmt->insert_id;
                             $stmt->close();
-                            if (function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'UPLOAD_DOCUMENTO', 'documentos_arquivos', (string)$novoId, "Upload {$codigo}: {$original}");
-                            $mensagem = 'Documento enviado com segurança e vinculado ao cadastro selecionado.';
+
+                            if ($okInsert && $novoId > 0) {
+                                sgl_doc_registrar_log(
+                                    $conn,
+                                    'Documento incluído',
+                                    (string)$novoId,
+                                    "Upload seguro {$codigo}: {$original}",
+                                    [
+                                        'tipo_acao' => 'INCLUSAO',
+                                        'origem' => 'Upload de documentos',
+                                        'dados_novos' => sgl_doc_buscar_auditoria($conn, $novoId),
+                                    ]
+                                );
+                                $mensagem = 'Documento enviado com segurança e vinculado ao cadastro selecionado.';
+                            } else {
+                                @unlink($destAbs);
+                                sgl_doc_registrar_log(
+                                    $conn,
+                                    'Falha no upload de documento',
+                                    null,
+                                    'Arquivo físico removido porque o registro não foi salvo no banco.',
+                                    [
+                                        'tipo_acao' => 'INCLUSAO',
+                                        'origem' => 'Upload de documentos',
+                                        'resultado' => 'FALHA',
+                                        'nivel' => 'ERRO',
+                                        'dados_novos' => [
+                                            'codigo' => $codigo,
+                                            'titulo' => $titulo,
+                                            'categoria' => $categoria,
+                                            'cliente_id' => $cliente_id_db,
+                                            'processo_id' => $processo_id_db,
+                                            'nome_original' => $original,
+                                            'extensao' => $ext,
+                                            'mime_type' => $mime,
+                                            'tamanho_bytes' => $tamanho,
+                                            'hash_arquivo' => $hash,
+                                        ],
+                                    ]
+                                );
+                                $erro = 'Não foi possível registrar o documento no banco de dados.';
+                            }
                         }
                     }
                 }

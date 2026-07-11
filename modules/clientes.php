@@ -5,6 +5,7 @@
  */
 
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
 $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
 
@@ -102,7 +103,7 @@ function salvarCliente(mysqli $conn, string $id, array $c): bool {
         id, nome, cpf_cnpj, tipo_pessoa, rg, data_nascimento, estado_civil, profissao,
         telefone, celular, whatsapp, email, email_secundario, cep, logradouro, numero,
         complemento, bairro, cidade, estado, status, indicacao, observacoes, data_cadastro
-    ) VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())";
+    ) VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param(
         'sssssssssssssssssssssss',
@@ -134,6 +135,22 @@ function atualizarCliente(mysqli $conn, string $id, array $c): bool {
     return $stmt->execute();
 }
 
+
+function buscarClienteAuditoria(mysqli $conn, string $id): ?array {
+    $stmt = $conn->prepare('SELECT * FROM clientes WHERE id = ? LIMIT 1');
+    if (!$stmt) {
+        return null;
+    }
+
+    $stmt->bind_param('s', $id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $cliente = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    return $cliente;
+}
+
 $cliente_editar = null;
 
 // SALVAR / ATUALIZAR
@@ -158,6 +175,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
         } elseif (isset($_POST['salvar_cliente'])) {
             $id = gerarIdCliente($conn);
             if (salvarCliente($conn, $id, $c)) {
+                if (function_exists('sgl_registrar_log')) {
+                    sgl_registrar_log(
+                        $conn,
+                        'Cliente incluído',
+                        'clientes',
+                        $id,
+                        'Novo cliente cadastrado: ' . $c['nome'],
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'modulo' => 'Clientes',
+                            'origem' => 'Cadastro de clientes',
+                            'resultado' => 'SUCESSO',
+                            'nivel' => 'INFO',
+                            'dados_novos' => buscarClienteAuditoria($conn, $id) ?? $c,
+                        ]
+                    );
+                }
+
                 $msg = "<div class='alert alert-success'>✅ Cliente <strong>" . h($id) . "</strong> cadastrado com sucesso.</div>";
                 $acao = 'listar';
             } else {
@@ -167,7 +202,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
             }
         } else {
             $id = (string)($_POST['id'] ?? '');
+            $dadosAnteriores = buscarClienteAuditoria($conn, $id);
+
             if (atualizarCliente($conn, $id, $c)) {
+                if (function_exists('sgl_registrar_log')) {
+                    sgl_registrar_log(
+                        $conn,
+                        'Cliente atualizado',
+                        'clientes',
+                        $id,
+                        'Dados do cliente atualizados: ' . $c['nome'],
+                        [
+                            'tipo_acao' => 'EDICAO',
+                            'modulo' => 'Clientes',
+                            'origem' => 'Edição de clientes',
+                            'resultado' => 'SUCESSO',
+                            'nivel' => 'INFO',
+                            'dados_anteriores' => $dadosAnteriores,
+                            'dados_novos' => buscarClienteAuditoria($conn, $id) ?? $c,
+                        ]
+                    );
+                }
+
                 $msg = "<div class='alert alert-success'>✅ Cliente <strong>" . h($id) . "</strong> atualizado com sucesso.</div>";
                 $acao = 'listar';
             } else {
@@ -186,10 +242,56 @@ if (isset($_GET['excluir'])) {
         $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Tente novamente.</div>';
     } else {
         $id = (string)$_GET['excluir'];
+        $dadosAnteriores = buscarClienteAuditoria($conn, $id);
+
         $stmt = $conn->prepare("UPDATE clientes SET deletado = 1, status = 'Excluído' WHERE id = ?");
         $stmt->bind_param('s', $id);
-        $stmt->execute();
-        $msg = "<div class='alert alert-warning'>🗑️ Cliente <strong>" . h($id) . "</strong> movido para a lixeira.</div>";
+        $okExcluir = $stmt->execute();
+        $linhasAfetadas = $stmt->affected_rows;
+        $stmt->close();
+
+        if ($okExcluir && $linhasAfetadas > 0) {
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Cliente movido para a lixeira',
+                    'clientes',
+                    $id,
+                    'Exclusão lógica do cliente: ' . (string)($dadosAnteriores['nome'] ?? $id),
+                    [
+                        'tipo_acao' => 'EXCLUSAO',
+                        'modulo' => 'Clientes',
+                        'origem' => 'Lista de clientes',
+                        'resultado' => 'SUCESSO',
+                        'nivel' => 'AVISO',
+                        'dados_anteriores' => $dadosAnteriores,
+                        'dados_novos' => buscarClienteAuditoria($conn, $id),
+                    ]
+                );
+            }
+
+            $msg = "<div class='alert alert-warning'>🗑️ Cliente <strong>" . h($id) . "</strong> movido para a lixeira.</div>";
+        } else {
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Falha ao mover cliente para a lixeira',
+                    'clientes',
+                    $id,
+                    'O registro não foi alterado.',
+                    [
+                        'tipo_acao' => 'EXCLUSAO',
+                        'modulo' => 'Clientes',
+                        'origem' => 'Lista de clientes',
+                        'resultado' => 'FALHA',
+                        'nivel' => 'ERRO',
+                        'dados_anteriores' => $dadosAnteriores,
+                    ]
+                );
+            }
+
+            $msg = "<div class='alert alert-danger'>Não foi possível mover o cliente para a lixeira.</div>";
+        }
     }
     $acao = 'listar';
 }

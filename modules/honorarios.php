@@ -174,6 +174,50 @@ function getParcelasHonorario(mysqli $conn, string $honorario_id): array
     return $parcelas;
 }
 
+
+function buscarHonorarioAuditoria(mysqli $conn, string $id): ?array
+{
+    $idSeguro = $conn->real_escape_string($id);
+    $res = $conn->query("SELECT * FROM honorarios WHERE id = '{$idSeguro}' LIMIT 1");
+    if (!$res || $res->num_rows === 0) {
+        return null;
+    }
+
+    $honorario = $res->fetch_assoc();
+    $honorario['parcelas'] = getParcelasHonorario($conn, $id);
+
+    return $honorario;
+}
+
+function registrarLogHonorario(
+    mysqli $conn,
+    string $acao,
+    string $registroId,
+    string $detalhes,
+    array $contexto = []
+): void {
+    if (!function_exists('sgl_registrar_log')) {
+        return;
+    }
+
+    sgl_registrar_log(
+        $conn,
+        $acao,
+        'honorarios',
+        $registroId,
+        $detalhes,
+        array_merge(
+            [
+                'modulo' => 'Honorários',
+                'origem' => 'Módulo Honorários',
+                'resultado' => 'SUCESSO',
+                'nivel' => 'INFO',
+            ],
+            $contexto
+        )
+    );
+}
+
 function recalcHonorario(mysqli $conn, string $honorario_id)
 {
     $res = $conn->query("
@@ -213,35 +257,205 @@ function recalcHonorario(mysqli $conn, string $honorario_id)
 $tiposHonorario = ['Contrato', 'Êxito', 'Consultoria', 'Acordo', 'Outro'];
 $statusOptions = ['Pendente', 'Parcial', 'Pago', 'Cancelado'];
 
+$csrfHonorarios = gerarTokenCsrf();
+
 /* -----------------------------------------------------------
-   AJUSTE SGL: LIXEIRA SEGURA ACTIONS
+   LIXEIRA SEGURA + LOG ENTERPRISE
 ----------------------------------------------------------- */
 if (isset($_GET['excluir'])) {
-    $id = $conn->real_escape_string($_GET['excluir']);
-    $conn->query("UPDATE honorarios SET deletado = 1 WHERE id = '$id'");
-    $msg = '<div class="alert alert-warning">🗑️ Honorário movido para a lixeira com sucesso.</div>';
-    $acao = 'listar';
+    $id = trim((string)$_GET['excluir']);
+
+    if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        registrarLogHonorario(
+            $conn,
+            'Tentativa inválida de excluir honorário',
+            $id,
+            'Ação bloqueada por token CSRF inválido.',
+            [
+                'tipo_acao' => 'EXCLUSAO',
+                'origem' => 'Lista de honorários',
+                'resultado' => 'NEGADO',
+                'nivel' => 'AVISO',
+            ]
+        );
+        $msg = '<div class="alert alert-danger">Ação bloqueada por segurança.</div>';
+        $acao = 'listar';
+    } else {
+        $dadosAnteriores = buscarHonorarioAuditoria($conn, $id);
+        $idSeguro = $conn->real_escape_string($id);
+        $ok = $conn->query("UPDATE honorarios SET deletado = 1 WHERE id = '{$idSeguro}'");
+
+        if ($ok && $conn->affected_rows > 0) {
+            registrarLogHonorario(
+                $conn,
+                'Honorário movido para a lixeira',
+                $id,
+                'Exclusão lógica do honorário.',
+                [
+                    'tipo_acao' => 'EXCLUSAO',
+                    'origem' => 'Lista de honorários',
+                    'nivel' => 'AVISO',
+                    'dados_anteriores' => $dadosAnteriores,
+                    'dados_novos' => buscarHonorarioAuditoria($conn, $id),
+                ]
+            );
+            $msg = '<div class="alert alert-warning">🗑️ Honorário movido para a lixeira com sucesso.</div>';
+        } else {
+            registrarLogHonorario(
+                $conn,
+                'Falha ao mover honorário para a lixeira',
+                $id,
+                'O registro não foi alterado.',
+                [
+                    'tipo_acao' => 'EXCLUSAO',
+                    'origem' => 'Lista de honorários',
+                    'resultado' => 'FALHA',
+                    'nivel' => 'ERRO',
+                    'dados_anteriores' => $dadosAnteriores,
+                ]
+            );
+            $msg = '<div class="alert alert-danger">Não foi possível mover o honorário para a lixeira.</div>';
+        }
+        $acao = 'listar';
+    }
 }
 
 if (isset($_GET['restaurar'])) {
-    $id = $conn->real_escape_string($_GET['restaurar']);
-    $conn->query("UPDATE honorarios SET deletado = 0 WHERE id = '$id'");
-    $msg = '<div class="alert alert-success">✅ Honorário restaurado com sucesso!</div>';
-    $acao = 'listar';
+    $id = trim((string)$_GET['restaurar']);
+
+    if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        registrarLogHonorario(
+            $conn,
+            'Tentativa inválida de restaurar honorário',
+            $id,
+            'Ação bloqueada por token CSRF inválido.',
+            [
+                'tipo_acao' => 'RESTAURACAO',
+                'origem' => 'Lixeira de honorários',
+                'resultado' => 'NEGADO',
+                'nivel' => 'AVISO',
+            ]
+        );
+        $msg = '<div class="alert alert-danger">Ação bloqueada por segurança.</div>';
+        $acao = 'lixeira';
+    } else {
+        $dadosAnteriores = buscarHonorarioAuditoria($conn, $id);
+        $idSeguro = $conn->real_escape_string($id);
+        $ok = $conn->query("UPDATE honorarios SET deletado = 0 WHERE id = '{$idSeguro}'");
+
+        if ($ok && $conn->affected_rows > 0) {
+            registrarLogHonorario(
+                $conn,
+                'Honorário restaurado',
+                $id,
+                'Honorário restaurado da lixeira.',
+                [
+                    'tipo_acao' => 'RESTAURACAO',
+                    'origem' => 'Lixeira de honorários',
+                    'dados_anteriores' => $dadosAnteriores,
+                    'dados_novos' => buscarHonorarioAuditoria($conn, $id),
+                ]
+            );
+            $msg = '<div class="alert alert-success">✅ Honorário restaurado com sucesso!</div>';
+        } else {
+            registrarLogHonorario(
+                $conn,
+                'Falha ao restaurar honorário',
+                $id,
+                'O registro não foi restaurado.',
+                [
+                    'tipo_acao' => 'RESTAURACAO',
+                    'origem' => 'Lixeira de honorários',
+                    'resultado' => 'FALHA',
+                    'nivel' => 'ERRO',
+                    'dados_anteriores' => $dadosAnteriores,
+                ]
+            );
+            $msg = '<div class="alert alert-danger">Não foi possível restaurar o honorário.</div>';
+        }
+        $acao = 'lixeira';
+    }
 }
 
 if (isset($_GET['excluir_permanente'])) {
-    $id = $conn->real_escape_string($_GET['excluir_permanente']);
-    $conn->query("DELETE FROM honorarios_parcelas WHERE honorario_id = '$id'");
-    $conn->query("DELETE FROM honorarios WHERE id = '$id'");
-    $msg = '<div class="alert alert-danger">💥 Honorário e suas parcelas foram excluídos permanentemente.</div>';
-    $acao = 'lixeira';
+    $id = trim((string)$_GET['excluir_permanente']);
+
+    if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        registrarLogHonorario(
+            $conn,
+            'Tentativa inválida de exclusão permanente de honorário',
+            $id,
+            'Ação bloqueada por token CSRF inválido.',
+            [
+                'tipo_acao' => 'EXCLUSAO_PERMANENTE',
+                'origem' => 'Lixeira de honorários',
+                'resultado' => 'NEGADO',
+                'nivel' => 'AVISO',
+            ]
+        );
+        $msg = '<div class="alert alert-danger">Ação bloqueada por segurança.</div>';
+        $acao = 'lixeira';
+    } else {
+        $dadosAnteriores = buscarHonorarioAuditoria($conn, $id);
+        $idSeguro = $conn->real_escape_string($id);
+
+        $conn->begin_transaction();
+        try {
+            $conn->query("DELETE FROM honorarios_parcelas WHERE honorario_id = '{$idSeguro}'");
+            $ok = $conn->query("DELETE FROM honorarios WHERE id = '{$idSeguro}' AND deletado = 1");
+
+            if (!$ok || $conn->affected_rows < 1) {
+                throw new RuntimeException('Honorário não encontrado na lixeira.');
+            }
+
+            $conn->commit();
+
+            registrarLogHonorario(
+                $conn,
+                'Honorário excluído permanentemente',
+                $id,
+                'Honorário e parcelas associadas foram removidos definitivamente.',
+                [
+                    'tipo_acao' => 'EXCLUSAO_PERMANENTE',
+                    'origem' => 'Lixeira de honorários',
+                    'nivel' => 'AVISO',
+                    'dados_anteriores' => $dadosAnteriores,
+                    'dados_novos' => null,
+                ]
+            );
+
+            $msg = '<div class="alert alert-danger">💥 Honorário e suas parcelas foram excluídos permanentemente.</div>';
+        } catch (Throwable $e) {
+            $conn->rollback();
+
+            registrarLogHonorario(
+                $conn,
+                'Falha na exclusão permanente de honorário',
+                $id,
+                'Honorário e parcelas não foram removidos.',
+                [
+                    'tipo_acao' => 'EXCLUSAO_PERMANENTE',
+                    'origem' => 'Lixeira de honorários',
+                    'resultado' => 'FALHA',
+                    'nivel' => 'ERRO',
+                    'dados_anteriores' => $dadosAnteriores,
+                ]
+            );
+
+            $msg = '<div class="alert alert-danger">Não foi possível excluir permanentemente o honorário.</div>';
+        }
+        $acao = 'lixeira';
+    }
 }
 
 /* -----------------------------------------------------------
    SALVAR NOVO
 ----------------------------------------------------------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_honorario'])) {
+    if (!validarTokenCsrf($_POST['csrf_token'] ?? null)) {
+        $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Atualize a página.</div>';
+        $acao = 'novo';
+    } else {
     $id              = gerarIdHonorario($conn);
     $cliente_id      = $conn->real_escape_string(trim($_POST['cliente_id'] ?? ''));
     $nome_cliente    = $conn->real_escape_string(trim($_POST['nome_cliente'] ?? ''));
@@ -266,6 +480,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_honorario'])) 
         $msg = '<div class="alert alert-danger">❌ Informe a Data de Vencimento da primeira parcela.</div>';
         $acao = 'novo';
     } else {
+        $dadosAnteriores = buscarHonorarioAuditoria($conn, $id);
         $valor_parcela  = round($valor_total / $qtd_parcelas, 2);
         $valor_pendente = max($valor_total - $valor_pago, 0);
 
@@ -293,6 +508,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_honorario'])) 
             ], $gerar30dias);
             sgl_sincronizar_honorario_financeiro($conn, $id);
 
+            registrarLogHonorario(
+                $conn,
+                'Honorário incluído',
+                $id,
+                'Novo honorário cadastrado e sincronizado com o Financeiro.',
+                [
+                    'tipo_acao' => 'INCLUSAO',
+                    'origem' => 'Cadastro de honorários',
+                    'dados_novos' => buscarHonorarioAuditoria($conn, $id),
+                ]
+            );
+
+            registrarLogHonorario(
+                $conn,
+                'Honorário sincronizado com o Financeiro',
+                $id,
+                'Parcelas e contas a receber sincronizadas automaticamente.',
+                [
+                    'tipo_acao' => 'SINCRONIZACAO',
+                    'origem' => 'Integração Honorários → Financeiro',
+                    'dados_novos' => buscarHonorarioAuditoria($conn, $id),
+                ]
+            );
+
             $msg = "<div class='alert alert-success'>✅ Honorário <strong>$id</strong> cadastrado com sucesso! Financeiro sincronizado automaticamente.</div>";
             $acao = 'listar';
         } else {
@@ -300,12 +539,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_honorario'])) 
             $acao = 'novo';
         }
     }
+    }
 }
 
 /* -----------------------------------------------------------
    ATUALIZAR
 ----------------------------------------------------------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_honorario'])) {
+    if (!validarTokenCsrf($_POST['csrf_token'] ?? null)) {
+        $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Atualize a página.</div>';
+        $acao = 'editar';
+    } else {
     $id              = $conn->real_escape_string(trim($_POST['id'] ?? ''));
     $cliente_id      = $conn->real_escape_string(trim($_POST['cliente_id'] ?? ''));
     $nome_cliente    = $conn->real_escape_string(trim($_POST['nome_cliente'] ?? ''));
@@ -362,12 +606,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_honorario']
 
             recalcHonorario($conn, $id);
 
+            registrarLogHonorario(
+                $conn,
+                'Honorário atualizado',
+                $id,
+                'Dados do honorário e parcelas foram atualizados.',
+                [
+                    'tipo_acao' => 'EDICAO',
+                    'origem' => 'Edição de honorários',
+                    'dados_anteriores' => $dadosAnteriores,
+                    'dados_novos' => buscarHonorarioAuditoria($conn, $id),
+                ]
+            );
+
+            registrarLogHonorario(
+                $conn,
+                'Honorário ressincronizado com o Financeiro',
+                $id,
+                'Contas a receber recalculadas e sincronizadas.',
+                [
+                    'tipo_acao' => 'SINCRONIZACAO',
+                    'origem' => 'Integração Honorários → Financeiro',
+                    'dados_anteriores' => $dadosAnteriores,
+                    'dados_novos' => buscarHonorarioAuditoria($conn, $id),
+                ]
+            );
+
             $msg = "<div class='alert alert-success'>✅ Honorário <strong>$id</strong> atualizado com sucesso!</div>";
             $acao = 'listar';
         } else {
             $msg = "<div class='alert alert-danger'>❌ Erro: " . htmlspecialchars($conn->error) . "</div>";
             $acao = 'editar';
         }
+    }
     }
 }
 
@@ -795,6 +1066,7 @@ document.addEventListener('DOMContentLoaded', function () {
     </div>
     <div class="card-body">
         <form method="POST" autocomplete="off">
+            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfHonorarios, ENT_QUOTES, 'UTF-8') ?>">
             <?php if ($acao === 'editar'): ?>
                 <input type="hidden" name="id" value="<?= htmlspecialchars($hon_editar['id'] ?? '') ?>">
             <?php endif; ?>
@@ -1106,17 +1378,17 @@ document.addEventListener('DOMContentLoaded', function () {
                                 </td>
                                 <td class="text-center">
                                     <?php if ($acao === 'lixeira'): ?>
-                                        <a href="?mod=honorarios&restaurar=<?= $h['id'] ?>" class="btn btn-sm btn-outline-success" title="Restaurar Honorário">
+                                        <a href="?mod=honorarios&restaurar=<?= $h['id'] ?>&csrf_token=<?= urlencode($csrfHonorarios) ?>" class="btn btn-sm btn-outline-success" title="Restaurar Honorário">
                                             <i class="bi bi-arrow-counterclockwise"></i>
                                         </a>
-                                        <a href="?mod=honorarios&excluir_permanente=<?= $h['id'] ?>" class="btn btn-sm btn-danger" onclick="return confirm('ATENÇÃO: Deseja mesmo excluir PERMANENTEMENTE este honorário e todas as parcelas associadas? Esta ação não pode ser desfeita.')" title="Excluir do Banco">
+                                        <a href="?mod=honorarios&excluir_permanente=<?= $h['id'] ?>&csrf_token=<?= urlencode($csrfHonorarios) ?>" class="btn btn-sm btn-danger" onclick="return confirm('ATENÇÃO: Deseja mesmo excluir PERMANENTEMENTE este honorário e todas as parcelas associadas? Esta ação não pode ser desfeita.')" title="Excluir do Banco">
                                             <i class="bi bi-fire"></i>
                                         </a>
                                     <?php else: ?>
                                         <a href="?mod=honorarios&acao=editar&id=<?= $h['id'] ?>" class="btn btn-sm btn-warning" title="Editar">
                                             <i class="bi bi-pencil"></i>
                                         </a>
-                                        <a href="?mod=honorarios&excluir=<?= $h['id'] ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('Deseja mover este honorário para a lixeira?')" title="Mover para Lixeira">
+                                        <a href="?mod=honorarios&excluir=<?= $h['id'] ?>&csrf_token=<?= urlencode($csrfHonorarios) ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('Deseja mover este honorário para a lixeira?')" title="Mover para Lixeira">
                                             <i class="bi bi-trash"></i>
                                         </a>
                                     <?php endif; ?>

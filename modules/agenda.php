@@ -5,6 +5,7 @@
  */
 
 $conn = conectar();
+require_once __DIR__ . '/../config/integracoes.php';
 
 /* -----------------------------------------------------------
    AUTO-CORREÇÃO DE ESTRUTURA DA AGENDA
@@ -111,6 +112,50 @@ function validarAgenda(array $c): array {
     return $erros;
 }
 
+function buscarAgendaAuditoria(mysqli $conn, string $id): ?array {
+    $stmt = $conn->prepare("SELECT * FROM agenda WHERE id = ? LIMIT 1");
+    if (!$stmt) {
+        return null;
+    }
+
+    $stmt->bind_param("s", $id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $evento = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    return $evento;
+}
+
+function registrarLogAgenda(
+    mysqli $conn,
+    string $acao,
+    string $registroId,
+    string $detalhes,
+    array $contexto = []
+): void {
+    if (!function_exists('sgl_registrar_log')) {
+        return;
+    }
+
+    sgl_registrar_log(
+        $conn,
+        $acao,
+        'agenda',
+        $registroId,
+        $detalhes,
+        array_merge(
+            [
+                'modulo' => 'Agenda',
+                'origem' => 'Módulo Agenda',
+                'resultado' => 'SUCESSO',
+                'nivel' => 'INFO',
+            ],
+            $contexto
+        )
+    );
+}
+
 function redirecionarAgenda(string $params): void {
     echo "<script>window.location.href='?mod=agenda{$params}';</script>";
     exit;
@@ -123,42 +168,199 @@ if (isset($_GET['msg_erro'])) {
     $msg = "<div class='alert alert-danger'>❌ " . h($_GET['msg_erro']) . "</div>";
 }
 
+$csrfAgenda = gerarTokenCsrf();
+
 /* Ações protegidas */
 if (isset($_GET['excluir'])) {
-    $id = trim($_GET['excluir']);
+    $id = trim((string)$_GET['excluir']);
+
+    if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        registrarLogAgenda(
+            $conn,
+            'Tentativa inválida de excluir compromisso',
+            $id,
+            'Ação bloqueada por token CSRF inválido.',
+            [
+                'tipo_acao' => 'EXCLUSAO',
+                'origem' => 'Lista da agenda',
+                'resultado' => 'NEGADO',
+                'nivel' => 'AVISO',
+            ]
+        );
+        redirecionarAgenda('&msg_erro=' . urlencode('Ação bloqueada por segurança.'));
+    }
+
+    $dadosAnteriores = buscarAgendaAuditoria($conn, $id);
+
     try {
         $stmt = $conn->prepare("UPDATE agenda SET deletado = 1 WHERE id = ?");
         $stmt->bind_param("s", $id);
-        $stmt->execute();
+        $ok = $stmt->execute();
+        $afetadas = $stmt->affected_rows;
         $stmt->close();
+
+        if (!$ok || $afetadas < 1) {
+            throw new RuntimeException('Nenhum registro foi alterado.');
+        }
+
+        registrarLogAgenda(
+            $conn,
+            'Compromisso movido para a lixeira',
+            $id,
+            'Exclusão lógica do compromisso de agenda.',
+            [
+                'tipo_acao' => 'EXCLUSAO',
+                'origem' => 'Lista da agenda',
+                'nivel' => 'AVISO',
+                'dados_anteriores' => $dadosAnteriores,
+                'dados_novos' => buscarAgendaAuditoria($conn, $id),
+            ]
+        );
+
         redirecionarAgenda('&msg_sucesso=' . urlencode('Compromisso movido para a lixeira.'));
-    } catch (mysqli_sql_exception $e) {
+    } catch (Throwable $e) {
+        registrarLogAgenda(
+            $conn,
+            'Falha ao mover compromisso para a lixeira',
+            $id,
+            'O compromisso não foi alterado.',
+            [
+                'tipo_acao' => 'EXCLUSAO',
+                'origem' => 'Lista da agenda',
+                'resultado' => 'FALHA',
+                'nivel' => 'ERRO',
+                'dados_anteriores' => $dadosAnteriores,
+            ]
+        );
         redirecionarAgenda('&msg_erro=' . urlencode('Erro ao mover compromisso para a lixeira.'));
     }
 }
 
 if (isset($_GET['restaurar'])) {
-    $id = trim($_GET['restaurar']);
+    $id = trim((string)$_GET['restaurar']);
+
+    if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        registrarLogAgenda(
+            $conn,
+            'Tentativa inválida de restaurar compromisso',
+            $id,
+            'Ação bloqueada por token CSRF inválido.',
+            [
+                'tipo_acao' => 'RESTAURACAO',
+                'origem' => 'Lixeira da agenda',
+                'resultado' => 'NEGADO',
+                'nivel' => 'AVISO',
+            ]
+        );
+        redirecionarAgenda('&acao=lixeira&msg_erro=' . urlencode('Ação bloqueada por segurança.'));
+    }
+
+    $dadosAnteriores = buscarAgendaAuditoria($conn, $id);
+
     try {
         $stmt = $conn->prepare("UPDATE agenda SET deletado = 0 WHERE id = ?");
         $stmt->bind_param("s", $id);
-        $stmt->execute();
+        $ok = $stmt->execute();
+        $afetadas = $stmt->affected_rows;
         $stmt->close();
+
+        if (!$ok || $afetadas < 1) {
+            throw new RuntimeException('Nenhum registro foi alterado.');
+        }
+
+        registrarLogAgenda(
+            $conn,
+            'Compromisso restaurado',
+            $id,
+            'Compromisso restaurado da lixeira.',
+            [
+                'tipo_acao' => 'RESTAURACAO',
+                'origem' => 'Lixeira da agenda',
+                'dados_anteriores' => $dadosAnteriores,
+                'dados_novos' => buscarAgendaAuditoria($conn, $id),
+            ]
+        );
+
         redirecionarAgenda('&acao=lixeira&msg_sucesso=' . urlencode('Compromisso restaurado.'));
-    } catch (mysqli_sql_exception $e) {
+    } catch (Throwable $e) {
+        registrarLogAgenda(
+            $conn,
+            'Falha ao restaurar compromisso',
+            $id,
+            'O compromisso não foi restaurado.',
+            [
+                'tipo_acao' => 'RESTAURACAO',
+                'origem' => 'Lixeira da agenda',
+                'resultado' => 'FALHA',
+                'nivel' => 'ERRO',
+                'dados_anteriores' => $dadosAnteriores,
+            ]
+        );
         redirecionarAgenda('&acao=lixeira&msg_erro=' . urlencode('Erro ao restaurar compromisso.'));
     }
 }
 
 if (isset($_GET['excluir_permanente'])) {
-    $id = trim($_GET['excluir_permanente']);
+    $id = trim((string)$_GET['excluir_permanente']);
+
+    if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+        registrarLogAgenda(
+            $conn,
+            'Tentativa inválida de exclusão permanente',
+            $id,
+            'Ação bloqueada por token CSRF inválido.',
+            [
+                'tipo_acao' => 'EXCLUSAO_PERMANENTE',
+                'origem' => 'Lixeira da agenda',
+                'resultado' => 'NEGADO',
+                'nivel' => 'AVISO',
+            ]
+        );
+        redirecionarAgenda('&acao=lixeira&msg_erro=' . urlencode('Ação bloqueada por segurança.'));
+    }
+
+    $dadosAnteriores = buscarAgendaAuditoria($conn, $id);
+
     try {
-        $stmt = $conn->prepare("DELETE FROM agenda WHERE id = ?");
+        $stmt = $conn->prepare("DELETE FROM agenda WHERE id = ? AND deletado = 1");
         $stmt->bind_param("s", $id);
-        $stmt->execute();
+        $ok = $stmt->execute();
+        $afetadas = $stmt->affected_rows;
         $stmt->close();
+
+        if (!$ok || $afetadas < 1) {
+            throw new RuntimeException('Nenhum registro elegível foi excluído.');
+        }
+
+        registrarLogAgenda(
+            $conn,
+            'Compromisso excluído permanentemente',
+            $id,
+            'Exclusão definitiva de compromisso previamente enviado à lixeira.',
+            [
+                'tipo_acao' => 'EXCLUSAO_PERMANENTE',
+                'origem' => 'Lixeira da agenda',
+                'nivel' => 'AVISO',
+                'dados_anteriores' => $dadosAnteriores,
+                'dados_novos' => null,
+            ]
+        );
+
         redirecionarAgenda('&acao=lixeira&msg_sucesso=' . urlencode('Compromisso excluído permanentemente.'));
-    } catch (mysqli_sql_exception $e) {
+    } catch (Throwable $e) {
+        registrarLogAgenda(
+            $conn,
+            'Falha na exclusão permanente de compromisso',
+            $id,
+            'O compromisso não foi excluído permanentemente.',
+            [
+                'tipo_acao' => 'EXCLUSAO_PERMANENTE',
+                'origem' => 'Lixeira da agenda',
+                'resultado' => 'FALHA',
+                'nivel' => 'ERRO',
+                'dados_anteriores' => $dadosAnteriores,
+            ]
+        );
         redirecionarAgenda('&acao=lixeira&msg_erro=' . urlencode('Não foi possível excluir permanentemente este compromisso.'));
     }
 }
@@ -204,11 +406,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
                     $stmt->execute();
                     $stmt->close();
+
+                    registrarLogAgenda(
+                        $conn,
+                        'Compromisso incluído',
+                        $id,
+                        'Novo compromisso cadastrado na agenda.',
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'origem' => 'Cadastro da agenda',
+                            'dados_novos' => buscarAgendaAuditoria($conn, $id),
+                        ]
+                    );
+
                     redirecionarAgenda('&msg_sucesso=' . urlencode("Compromisso {$id} cadastrado com sucesso."));
                 }
 
                 if (isset($_POST['atualizar_evento'])) {
                     $id = trim($_POST['id'] ?? '');
+                    $dadosAnteriores = buscarAgendaAuditoria($conn, $id);
+
                     $sql = "UPDATE agenda SET
                                 data_evento = ?, horario = ?, tipo_compromisso = ?, cliente_id = ?, nome_cliente = ?,
                                 numero_processo = ?, `local` = ?, advogado_id = ?, status = ?, prazo_fatal = ?, observacoes = ?
@@ -231,6 +448,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
                     $stmt->execute();
                     $stmt->close();
+
+                    registrarLogAgenda(
+                        $conn,
+                        'Compromisso atualizado',
+                        $id,
+                        'Dados do compromisso atualizados.',
+                        [
+                            'tipo_acao' => 'EDICAO',
+                            'origem' => 'Edição da agenda',
+                            'dados_anteriores' => $dadosAnteriores,
+                            'dados_novos' => buscarAgendaAuditoria($conn, $id),
+                        ]
+                    );
+
                     redirecionarAgenda('&msg_sucesso=' . urlencode("Compromisso {$id} atualizado com sucesso."));
                 }
             } catch (mysqli_sql_exception $e) {
@@ -350,7 +581,7 @@ document.addEventListener('DOMContentLoaded', function(){
     </div>
     <div class="card-body">
         <form method="POST" autocomplete="off">
-            <input type="hidden" name="csrf_token" value="<?= h(gerarTokenCsrf()) ?>">
+            <input type="hidden" name="csrf_token" value="<?= h($csrfAgenda) ?>">
             <?php if ($acao === 'editar'): ?><input type="hidden" name="id" value="<?= h($evento_editar['id'] ?? '') ?>"><?php endif; ?>
             <div class="row g-3">
                 <div class="col-md-2"><label class="form-label">Data *</label><input type="date" name="data_evento" class="form-control" value="<?= h($f['data_evento']) ?>" required></div>
@@ -461,11 +692,11 @@ $totalEncontrado = $lista ? $lista->num_rows : 0;
                     <td><?= $row['prazo_fatal']==='Sim' ? '<span class="badge bg-danger">Fatal</span>' : '<span class="badge bg-light text-dark border">Normal</span>' ?></td>
                     <td class="text-end text-nowrap">
                         <?php if ($acao === 'lixeira'): ?>
-                            <a href="?mod=agenda&restaurar=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-outline-success" title="Restaurar"><i class="bi bi-arrow-counterclockwise"></i></a>
-                            <a href="?mod=agenda&excluir_permanente=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-danger" onclick="return confirm('Excluir PERMANENTEMENTE este compromisso?')" title="Excluir definitivo"><i class="bi bi-fire"></i></a>
+                            <a href="?mod=agenda&restaurar=<?= urlencode($row['id']) ?>&csrf_token=<?= urlencode($csrfAgenda) ?>" class="btn btn-sm btn-outline-success" title="Restaurar"><i class="bi bi-arrow-counterclockwise"></i></a>
+                            <a href="?mod=agenda&excluir_permanente=<?= urlencode($row['id']) ?>&csrf_token=<?= urlencode($csrfAgenda) ?>" class="btn btn-sm btn-danger" onclick="return confirm('Excluir PERMANENTEMENTE este compromisso?')" title="Excluir definitivo"><i class="bi bi-fire"></i></a>
                         <?php else: ?>
                             <a href="?mod=agenda&acao=editar&id=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-warning"><i class="bi bi-pencil"></i></a>
-                            <a href="?mod=agenda&excluir=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('Mover este compromisso para a lixeira?')"><i class="bi bi-trash"></i></a>
+                            <a href="?mod=agenda&excluir=<?= urlencode($row['id']) ?>&csrf_token=<?= urlencode($csrfAgenda) ?>" class="btn btn-sm btn-outline-danger" onclick="return confirm('Mover este compromisso para a lixeira?')"><i class="bi bi-trash"></i></a>
                         <?php endif; ?>
                     </td>
                 </tr>

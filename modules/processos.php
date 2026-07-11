@@ -20,10 +20,46 @@ function brlParaFloat(string $valor): float {
 }
 function brl($valor): string { return 'R$ ' . number_format((float)$valor, 2, ',', '.'); }
 function dataBr($data): string { return $data ? date('d/m/Y', strtotime($data)) : '-'; }
-function registrarLog(mysqli $conn, string $acao, string $registroId, string $detalhes=''): void {
+function registrarLog(
+    mysqli $conn,
+    string $acao,
+    string $registroId,
+    string $detalhes = '',
+    array $contexto = []
+): void {
     if (function_exists('sgl_registrar_log')) {
-        sgl_registrar_log($conn, $acao, 'processos', $registroId, $detalhes);
+        sgl_registrar_log(
+            $conn,
+            $acao,
+            'processos',
+            $registroId,
+            $detalhes,
+            array_merge(
+                [
+                    'modulo' => 'Processos',
+                    'origem' => 'Módulo Processos',
+                    'resultado' => 'SUCESSO',
+                    'nivel' => 'INFO',
+                ],
+                $contexto
+            )
+        );
     }
+}
+
+function buscarProcessoAuditoria(mysqli $conn, string $id): ?array {
+    $stmt = $conn->prepare("SELECT * FROM processos WHERE id = ? LIMIT 1");
+    if (!$stmt) {
+        return null;
+    }
+
+    $stmt->bind_param('s', $id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $processo = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
+    $stmt->close();
+
+    return $processo;
 }
 function processoExiste(mysqli $conn, string $numero, string $ignorarId=''): bool {
     $sql = "SELECT id FROM processos WHERE numero_processo = ? AND status != 'Excluído'" . ($ignorarId ? " AND id <> ?" : "") . " LIMIT 1";
@@ -67,14 +103,89 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
                 $stmt = $conn->prepare("INSERT INTO processos (id, numero_processo, cliente_id, tipo_processo, vara, comarca, advogado_id, data_distribuicao, fase_atual, valor_causa, proximo_prazo, status, observacoes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
                 $stmt->bind_param('sssssssssdsss', $id, $numero_processo, $cliente_id, $tipo_processo, $vara, $comarca, $advogado_id, $data_distribuicao, $fase_atual, $valor_causa, $proximo_prazo, $status, $observacoes);
                 $ok = $stmt->execute();
-                if ($ok) { registrarLog($conn, 'Criou processo', $id, $numero_processo); $msg = "<div class='alert alert-success'>Processo <strong>".h($id)."</strong> cadastrado com sucesso.</div>"; $acao='listar'; }
-                else { $msg = '<div class="alert alert-danger">Não foi possível salvar o processo.</div>'; $acao='novo'; }
+                if ($ok) {
+                    registrarLog(
+                        $conn,
+                        'Processo incluído',
+                        $id,
+                        'Novo processo cadastrado: ' . $numero_processo,
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'origem' => 'Cadastro de processos',
+                            'dados_novos' => buscarProcessoAuditoria($conn, $id),
+                        ]
+                    );
+                    $msg = "<div class='alert alert-success'>Processo <strong>".h($id)."</strong> cadastrado com sucesso.</div>";
+                    $acao='listar';
+                } else {
+                    registrarLog(
+                        $conn,
+                        'Falha ao incluir processo',
+                        $id,
+                        'Não foi possível cadastrar o processo: ' . $numero_processo,
+                        [
+                            'tipo_acao' => 'INCLUSAO',
+                            'origem' => 'Cadastro de processos',
+                            'resultado' => 'FALHA',
+                            'nivel' => 'ERRO',
+                            'dados_novos' => [
+                                'numero_processo' => $numero_processo,
+                                'cliente_id' => $cliente_id,
+                                'advogado_id' => $advogado_id,
+                                'valor_causa' => $valor_causa,
+                                'status' => $status,
+                            ],
+                        ]
+                    );
+                    $msg = '<div class="alert alert-danger">Não foi possível salvar o processo.</div>';
+                    $acao='novo';
+                }
             } else {
+                $dadosAnteriores = buscarProcessoAuditoria($conn, $id);
+
                 $stmt = $conn->prepare("UPDATE processos SET numero_processo=?, cliente_id=?, tipo_processo=?, vara=?, comarca=?, advogado_id=?, data_distribuicao=?, fase_atual=?, valor_causa=?, proximo_prazo=?, status=?, observacoes=? WHERE id=?");
                 $stmt->bind_param('ssssssssdssss', $numero_processo, $cliente_id, $tipo_processo, $vara, $comarca, $advogado_id, $data_distribuicao, $fase_atual, $valor_causa, $proximo_prazo, $status, $observacoes, $id);
                 $ok = $stmt->execute();
-                if ($ok) { registrarLog($conn, 'Atualizou processo', $id, $numero_processo); $msg = "<div class='alert alert-success'>Processo <strong>".h($id)."</strong> atualizado com sucesso.</div>"; $acao='listar'; }
-                else { $msg = '<div class="alert alert-danger">Não foi possível atualizar o processo.</div>'; $acao='editar'; }
+
+                if ($ok) {
+                    registrarLog(
+                        $conn,
+                        'Processo atualizado',
+                        $id,
+                        'Dados do processo atualizados: ' . $numero_processo,
+                        [
+                            'tipo_acao' => 'EDICAO',
+                            'origem' => 'Edição de processos',
+                            'dados_anteriores' => $dadosAnteriores,
+                            'dados_novos' => buscarProcessoAuditoria($conn, $id),
+                        ]
+                    );
+                    $msg = "<div class='alert alert-success'>Processo <strong>".h($id)."</strong> atualizado com sucesso.</div>";
+                    $acao='listar';
+                } else {
+                    registrarLog(
+                        $conn,
+                        'Falha ao atualizar processo',
+                        $id,
+                        'Não foi possível atualizar o processo: ' . $numero_processo,
+                        [
+                            'tipo_acao' => 'EDICAO',
+                            'origem' => 'Edição de processos',
+                            'resultado' => 'FALHA',
+                            'nivel' => 'ERRO',
+                            'dados_anteriores' => $dadosAnteriores,
+                            'dados_novos' => [
+                                'numero_processo' => $numero_processo,
+                                'cliente_id' => $cliente_id,
+                                'advogado_id' => $advogado_id,
+                                'valor_causa' => $valor_causa,
+                                'status' => $status,
+                            ],
+                        ]
+                    );
+                    $msg = '<div class="alert alert-danger">Não foi possível atualizar o processo.</div>';
+                    $acao='editar';
+                }
             }
         }
     }
@@ -85,10 +196,45 @@ if (isset($_GET['excluir'])) {
     if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
         $msg = '<div class="alert alert-danger">Token inválido para exclusão.</div>';
     } else {
+        $dadosAnteriores = buscarProcessoAuditoria($conn, $id);
+
         $stmt = $conn->prepare("UPDATE processos SET status='Excluído' WHERE id=?");
-        $stmt->bind_param('s', $id); $stmt->execute();
-        registrarLog($conn, 'Moveu processo para lixeira', $id);
-        $msg = '<div class="alert alert-warning">Processo movido para a lixeira com sucesso.</div>';
+        $stmt->bind_param('s', $id);
+        $okExcluir = $stmt->execute();
+        $linhasAfetadas = $stmt->affected_rows;
+        $stmt->close();
+
+        if ($okExcluir && $linhasAfetadas > 0) {
+            registrarLog(
+                $conn,
+                'Processo movido para a lixeira',
+                $id,
+                'Exclusão lógica do processo: ' . (string)($dadosAnteriores['numero_processo'] ?? $id),
+                [
+                    'tipo_acao' => 'EXCLUSAO',
+                    'origem' => 'Lista de processos',
+                    'nivel' => 'AVISO',
+                    'dados_anteriores' => $dadosAnteriores,
+                    'dados_novos' => buscarProcessoAuditoria($conn, $id),
+                ]
+            );
+            $msg = '<div class="alert alert-warning">Processo movido para a lixeira com sucesso.</div>';
+        } else {
+            registrarLog(
+                $conn,
+                'Falha ao mover processo para a lixeira',
+                $id,
+                'O registro não foi alterado.',
+                [
+                    'tipo_acao' => 'EXCLUSAO',
+                    'origem' => 'Lista de processos',
+                    'resultado' => 'FALHA',
+                    'nivel' => 'ERRO',
+                    'dados_anteriores' => $dadosAnteriores,
+                ]
+            );
+            $msg = '<div class="alert alert-danger">Não foi possível mover o processo para a lixeira.</div>';
+        }
     }
     $acao = 'listar';
 }

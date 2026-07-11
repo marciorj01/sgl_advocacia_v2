@@ -153,28 +153,134 @@ function sgl_buscar_lixeira(mysqli $conn): array {
         'modelos_documentos' => ['campo' => sgl_coluna_existe($conn, 'modelos_documentos', 'titulo') ? 'titulo' : 'nome', 'cond' => sgl_coluna_existe($conn, 'modelos_documentos', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Modelos'],
     ];
 
+    $stmtLog = null;
+    if (sgl_tabela_existe($conn, 'logs_sistema')) {
+        try {
+            $stmtLog = $conn->prepare(
+                "SELECT criado_em,
+                        COALESCE(usuario_nome, usuario_login, 'Sistema') AS responsavel
+                   FROM logs_sistema
+                  WHERE tabela = ?
+                    AND registro_id = ?
+                    AND (
+                        acao LIKE '%lixeira%'
+                        OR acao LIKE '%exclu%'
+                        OR acao LIKE '%remov%'
+                    )
+                  ORDER BY id DESC
+                  LIMIT 1"
+            );
+        } catch (Throwable $e) {
+            $stmtLog = null;
+        }
+    }
+
     foreach ($mapa as $tabela => $cfg) {
         if (!sgl_tabela_existe($conn, $tabela) || !sgl_coluna_existe($conn, $tabela, 'id') || !sgl_coluna_existe($conn, $tabela, $cfg['campo'])) {
             continue;
         }
 
         try {
-            $sql = "SELECT id, `{$cfg['campo']}` AS nome FROM `$tabela` WHERE {$cfg['cond']} ORDER BY id DESC LIMIT 100";
+            $sql = "SELECT id, `{$cfg['campo']}` AS nome FROM `$tabela` WHERE {$cfg['cond']} ORDER BY id DESC";
             $res = $conn->query($sql);
             if ($res) {
                 while ($row = $res->fetch_assoc()) {
+                    $id = (string)$row['id'];
+                    $excluidoEm = null;
+                    $excluidoPor = 'Não identificado';
+
+                    if ($stmtLog) {
+                        try {
+                            $stmtLog->bind_param('ss', $tabela, $id);
+                            $stmtLog->execute();
+                            $meta = $stmtLog->get_result()->fetch_assoc();
+                            if ($meta) {
+                                $excluidoEm = $meta['criado_em'] ?? null;
+                                $excluidoPor = (string)($meta['responsavel'] ?? 'Não identificado');
+                            }
+                        } catch (Throwable $e) {}
+                    }
+
                     $itens[] = [
                         'tabela' => $tabela,
-                        'id' => (string)$row['id'],
+                        'id' => $id,
                         'nome' => (string)($row['nome'] ?: 'Registro sem descrição'),
                         'tipo' => $cfg['tipo'],
+                        'excluido_em' => $excluidoEm,
+                        'excluido_por' => $excluidoPor,
                     ];
                 }
             }
         } catch (Throwable $e) {}
     }
 
+    if ($stmtLog) {
+        $stmtLog->close();
+    }
+
+    usort($itens, static function (array $a, array $b): int {
+        $dataA = $a['excluido_em'] ?? '';
+        $dataB = $b['excluido_em'] ?? '';
+        if ($dataA === $dataB) {
+            return ((int)$b['id']) <=> ((int)$a['id']);
+        }
+        return strcmp($dataB, $dataA);
+    });
+
     return $itens;
+}
+
+function sgl_lixeira_item_valido(string $valor, array $permitidas): ?array {
+    $partes = explode('|', $valor, 2);
+    if (count($partes) !== 2) return null;
+
+    $tabela = preg_replace('/[^a-zA-Z0-9_]/', '', $partes[0]);
+    $id = trim($partes[1]);
+
+    if (!in_array($tabela, $permitidas, true) || $id === '' || !preg_match('/^\d+$/', $id)) {
+        return null;
+    }
+
+    return ['tabela' => $tabela, 'id' => $id];
+}
+
+function sgl_lixeira_restaurar(mysqli $conn, string $tabela, string $id): bool {
+    if (!sgl_tabela_existe($conn, $tabela) || !sgl_coluna_existe($conn, $tabela, 'id')) return false;
+
+    try {
+        if (sgl_coluna_existe($conn, $tabela, 'deletado')) {
+            $stmt = $conn->prepare("UPDATE `$tabela` SET deletado = 0 WHERE id = ?");
+            $stmt->bind_param('s', $id);
+        } elseif (sgl_coluna_existe($conn, $tabela, 'status')) {
+            $status = ($tabela === 'processos') ? 'Em Andamento' : (($tabela === 'agenda') ? 'Agendado' : 'Ativo');
+            $stmt = $conn->prepare("UPDATE `$tabela` SET status = ? WHERE id = ?");
+            $stmt->bind_param('ss', $status, $id);
+        } else {
+            return false;
+        }
+
+        $ok = $stmt->execute();
+        $afetadas = $stmt->affected_rows;
+        $stmt->close();
+        return $ok && $afetadas > 0;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+function sgl_lixeira_excluir(mysqli $conn, string $tabela, string $id): bool {
+    if (!sgl_tabela_existe($conn, $tabela) || !sgl_coluna_existe($conn, $tabela, 'id')) return false;
+
+    try {
+        $stmt = $conn->prepare("DELETE FROM `$tabela` WHERE id = ?");
+        $stmt->bind_param('s', $id);
+        $ok = $stmt->execute();
+        $afetadas = $stmt->affected_rows;
+        $stmt->close();
+        return $ok && $afetadas > 0;
+    } catch (Throwable $e) {
+        return false;
+    }
 }
 
 function sgl_backup_resumo(mysqli $conn): array {
@@ -377,45 +483,102 @@ if ($acao_cfg === 'salvar_sistema') {
     sgl_redirect_cfg('sistema', 'sucesso', 'Parâmetros do sistema salvos.');
 }
 
+$lixeira_permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos'];
+
 if ($acao_cfg === 'restaurar_item_lixeira' && !empty($_POST['tabela']) && !empty($_POST['item_id'])) {
-    $tb = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$_POST['tabela']);
-    $id = (string)$_POST['item_id'];
-    $permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos'];
+    $item = sgl_lixeira_item_valido((string)$_POST['tabela'] . '|' . (string)$_POST['item_id'], $lixeira_permitidas);
+    if (!$item) sgl_redirect_cfg('lixeira', 'erro', 'Registro inválido para restauração.');
 
-    if (in_array($tb, $permitidas, true) && sgl_tabela_existe($conn, $tb) && sgl_coluna_existe($conn, $tb, 'id')) {
-        if (sgl_coluna_existe($conn, $tb, 'deletado')) {
-            $stmt = $conn->prepare("UPDATE `$tb` SET deletado = 0 WHERE id = ?");
-            $stmt->bind_param('s', $id);
-            $stmt->execute();
-            $stmt->close();
-        } elseif (sgl_coluna_existe($conn, $tb, 'status')) {
-            $status = ($tb === 'processos') ? 'Em Andamento' : 'Ativo';
-            $stmt = $conn->prepare("UPDATE `$tb` SET status = ? WHERE id = ?");
-            $stmt->bind_param('ss', $status, $id);
-            $stmt->execute();
-            $stmt->close();
-        }
-
-        sgl_log($conn, 'Restaurou item da lixeira', $tb, $id);
+    if (sgl_lixeira_restaurar($conn, $item['tabela'], $item['id'])) {
+        sgl_log($conn, 'Restaurou item da lixeira', $item['tabela'], $item['id']);
+        sgl_redirect_cfg('lixeira', 'sucesso', 'Registro restaurado com sucesso.');
     }
 
-    sgl_redirect_cfg('lixeira', 'sucesso', 'Registro restaurado com sucesso.');
+    sgl_redirect_cfg('lixeira', 'erro', 'Não foi possível restaurar o registro.');
 }
 
 if ($acao_cfg === 'excluir_item_lixeira' && !empty($_POST['tabela']) && !empty($_POST['item_id'])) {
-    $tb = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$_POST['tabela']);
-    $id = (string)$_POST['item_id'];
-    $permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos'];
+    $item = sgl_lixeira_item_valido((string)$_POST['tabela'] . '|' . (string)$_POST['item_id'], $lixeira_permitidas);
+    if (!$item) sgl_redirect_cfg('lixeira', 'erro', 'Registro inválido para exclusão.');
 
-    if (in_array($tb, $permitidas, true) && sgl_tabela_existe($conn, $tb) && sgl_coluna_existe($conn, $tb, 'id')) {
-        $stmt = $conn->prepare("DELETE FROM `$tb` WHERE id = ?");
-        $stmt->bind_param('s', $id);
-        $stmt->execute();
-        $stmt->close();
-        sgl_log($conn, 'Excluiu definitivamente item da lixeira', $tb, $id);
+    if (sgl_lixeira_excluir($conn, $item['tabela'], $item['id'])) {
+        sgl_log($conn, 'Excluiu definitivamente item da lixeira', $item['tabela'], $item['id']);
+        sgl_redirect_cfg('lixeira', 'aviso', 'Item excluído permanentemente.');
     }
 
-    sgl_redirect_cfg('lixeira', 'aviso', 'Item excluído permanentemente.');
+    sgl_redirect_cfg('lixeira', 'erro', 'Não foi possível excluir o item. Ele pode possuir vínculos com outros registros.');
+}
+
+if ($acao_cfg === 'acao_lixeira_lote') {
+    $acaoLote = (string)($_POST['acao_lote'] ?? '');
+    $selecionados = $_POST['itens'] ?? [];
+
+    if (!is_array($selecionados) || empty($selecionados)) {
+        sgl_redirect_cfg('lixeira', 'erro', 'Selecione ao menos um item.');
+    }
+    if (!in_array($acaoLote, ['restaurar', 'excluir'], true)) {
+        sgl_redirect_cfg('lixeira', 'erro', 'Ação em lote inválida.');
+    }
+
+    $sucesso = 0;
+    $falhas = 0;
+
+    foreach ($selecionados as $valor) {
+        $item = sgl_lixeira_item_valido((string)$valor, $lixeira_permitidas);
+        if (!$item) { $falhas++; continue; }
+
+        $ok = $acaoLote === 'restaurar'
+            ? sgl_lixeira_restaurar($conn, $item['tabela'], $item['id'])
+            : sgl_lixeira_excluir($conn, $item['tabela'], $item['id']);
+
+        if ($ok) {
+            $sucesso++;
+            sgl_log(
+                $conn,
+                $acaoLote === 'restaurar' ? 'Restaurou item da lixeira em lote' : 'Excluiu definitivamente item da lixeira em lote',
+                $item['tabela'],
+                $item['id']
+            );
+        } else {
+            $falhas++;
+        }
+    }
+
+    $mensagemLote = "{$sucesso} item(ns) processado(s) com sucesso";
+    if ($falhas > 0) {
+        sgl_redirect_cfg('lixeira', 'aviso', $mensagemLote . " e {$falhas} falha(s).");
+    }
+    sgl_redirect_cfg('lixeira', 'sucesso', $mensagemLote . '.');
+}
+
+if ($acao_cfg === 'esvaziar_lixeira') {
+    if (strtoupper(trim((string)($_POST['confirmacao'] ?? ''))) !== 'ESVAZIAR') {
+        sgl_redirect_cfg('lixeira', 'erro', 'Confirmação inválida. Digite ESVAZIAR.');
+    }
+
+    $todos = sgl_buscar_lixeira($conn);
+    $sucesso = 0;
+    $falhas = 0;
+
+    foreach ($todos as $registro) {
+        $item = sgl_lixeira_item_valido($registro['tabela'] . '|' . $registro['id'], $lixeira_permitidas);
+        if (!$item) { $falhas++; continue; }
+
+        if (sgl_lixeira_excluir($conn, $item['tabela'], $item['id'])) {
+            $sucesso++;
+            sgl_log($conn, 'Esvaziou item da lixeira', $item['tabela'], $item['id'], 'Exclusão permanente por esvaziamento da lixeira.');
+        } else {
+            $falhas++;
+        }
+    }
+
+    sgl_log($conn, 'Executou esvaziamento da lixeira', 'lixeira', null, "Sucessos: {$sucesso}; Falhas: {$falhas}");
+
+    if ($falhas > 0) {
+        sgl_redirect_cfg('lixeira', 'aviso', "Lixeira processada: {$sucesso} excluído(s) e {$falhas} falha(s) por vínculos.");
+    }
+
+    sgl_redirect_cfg('lixeira', 'aviso', "Lixeira esvaziada. {$sucesso} item(ns) excluído(s) permanentemente.");
 }
 
 // -----------------------------------------------------------------------------
@@ -462,7 +625,37 @@ foreach ($config_padrao as $chave => $default) {
     $cfg[$chave] = sgl_cfg_get($conn, $chave, $default);
 }
 $logo_exibir = $cfg['logo_arquivo'] ? 'assets/img/' . htmlspecialchars($cfg['logo_arquivo'], ENT_QUOTES, 'UTF-8') : 'assets/img/logo_custom.png';
-$lixeira_itens = sgl_buscar_lixeira($conn);
+$lixeira_todos = sgl_buscar_lixeira($conn);
+
+$lixeira_busca = trim((string)($_GET['lixeira_q'] ?? ''));
+$lixeira_modulo = trim((string)($_GET['lixeira_modulo'] ?? ''));
+$lixeira_por_pagina = max(10, min(100, (int)($_GET['lixeira_por_pagina'] ?? 25)));
+$lixeira_pagina = max(1, (int)($_GET['lixeira_pagina'] ?? 1));
+
+$lixeira_modulos = [];
+foreach ($lixeira_todos as $registro) {
+    $lixeira_modulos[$registro['tabela']] = $registro['tipo'];
+}
+asort($lixeira_modulos);
+
+$lixeira_filtrados = array_values(array_filter($lixeira_todos, static function (array $registro) use ($lixeira_busca, $lixeira_modulo): bool {
+    if ($lixeira_modulo !== '' && $registro['tabela'] !== $lixeira_modulo) return false;
+
+    if ($lixeira_busca !== '') {
+        $alvo = mb_strtolower($registro['nome'] . ' ' . $registro['tipo'] . ' ' . $registro['id'], 'UTF-8');
+        if (mb_strpos($alvo, mb_strtolower($lixeira_busca, 'UTF-8')) === false) return false;
+    }
+
+    return true;
+}));
+
+$lixeira_total_filtrado = count($lixeira_filtrados);
+$lixeira_total_paginas = max(1, (int)ceil($lixeira_total_filtrado / $lixeira_por_pagina));
+if ($lixeira_pagina > $lixeira_total_paginas) $lixeira_pagina = $lixeira_total_paginas;
+
+$lixeira_offset = ($lixeira_pagina - 1) * $lixeira_por_pagina;
+$lixeira_itens = array_slice($lixeira_filtrados, $lixeira_offset, $lixeira_por_pagina);
+
 $backup_resumo = sgl_backup_resumo($conn);
 
 $usuarios = [];
@@ -495,7 +688,7 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
         if ($resInv) { while ($i = $resInv->fetch_assoc()) { $inventarioLogs[] = $i; } }
     } catch (Throwable $e) {}
 }
-$totalLixeira = count($lixeira_itens);
+$totalLixeira = count($lixeira_todos);
 
 $tabs_validas = ['escritorio','marca','tema','usuarios','sistema','lixeira','logs'];
 if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
@@ -790,23 +983,155 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 
 <?php if ($tab_ativa === 'lixeira'): ?>
 <div class="card shadow-sm border-0">
-    <div class="card-header bg-danger text-white d-flex justify-content-between align-items-center"><span><i class="bi bi-trash3 me-1"></i> Lixeira Enterprise</span><span><?=count($lixeira_itens)?> item(ns)</span></div>
+    <div class="card-header bg-danger text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-trash3 me-1"></i> Lixeira Enterprise</span>
+        <span><?= (int)$totalLixeira ?> item(ns) no total</span>
+    </div>
     <div class="card-body">
         <div class="alert alert-warning border-0 shadow-sm small">
-            <strong>Atenção:</strong> restaurar devolve o registro ao módulo de origem. Excluir remove definitivamente da base de dados e registra a ação nos logs.
+            <strong>Atenção:</strong> restaurar devolve o registro ao módulo de origem. A exclusão permanente não pode ser desfeita e pode falhar quando o registro possuir vínculos obrigatórios.
         </div>
+
+        <form method="GET" class="row g-3 align-items-end mb-4">
+            <input type="hidden" name="mod" value="configuracoes">
+            <input type="hidden" name="tab" value="lixeira">
+            <div class="col-md-5">
+                <label class="form-label">Pesquisar na lixeira</label>
+                <input type="search" name="lixeira_q" class="form-control" value="<?=htmlspecialchars($lixeira_busca)?>" placeholder="Descrição, módulo ou ID">
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">Módulo</label>
+                <select name="lixeira_modulo" class="form-select">
+                    <option value="">Todos os módulos</option>
+                    <?php foreach ($lixeira_modulos as $tabela => $tipo): ?>
+                        <option value="<?=htmlspecialchars($tabela)?>" <?=$lixeira_modulo===$tabela?'selected':''?>><?=htmlspecialchars($tipo)?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Por página</label>
+                <select name="lixeira_por_pagina" class="form-select">
+                    <?php foreach ([10,25,50,100] as $quantidade): ?>
+                        <option value="<?=$quantidade?>" <?=$lixeira_por_pagina===$quantidade?'selected':''?>><?=$quantidade?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-md-2 d-flex gap-2">
+                <button class="btn btn-primary flex-fill"><i class="bi bi-search"></i> Filtrar</button>
+                <a href="?mod=configuracoes&tab=lixeira" class="btn btn-outline-secondary" title="Limpar filtros"><i class="bi bi-x-lg"></i></a>
+            </div>
+        </form>
+
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+            <div class="text-muted small">Exibindo <?=count($lixeira_itens)?> de <?=$lixeira_total_filtrado?> item(ns) encontrado(s).</div>
+            <?php if ($totalLixeira > 0): ?>
+            <button type="button" class="btn btn-sm btn-outline-danger" data-bs-toggle="modal" data-bs-target="#modalEsvaziarLixeira">
+                <i class="bi bi-trash3-fill me-1"></i>Esvaziar lixeira
+            </button>
+            <?php endif; ?>
+        </div>
+
         <?php if(empty($lixeira_itens)): ?>
-            <div class="text-center py-5 text-muted"><i class="bi bi-trash3 fs-1 d-block mb-3 opacity-25"></i><p class="mb-0">A lixeira está vazia.</p></div>
+            <div class="text-center py-5 text-muted">
+                <i class="bi bi-trash3 fs-1 d-block mb-3 opacity-25"></i>
+                <p class="mb-0"><?= $totalLixeira > 0 ? 'Nenhum item corresponde aos filtros aplicados.' : 'A lixeira está vazia.' ?></p>
+            </div>
         <?php else: ?>
-        <div class="table-responsive"><table class="table table-hover align-middle"><thead class="table-light"><tr><th>ID</th><th>Módulo</th><th>Descrição</th><th class="text-end">Ações</th></tr></thead><tbody>
-        <?php foreach($lixeira_itens as $item): ?>
-            <tr><td><code><?=htmlspecialchars($item['id'])?></code></td><td><span class="badge bg-secondary"><?=htmlspecialchars($item['tipo'])?></span></td><td><strong><?=htmlspecialchars($item['nome'])?></strong></td><td class="text-end">
-                <form method="POST" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="restaurar_item_lixeira"><input type="hidden" name="tabela" value="<?=htmlspecialchars($item['tabela'])?>"><input type="hidden" name="item_id" value="<?=htmlspecialchars($item['id'])?>"><button class="btn btn-sm btn-success"><i class="bi bi-arrow-counterclockwise"></i> Restaurar</button></form>
-                <form method="POST" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="excluir_item_lixeira"><input type="hidden" name="tabela" value="<?=htmlspecialchars($item['tabela'])?>"><input type="hidden" name="item_id" value="<?=htmlspecialchars($item['id'])?>"><button class="btn btn-sm btn-outline-danger" onclick="return confirm('Excluir este item permanentemente?')"><i class="bi bi-trash3"></i> Excluir</button></form>
-            </td></tr>
-        <?php endforeach; ?>
-        </tbody></table></div>
+        <form method="POST" id="formLixeiraLote">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" id="acaoCfgLixeira" value="acao_lixeira_lote">
+            <input type="hidden" name="tabela" id="tabelaIndividual">
+            <input type="hidden" name="item_id" id="itemIdIndividual">
+
+            <div class="d-flex gap-2 mb-3 flex-wrap">
+                <select name="acao_lote" class="form-select form-select-sm" style="max-width:230px">
+                    <option value="">Ação com selecionados</option>
+                    <option value="restaurar">Restaurar selecionados</option>
+                    <option value="excluir">Excluir permanentemente</option>
+                </select>
+                <button type="submit" class="btn btn-sm btn-primary" onclick="document.getElementById('acaoCfgLixeira').value='acao_lixeira_lote';return confirmarAcaoLote();">
+                    <i class="bi bi-check2-square me-1"></i>Aplicar
+                </button>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-hover align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th style="width:42px"><input type="checkbox" class="form-check-input" id="marcarTodosLixeira"></th>
+                            <th>ID</th><th>Módulo</th><th>Descrição</th><th>Excluído por</th><th>Data da exclusão</th><th class="text-end">Ações</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach($lixeira_itens as $item): ?>
+                        <tr>
+                            <td><input type="checkbox" class="form-check-input item-lixeira-check" name="itens[]" value="<?=htmlspecialchars($item['tabela'].'|'.$item['id'])?>"></td>
+                            <td><code><?=htmlspecialchars($item['id'])?></code></td>
+                            <td><span class="badge bg-secondary"><?=htmlspecialchars($item['tipo'])?></span></td>
+                            <td><strong><?=htmlspecialchars($item['nome'])?></strong></td>
+                            <td><?=htmlspecialchars($item['excluido_por'] ?? 'Não identificado')?></td>
+                            <td><?=!empty($item['excluido_em']) ? date('d/m/Y H:i', strtotime($item['excluido_em'])) : '-'?></td>
+                            <td class="text-end">
+                                <button type="submit" class="btn btn-sm btn-success"
+                                    onclick="return prepararAcaoIndividual('restaurar_item_lixeira','<?=htmlspecialchars($item['tabela'], ENT_QUOTES)?>','<?=htmlspecialchars($item['id'], ENT_QUOTES)?>');">
+                                    <i class="bi bi-arrow-counterclockwise"></i> Restaurar
+                                </button>
+                                <button type="submit" class="btn btn-sm btn-outline-danger"
+                                    onclick="return prepararAcaoIndividual('excluir_item_lixeira','<?=htmlspecialchars($item['tabela'], ENT_QUOTES)?>','<?=htmlspecialchars($item['id'], ENT_QUOTES)?>');">
+                                    <i class="bi bi-trash3"></i> Excluir
+                                </button>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </form>
+
+        <?php if ($lixeira_total_paginas > 1): ?>
+        <nav aria-label="Paginação da lixeira">
+            <ul class="pagination pagination-sm justify-content-center mb-0">
+                <?php $baseLixeira = ['mod'=>'configuracoes','tab'=>'lixeira','lixeira_q'=>$lixeira_busca,'lixeira_modulo'=>$lixeira_modulo,'lixeira_por_pagina'=>$lixeira_por_pagina]; ?>
+                <li class="page-item <?=$lixeira_pagina<=1?'disabled':''?>">
+                    <a class="page-link" href="?<?=http_build_query(array_merge($baseLixeira, ['lixeira_pagina'=>max(1,$lixeira_pagina-1)]))?>">Anterior</a>
+                </li>
+                <?php for ($pag=max(1,$lixeira_pagina-2); $pag<=min($lixeira_total_paginas,$lixeira_pagina+2); $pag++): ?>
+                    <li class="page-item <?=$pag===$lixeira_pagina?'active':''?>">
+                        <a class="page-link" href="?<?=http_build_query(array_merge($baseLixeira, ['lixeira_pagina'=>$pag]))?>"><?=$pag?></a>
+                    </li>
+                <?php endfor; ?>
+                <li class="page-item <?=$lixeira_pagina>=$lixeira_total_paginas?'disabled':''?>">
+                    <a class="page-link" href="?<?=http_build_query(array_merge($baseLixeira, ['lixeira_pagina'=>min($lixeira_total_paginas,$lixeira_pagina+1)]))?>">Próxima</a>
+                </li>
+            </ul>
+        </nav>
         <?php endif; ?>
+        <?php endif; ?>
+    </div>
+</div>
+
+<div class="modal fade" id="modalEsvaziarLixeira" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                <input type="hidden" name="acao_cfg" value="esvaziar_lixeira">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title"><i class="bi bi-exclamation-triangle me-1"></i>Esvaziar lixeira</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p>Esta ação tentará excluir permanentemente todos os <strong><?= (int)$totalLixeira ?></strong> registros da lixeira.</p>
+                    <p class="text-danger fw-semibold">A operação não poderá ser desfeita.</p>
+                    <label class="form-label">Digite <code>ESVAZIAR</code> para confirmar</label>
+                    <input type="text" name="confirmacao" class="form-control" autocomplete="off" required pattern="ESVAZIAR">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button class="btn btn-danger"><i class="bi bi-trash3-fill me-1"></i>Excluir tudo permanentemente</button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
 <?php endif; ?>
@@ -860,4 +1185,30 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 function prevLogo(input){const f=input.files[0];if(!f)return;const r=new FileReader();r.onload=e=>{document.getElementById('prev_img').src=e.target.result;document.getElementById('prev_wrap').style.display='block';};r.readAsDataURL(f);}
 function syncCor(id){document.getElementById(id+'_txt').value=document.getElementById(id).value;document.getElementById('prev_'+id).style.background=document.getElementById(id).value;}
 function syncTxt(id){const v=document.getElementById(id+'_txt').value;if(/^#[0-9A-Fa-f]{6}$/.test(v)){document.getElementById(id).value=v;document.getElementById('prev_'+id).style.background=v;}}
+
+const marcarTodosLixeira = document.getElementById('marcarTodosLixeira');
+if (marcarTodosLixeira) {
+    marcarTodosLixeira.addEventListener('change', function () {
+        document.querySelectorAll('.item-lixeira-check').forEach(cb => cb.checked = this.checked);
+    });
+}
+
+function confirmarAcaoLote() {
+    const selecionados = document.querySelectorAll('.item-lixeira-check:checked').length;
+    const acao = document.querySelector('#formLixeiraLote select[name="acao_lote"]')?.value || '';
+    if (!selecionados) { alert('Selecione ao menos um item.'); return false; }
+    if (!acao) { alert('Escolha uma ação em lote.'); return false; }
+    return acao === 'excluir'
+        ? confirm('Excluir permanentemente os itens selecionados? Esta ação não pode ser desfeita.')
+        : confirm('Restaurar os itens selecionados?');
+}
+
+function prepararAcaoIndividual(acao, tabela, id) {
+    document.getElementById('acaoCfgLixeira').value = acao;
+    document.getElementById('tabelaIndividual').value = tabela;
+    document.getElementById('itemIdIndividual').value = id;
+    return acao === 'excluir_item_lixeira'
+        ? confirm('Excluir este item permanentemente? Esta ação não pode ser desfeita.')
+        : confirm('Restaurar este item ao módulo de origem?');
+}
 </script>

@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/integracoes.php';
 require_once __DIR__ . '/../core/Empresa.php';
 
 iniciarSessaoSegura();
@@ -25,24 +26,97 @@ function colunaExiste(mysqli $conn, string $tabela, string $coluna): bool
     return $existe;
 }
 
+
+function rojexRegistrarEventoLogin(
+    ?mysqli $conn,
+    string $acao,
+    string $resultado,
+    string $nivel,
+    string $usuarioInformado,
+    ?array $usuarioEncontrado = null,
+    ?string $detalhes = null
+): void {
+    if (!$conn || !function_exists('sgl_registrar_log')) {
+        return;
+    }
+
+    try {
+        $registroId = isset($usuarioEncontrado['id']) ? (string)$usuarioEncontrado['id'] : null;
+
+        sgl_registrar_log(
+            $conn,
+            $acao,
+            'usuarios',
+            $registroId,
+            $detalhes,
+            [
+                'tipo_acao' => 'LOGIN',
+                'modulo' => 'Autenticação',
+                'origem' => 'Tela de login',
+                'resultado' => $resultado,
+                'nivel' => $nivel,
+                'dados_novos' => [
+                    'usuario_informado' => mb_substr($usuarioInformado, 0, 80, 'UTF-8'),
+                    'usuario_localizado' => $usuarioEncontrado !== null,
+                ],
+            ]
+        );
+    } catch (Throwable $e) {
+        error_log('ROJEX LOGIN LOG: ' . $e->getMessage());
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $usuario = trim((string)($_POST['usuario'] ?? ''));
     $senha = (string)($_POST['senha'] ?? '');
     $csrf = (string)($_POST['csrf_token'] ?? '');
+    $conn = null;
 
     if (!validarTokenCsrf($csrf)) {
+        try {
+            $conn = conectar();
+            rojexRegistrarEventoLogin(
+                $conn,
+                'Tentativa de login com token inválido',
+                'NEGADO',
+                'AVISO',
+                $usuario,
+                null,
+                'Token CSRF inválido ou expirado.'
+            );
+            $conn->close();
+        } catch (Throwable $eLog) {
+            error_log('ROJEX LOGIN CSRF LOG: ' . $eLog->getMessage());
+        }
+
         $mensagem_erro = 'Sessão expirada ou formulário inválido. Atualize a página e tente novamente.';
     } elseif ($usuario === '' || $senha === '') {
+        try {
+            $conn = conectar();
+            rojexRegistrarEventoLogin(
+                $conn,
+                'Tentativa de login com campos incompletos',
+                'NEGADO',
+                'AVISO',
+                $usuario,
+                null,
+                'Usuário ou senha não informado.'
+            );
+            $conn->close();
+        } catch (Throwable $eLog) {
+            error_log('ROJEX LOGIN CAMPOS LOG: ' . $eLog->getMessage());
+        }
+
         $mensagem_erro = 'Por favor, preencha todos os campos.';
     } else {
         try {
             $conn = conectar();
             $user = null;
+            $usuarioLocalizado = null;
+            $usuarioInativo = null;
 
             /*
-             * Correção 02:
-             * O login agora consulta as tabelas de usuário de forma simples e tolerante.
-             * Isso evita erro por diferença estrutural entre usuarios e usuarios_sistema.
+             * Mantém compatibilidade com as estruturas de usuários existentes.
              */
             $consultasLogin = [
                 "SELECT id, nome, usuario, senha, perfil, status FROM usuarios WHERE usuario = ? LIMIT 1",
@@ -53,52 +127,134 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             foreach ($consultasLogin as $sql) {
                 try {
                     $stmt = $conn->prepare($sql);
+                    if (!$stmt) {
+                        continue;
+                    }
+
                     $stmt->bind_param('s', $usuario);
                     $stmt->execute();
                     $result = $stmt->get_result();
                     $registro = $result ? $result->fetch_assoc() : null;
+
                     if ($result instanceof mysqli_result) {
                         $result->free();
                     }
                     $stmt->close();
 
                     if ($registro) {
+                        $usuarioLocalizado = $registro;
                         $status = trim((string)($registro['status'] ?? 'Ativo'));
+
                         if ($status === '' || strcasecmp($status, 'Ativo') === 0 || $status === '1') {
                             $user = $registro;
-                            break;
+                        } else {
+                            $usuarioInativo = $registro;
                         }
+                        break;
                     }
                 } catch (Throwable $eTabela) {
                     error_log('ROJEX LOGIN consulta ignorada: ' . $eTabela->getMessage());
-                    continue;
                 }
             }
 
-            $senhaOk = false;
-            if ($user) {
-                $hash = (string)$user['senha'];
-                $senhaOk = password_verify($senha, $hash)
-                    || hash_equals($hash, md5($senha))
-                    || hash_equals($hash, $senha);
-            }
+            if ($usuarioInativo) {
+                rojexRegistrarEventoLogin(
+                    $conn,
+                    'Tentativa de login de usuário inativo',
+                    'NEGADO',
+                    'AVISO',
+                    $usuario,
+                    $usuarioInativo,
+                    'Acesso recusado porque o cadastro está inativo.'
+                );
 
-            if ($user && $senhaOk) {
-                session_regenerate_id(true);
-                $_SESSION['user_id'] = (int)$user['id'];
-                $_SESSION['username'] = (string)$user['usuario'];
-                $_SESSION['nome'] = (string)$user['nome'];
-                $_SESSION['perfil'] = (string)$user['perfil'];
-                $_SESSION['ultimo_acesso'] = time();
+                $mensagem_erro = 'Usuário ou senha inválidos.';
                 $conn->close();
-                header('Location: ../index.php');
-                exit();
-            }
+            } else {
+                $senhaOk = false;
 
-            $mensagem_erro = 'Usuário ou senha inválidos.';
-            $conn->close();
+                if ($user) {
+                    $hash = (string)$user['senha'];
+                    $senhaOk = password_verify($senha, $hash)
+                        || hash_equals($hash, md5($senha))
+                        || hash_equals($hash, $senha);
+                }
+
+                if ($user && $senhaOk) {
+                    session_regenerate_id(true);
+                    $_SESSION['user_id'] = (int)$user['id'];
+                    $_SESSION['username'] = (string)$user['usuario'];
+                    $_SESSION['nome'] = (string)$user['nome'];
+                    $_SESSION['perfil'] = (string)$user['perfil'];
+                    $_SESSION['ultimo_acesso'] = time();
+
+                    rojexRegistrarEventoLogin(
+                        $conn,
+                        'Login realizado com sucesso',
+                        'SUCESSO',
+                        'INFO',
+                        $usuario,
+                        $user,
+                        'Sessão autenticada e iniciada com sucesso.'
+                    );
+
+                    // Atualização compatível: executa apenas se a coluna existir.
+                    try {
+                        if (colunaExiste($conn, 'usuarios', 'ultimo_login')) {
+                            $idUsuario = (int)$user['id'];
+                            $stmtLogin = $conn->prepare("UPDATE usuarios SET ultimo_login = NOW() WHERE id = ?");
+                            if ($stmtLogin) {
+                                $stmtLogin->bind_param('i', $idUsuario);
+                                $stmtLogin->execute();
+                                $stmtLogin->close();
+                            }
+                        }
+                    } catch (Throwable $eUltimoLogin) {
+                        error_log('ROJEX ULTIMO LOGIN: ' . $eUltimoLogin->getMessage());
+                    }
+
+                    $conn->close();
+                    header('Location: ../index.php');
+                    exit();
+                }
+
+                rojexRegistrarEventoLogin(
+                    $conn,
+                    $usuarioLocalizado
+                        ? 'Tentativa de login com senha inválida'
+                        : 'Tentativa de login com usuário inexistente',
+                    'NEGADO',
+                    'AVISO',
+                    $usuario,
+                    $usuarioLocalizado,
+                    $usuarioLocalizado
+                        ? 'Credencial recusada por senha inválida.'
+                        : 'Credencial recusada porque o usuário não foi localizado.'
+                );
+
+                $mensagem_erro = 'Usuário ou senha inválidos.';
+                $conn->close();
+            }
         } catch (Throwable $e) {
             error_log('ROJEX LOGIN ERRO GERAL: ' . $e->getMessage());
+
+            try {
+                if ($conn instanceof mysqli) {
+                    rojexRegistrarEventoLogin(
+                        $conn,
+                        'Falha técnica durante autenticação',
+                        'FALHA',
+                        'ERRO',
+                        $usuario,
+                        null,
+                        'Ocorreu uma falha técnica durante o processo de login.'
+                    );
+                    $conn->close();
+                }
+            } catch (Throwable $eLog) {
+                error_log('ROJEX LOGIN ERRO LOG: ' . $eLog->getMessage());
+            }
+
             $mensagem_erro = 'Erro ao tentar fazer login. Verifique o banco de dados e tente novamente.';
         }
     }

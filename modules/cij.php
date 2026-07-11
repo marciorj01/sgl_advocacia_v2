@@ -211,6 +211,18 @@ function cij_busca_livre_base(mysqli $conn, string $consulta): array
         }
     }
 
+    if (function_exists('rojex_kb_contas_pagar_por_termo')) {
+        foreach (rojex_kb_contas_pagar_por_termo($conn, $consulta, 5) as $contaPagar) {
+            $resultados[] = ['tipo' => 'conta_pagar', 'dados' => $contaPagar];
+        }
+    }
+
+    if (function_exists('rojex_kb_contas_receber_por_termo')) {
+        foreach (rojex_kb_contas_receber_por_termo($conn, $consulta, 5) as $contaReceber) {
+            $resultados[] = ['tipo' => 'conta_receber', 'dados' => $contaReceber];
+        }
+    }
+
     return $resultados;
 }
 
@@ -509,17 +521,184 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         return $resposta;
     }
 
-    if ($atalho === 'financeiro' || str_contains($perguntaNormalizada, 'financeiro') || str_contains($perguntaNormalizada, 'despesa') || str_contains($perguntaNormalizada, 'receber') || str_contains($perguntaNormalizada, 'inadimpl')) {
-        $despesasVencidas = cij_table_exists($conn, 'contas_pagar') ? cij_count($conn, "SELECT COUNT(*) AS total FROM contas_pagar WHERE COALESCE(deletado,0)=0 AND status IN ('Pendente','Parcial') AND data_vencimento < '{$hoje}'") : 0;
-        $despesasAbertas = cij_table_exists($conn, 'contas_pagar') ? cij_sum($conn, "SELECT COALESCE(SUM(CASE WHEN valor_pendente > 0 THEN valor_pendente ELSE valor END),0) AS total FROM contas_pagar WHERE COALESCE(deletado,0)=0 AND status IN ('Pendente','Parcial')") : 0;
-        $recebidoMes = cij_table_exists($conn, 'contas_receber') ? cij_sum($conn, "SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE COALESCE(deletado,0)=0 AND status IN ('Recebido','Pago','Quitada') AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'") : 0;
+    $consultaFinanceiro = $atalho === 'financeiro'
+        || str_contains($perguntaNormalizada, 'financeiro')
+        || str_contains($perguntaNormalizada, 'despesa')
+        || str_contains($perguntaNormalizada, 'conta a pagar')
+        || str_contains($perguntaNormalizada, 'contas a pagar')
+        || str_contains($perguntaNormalizada, 'conta a receber')
+        || str_contains($perguntaNormalizada, 'contas a receber')
+        || str_contains($perguntaNormalizada, 'recebimento')
+        || str_contains($perguntaNormalizada, 'inadimpl')
+        || str_contains($perguntaNormalizada, 'fluxo de caixa')
+        || str_contains($perguntaNormalizada, 'saldo estimado');
 
-        $resposta['titulo'] = 'Análise Financeira Rápida';
-        $resposta['texto'] = "Resumo financeiro do mês: recebido " . cij_money($recebidoMes) . ", despesas abertas " . cij_money($despesasAbertas) . " e {$despesasVencidas} despesa(s) vencida(s).";
-        $resposta['itens'][] = "Recebido no mês: " . cij_money($recebidoMes);
-        $resposta['itens'][] = "Despesas em aberto: " . cij_money($despesasAbertas);
-        $resposta['itens'][] = "Despesas vencidas: {$despesasVencidas}";
-        $resposta['tipo'] = $despesasVencidas > 0 ? 'danger' : 'success';
+    if ($consultaFinanceiro) {
+        $consultaEspecifica = trim($pergunta) !== ''
+            && $atalho === ''
+            && !in_array(
+                trim(mb_strtolower($pergunta, 'UTF-8')),
+                ['financeiro', 'resumo financeiro', 'financeiro em atenção'],
+                true
+            );
+
+        if ($consultaEspecifica) {
+            $contasPagar = function_exists('rojex_kb_contas_pagar_por_termo')
+                ? rojex_kb_contas_pagar_por_termo($conn, $pergunta, 10)
+                : [];
+
+            $contasReceber = function_exists('rojex_kb_contas_receber_por_termo')
+                ? rojex_kb_contas_receber_por_termo($conn, $pergunta, 10)
+                : [];
+
+            if (!empty($contasPagar) || !empty($contasReceber)) {
+                $resposta['titulo'] = 'Registros financeiros localizados';
+                $resposta['texto'] = 'Encontrei registros compatíveis na Base de Conhecimento Financeira.';
+                $resposta['tipo'] = 'success';
+                $resposta['alerta'] = 'Consulta realizada pela Base de Conhecimento Financeira do ROJEX.AI.';
+
+                foreach ($contasPagar as $conta) {
+                    $vencimento = !empty($conta['data_vencimento'])
+                        ? date('d/m/Y', strtotime((string)$conta['data_vencimento']))
+                        : '-';
+
+                    $saldo = array_key_exists('valor_pendente', $conta)
+                        ? (float)$conta['valor_pendente']
+                        : (float)($conta['valor'] ?? 0);
+
+                    $resposta['itens'][] =
+                        'Conta a pagar: ' . (($conta['id'] ?? '') ?: '-')
+                        . ' | Descrição: ' . (($conta['descricao'] ?? '') ?: '-')
+                        . ' | Fornecedor: ' . (($conta['fornecedor'] ?? '') ?: '-')
+                        . ' | Categoria: ' . (($conta['categoria'] ?? '') ?: '-')
+                        . ' | Banco/Caixa: ' . (($conta['banco_nome'] ?? '') ?: '-')
+                        . ' | Valor: ' . cij_money((float)($conta['valor'] ?? 0))
+                        . ' | Saldo: ' . cij_money($saldo)
+                        . ' | Vencimento: ' . $vencimento
+                        . ' | Status: ' . (($conta['status'] ?? '') ?: '-');
+                }
+
+                foreach ($contasReceber as $conta) {
+                    $vencimento = !empty($conta['data_vencimento'])
+                        ? date('d/m/Y', strtotime((string)$conta['data_vencimento']))
+                        : '-';
+
+                    $saldo = array_key_exists('valor_pendente', $conta)
+                        ? (float)$conta['valor_pendente']
+                        : (float)($conta['valor'] ?? 0);
+
+                    $resposta['itens'][] =
+                        'Conta a receber: ' . (($conta['id'] ?? '') ?: '-')
+                        . ' | Descrição: ' . (($conta['descricao'] ?? '') ?: '-')
+                        . ' | Cliente: ' . (($conta['cliente_nome'] ?? '') ?: '-')
+                        . ' | Banco/Caixa: ' . (($conta['banco_nome'] ?? '') ?: '-')
+                        . ' | Valor: ' . cij_money((float)($conta['valor'] ?? 0))
+                        . ' | Saldo: ' . cij_money($saldo)
+                        . ' | Vencimento: ' . $vencimento
+                        . ' | Status: ' . (($conta['status'] ?? '') ?: '-');
+                }
+
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir Financeiro',
+                    'url' => '?mod=financeiro',
+                    'class' => 'btn-primary',
+                    'icon' => 'bi-cash-coin'
+                ];
+
+                return $resposta;
+            }
+        }
+
+        $resumo = function_exists('rojex_kb_resumo_financeiro')
+            ? rojex_kb_resumo_financeiro($conn, $hoje)
+            : [
+                'pagar_aberto' => 0,
+                'receber_aberto' => 0,
+                'pago_mes' => 0,
+                'recebido_mes' => 0,
+                'vencidas_pagar' => 0,
+                'vencidas_receber' => 0,
+                'saldo_estimado' => 0,
+            ];
+
+        $vencidos = function_exists('rojex_kb_financeiro_vencidos')
+            ? rojex_kb_financeiro_vencidos($conn, $hoje, 20)
+            : ['contas_pagar' => [], 'contas_receber' => []];
+
+        $contasPagarVencidas = $vencidos['contas_pagar'] ?? [];
+        $contasReceberVencidas = $vencidos['contas_receber'] ?? [];
+
+        $resposta['titulo'] = 'Análise Financeira Inteligente';
+        $resposta['texto'] =
+            'Resumo atual: '
+            . cij_money((float)($resumo['recebido_mes'] ?? 0))
+            . ' recebido no mês, '
+            . cij_money((float)($resumo['pagar_aberto'] ?? 0))
+            . ' a pagar em aberto e '
+            . cij_money((float)($resumo['receber_aberto'] ?? 0))
+            . ' a receber em aberto.';
+
+        $resposta['itens'][] = 'A pagar em aberto: ' . cij_money((float)($resumo['pagar_aberto'] ?? 0));
+        $resposta['itens'][] = 'A receber em aberto: ' . cij_money((float)($resumo['receber_aberto'] ?? 0));
+        $resposta['itens'][] = 'Pago no mês: ' . cij_money((float)($resumo['pago_mes'] ?? 0));
+        $resposta['itens'][] = 'Recebido no mês: ' . cij_money((float)($resumo['recebido_mes'] ?? 0));
+        $resposta['itens'][] = 'Contas a pagar vencidas: ' . (int)($resumo['vencidas_pagar'] ?? count($contasPagarVencidas));
+        $resposta['itens'][] = 'Contas a receber vencidas: ' . (int)($resumo['vencidas_receber'] ?? count($contasReceberVencidas));
+        $resposta['itens'][] = 'Saldo estimado: ' . cij_money((float)($resumo['saldo_estimado'] ?? 0));
+
+        foreach (array_slice($contasPagarVencidas, 0, 3) as $conta) {
+            $vencimento = !empty($conta['data_vencimento'])
+                ? date('d/m/Y', strtotime((string)$conta['data_vencimento']))
+                : '-';
+
+            $saldo = array_key_exists('valor_pendente', $conta)
+                ? (float)$conta['valor_pendente']
+                : (float)($conta['valor'] ?? 0);
+
+            $resposta['itens'][] =
+                'Pagar vencida: ' . (($conta['descricao'] ?? '') ?: (($conta['id'] ?? '') ?: '-'))
+                . ' | Fornecedor: ' . (($conta['fornecedor'] ?? '') ?: '-')
+                . ' | Vencimento: ' . $vencimento
+                . ' | Saldo: ' . cij_money($saldo);
+        }
+
+        foreach (array_slice($contasReceberVencidas, 0, 3) as $conta) {
+            $vencimento = !empty($conta['data_vencimento'])
+                ? date('d/m/Y', strtotime((string)$conta['data_vencimento']))
+                : '-';
+
+            $saldo = array_key_exists('valor_pendente', $conta)
+                ? (float)$conta['valor_pendente']
+                : (float)($conta['valor'] ?? 0);
+
+            $resposta['itens'][] =
+                'Receber vencida: ' . (($conta['descricao'] ?? '') ?: (($conta['id'] ?? '') ?: '-'))
+                . ' | Vencimento: ' . $vencimento
+                . ' | Saldo: ' . cij_money($saldo);
+        }
+
+        $totalAlertas = count($contasPagarVencidas) + count($contasReceberVencidas);
+        $resposta['tipo'] = $totalAlertas > 0 ? 'danger' : 'success';
+        $resposta['alerta'] = 'Consulta realizada pela Base de Conhecimento Financeira do ROJEX.AI.';
+        $resposta['acoes'][] = [
+            'label' => 'Abrir Financeiro',
+            'url' => '?mod=financeiro',
+            'class' => 'btn-primary',
+            'icon' => 'bi-cash-coin'
+        ];
+        $resposta['acoes'][] = [
+            'label' => 'Ver Contas a Receber',
+            'url' => '?mod=financeiro&aba=cr',
+            'class' => 'btn-outline-success',
+            'icon' => 'bi-arrow-down-circle'
+        ];
+        $resposta['acoes'][] = [
+            'label' => 'Ver Contas a Pagar',
+            'url' => '?mod=financeiro&aba=cp',
+            'class' => 'btn-outline-danger',
+            'icon' => 'bi-arrow-up-circle'
+        ];
+
         return $resposta;
     }
 
@@ -760,7 +939,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
             $resposta['titulo'] = 'Resultados encontrados';
             $resposta['texto'] = 'A Base de Conhecimento encontrou registros compatíveis em diferentes áreas do ROJEX.AI.';
             $resposta['tipo'] = 'success';
-            $resposta['alerta'] = 'Consulta livre realizada em clientes, advogados, processos, agenda, honorários e documentos.';
+            $resposta['alerta'] = 'Consulta livre realizada em clientes, advogados, processos, agenda, honorários, documentos e financeiro.';
 
             foreach ($achados as $achado) {
                 $tipo = $achado['tipo'] ?? '';
@@ -803,6 +982,20 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
                         . ' | Cliente: ' . (($dados['cliente_nome'] ?? '') ?: '-')
                         . ' | Processo: ' . (($dados['numero_processo'] ?? '') ?: '-')
                         . ' | Arquivo: ' . (($dados['nome_original'] ?? '') ?: '-');
+                } elseif ($tipo === 'conta_pagar') {
+                    $resposta['itens'][] = 'Conta a pagar: '
+                        . (($dados['id'] ?? '') ?: '-')
+                        . ' | Descrição: ' . (($dados['descricao'] ?? '') ?: '-')
+                        . ' | Fornecedor: ' . (($dados['fornecedor'] ?? '') ?: '-')
+                        . ' | Saldo: ' . cij_money((float)($dados['valor_pendente'] ?? $dados['valor'] ?? 0))
+                        . ' | Status: ' . (($dados['status'] ?? '') ?: '-');
+                } elseif ($tipo === 'conta_receber') {
+                    $resposta['itens'][] = 'Conta a receber: '
+                        . (($dados['id'] ?? '') ?: '-')
+                        . ' | Descrição: ' . (($dados['descricao'] ?? '') ?: '-')
+                        . ' | Cliente: ' . (($dados['cliente_nome'] ?? '') ?: '-')
+                        . ' | Saldo: ' . cij_money((float)($dados['valor_pendente'] ?? $dados['valor'] ?? 0))
+                        . ' | Status: ' . (($dados['status'] ?? '') ?: '-');
                 }
             }
 
@@ -856,6 +1049,20 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
                         'icon' => 'bi-eye'
                     ];
                 }
+            } elseif ($tipo === 'conta_pagar') {
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir conta a pagar',
+                    'url' => '?mod=financeiro&aba=cp&acao=editar_cp&id=' . urlencode($id),
+                    'class' => 'btn-danger',
+                    'icon' => 'bi-arrow-up-circle'
+                ];
+            } elseif ($tipo === 'conta_receber') {
+                $resposta['acoes'][] = [
+                    'label' => 'Abrir conta a receber',
+                    'url' => '?mod=financeiro&aba=cr&acao=editar_cr&id=' . urlencode($id),
+                    'class' => 'btn-success',
+                    'icon' => 'bi-arrow-down-circle'
+                ];
             }
 
             return $resposta;
@@ -912,7 +1119,7 @@ if ($ferramentaCij === 'gerador') {
                 <input type="hidden" name="atalho_cij" id="atalho_cij" value="">
                 <div class="col-lg-9">
                     <label class="form-label fw-semibold">Pergunte ao ROJEX.AI</label>
-                    <input type="text" name="pergunta_cij" class="form-control form-control-lg" value="<?= cij_h($perguntaCij) ?>" placeholder="Ex.: quais processos vencem esta semana? clientes ativos? honorários vencidos?">
+                    <input type="text" name="pergunta_cij" class="form-control form-control-lg" value="<?= cij_h($perguntaCij) ?>" placeholder="Ex.: financeiro em atenção, conta CP001, recebimentos do mês, honorários vencidos...">
                     <div class="form-text">Nesta etapa, o assistente responde com base nos dados internos do sistema. A IA externa será integrada em etapa futura.</div>
                 </div>
                 <div class="col-lg-3">

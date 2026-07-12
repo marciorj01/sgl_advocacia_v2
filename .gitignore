@@ -1,0 +1,43 @@
+#########################################
+# ROJEX.AI ERP Jurídico Enterprise
+#########################################
+
+# Backups
+storage/backups/
+*.zip
+*.sql.bak
+
+# Cache
+storage/cache/
+storage/tmp/
+cache/
+tmp/
+
+# Logs
+logs/
+*.log
+
+# Uploads temporários
+uploads/tmp/
+
+# Arquivos temporários
+*.tmp
+*.temp
+*.bak
+
+# Sistema Operacional
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Arquivos de ambiente (caso existam futuramente)
+.env
+.env.local
+
+# Dependências (caso utilize Composer futuramente)
+vendor/
+
+# Node (caso utilize futuramente)
+node_modules/

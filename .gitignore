@@ -41,3 +41,22 @@ vendor/
 
 # Node (caso utilize futuramente)
 node_modules/
+
+# Windows
+desktop.ini
+
+# XAMPP
+xampp-control.ini
+
+# PHPStorm / JetBrains
+.idea/
+
+# Arquivos de sessão
+*.session
+
+# Cache do Composer
+composer.lock
+
+# Testes
+phpunit.xml
+.phpunit.result.cache

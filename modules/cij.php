@@ -226,6 +226,116 @@ function cij_busca_livre_base(mysqli $conn, string $consulta): array
     return $resultados;
 }
 
+/**
+ * Interpreta a intenção principal da pergunta sem consultar o banco.
+ *
+ * Esta camada mantém o CIJ independente de uma IA externa: identifica a área
+ * provável da consulta e separa o termo útil que será enviado à Base de
+ * Conhecimento já existente.
+ */
+function cij_interpretar_pergunta(string $pergunta, string $atalho = ''): array
+{
+    $textoOriginal = trim($pergunta);
+    $texto = mb_strtolower($textoOriginal . ' ' . $atalho, 'UTF-8');
+    $texto = trim((string)preg_replace('/\\s+/u', ' ', $texto));
+
+    $mapa = [
+        'agenda' => [
+            'agenda', 'audiência', 'audiencia', 'compromisso', 'reunião',
+            'reuniao', 'evento', 'sessão', 'sessao', 'amanhã', 'amanha', 'hoje'
+        ],
+        'prazos' => [
+            'prazo', 'prazos', 'vence', 'vencem', 'vencimento processual',
+            'prazo fatal', 'esta semana', 'próximos dias', 'proximos dias'
+        ],
+        'honorarios' => [
+            'honorário', 'honorario', 'honorários', 'honorarios', 'parcela',
+            'parcelas', 'saldo pendente', 'quanto falta receber'
+        ],
+        'financeiro' => [
+            'financeiro', 'finanças', 'financas', 'conta a pagar',
+            'contas a pagar', 'conta a receber', 'contas a receber',
+            'despesa', 'despesas', 'receita', 'receitas', 'inadimpl',
+            'fluxo de caixa', 'saldo estimado', 'recebimento', 'pagamento'
+        ],
+        'documentos' => [
+            'documento', 'documentos', 'arquivo', 'arquivos', 'pdf', 'docx',
+            'word', 'procuração', 'procuracao', 'contrato', 'prova', 'anexo'
+        ],
+        'advogados' => [
+            'advogado', 'advogada', 'advogados', 'advogadas', 'oab',
+            'doutor', 'doutora', 'dr.', 'dra.'
+        ],
+        'processos' => [
+            'processo', 'processos', 'ação judicial', 'acao judicial',
+            'número do processo', 'numero do processo', 'cnj', 'comarca',
+            'vara', 'fase processual'
+        ],
+        'clientes' => [
+            'cliente', 'clientes', 'cpf', 'cnpj', 'cadastro', 'parte'
+        ],
+    ];
+
+    $area = '';
+    if ($atalho !== '' && isset($mapa[$atalho])) {
+        $area = $atalho;
+    } else {
+        foreach ($mapa as $areaMapa => $palavras) {
+            foreach ($palavras as $palavra) {
+                if ($palavra !== '' && str_contains($texto, $palavra)) {
+                    $area = $areaMapa;
+                    break 2;
+                }
+            }
+        }
+    }
+
+    // Reconhecimentos diretos preservam as regras atuais para OAB, CNJ e IDs.
+    if ($area === '' && preg_match('/\\b\\d{2,8}\\s*[\\/\\-]?\\s*[a-z]{2}\\b/iu', $textoOriginal)) {
+        $area = 'advogados';
+    }
+    if ($area === '' && preg_match('/^\\s*PRC\\d+\\s*$/iu', $textoOriginal)) {
+        $area = 'processos';
+    }
+    if ($area === '' && preg_match('/\\d{7}-?\\d{2}\\.?\\d{4}\\.?\\d\\.?\\d{2}\\.?\\d{4}/u', $textoOriginal)) {
+        $area = 'processos';
+    }
+
+    // Perguntas pessoais genéricas como “Quem é João?” são direcionadas ao
+    // cadastro de clientes; o fallback universal continua cobrindo outras áreas.
+    if ($area === '' && preg_match('/^(quem é|quem e|localize|localizar|encontre|buscar|busque|procure|pesquise|mostrar|mostre|cadastrei)\\b/iu', $textoOriginal)) {
+        $area = 'clientes';
+    }
+
+    $termo = $textoOriginal;
+    $padroesComando = [
+        '/\\b(por favor|rojex|rojex\\.ai|assistente)\\b/iu',
+        '/\\b(quem é|quem e|qual é|qual e|quais são|quais sao|onde está|onde esta)\\b/iu',
+        '/\\b(localize|localizar|encontre|buscar|busque|procure|pesquise|pesquisar|mostrar|mostre|abra|ver|veja)\\b/iu',
+        '/\\b(o|a|os|as|um|uma|do|da|dos|das|de|para|sobre)\\b/iu',
+    ];
+
+    foreach ($padroesComando as $padrao) {
+        $termo = (string)preg_replace($padrao, ' ', $termo);
+    }
+
+    if ($area !== '' && isset($mapa[$area])) {
+        $palavrasArea = array_map(
+            static fn(string $palavra): string => preg_quote($palavra, '/'),
+            $mapa[$area]
+        );
+        $termo = (string)preg_replace('/\\b(' . implode('|', $palavrasArea) . ')\\b/iu', ' ', $termo);
+    }
+
+    $termo = trim((string)preg_replace('/\\s+/u', ' ', $termo));
+
+    return [
+        'area' => $area,
+        'termo' => $termo !== '' ? $termo : $textoOriginal,
+        'original' => $textoOriginal,
+    ];
+}
+
 function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho): array
 {
     $hoje = date('Y-m-d');
@@ -233,7 +343,16 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
     $inicioMes = date('Y-m-01');
     $fimMes = date('Y-m-t');
 
-    $perguntaNormalizada = mb_strtolower(trim($pergunta . ' ' . $atalho), 'UTF-8');
+    $interpretacao = cij_interpretar_pergunta($pergunta, $atalho);
+    $areaInterpretada = (string)($interpretacao['area'] ?? '');
+    $perguntaConsulta = (string)($interpretacao['termo'] ?? $pergunta);
+
+    // Acrescenta a área identificada somente para reaproveitar as regras já
+    // homologadas abaixo, sem duplicar consultas nem funções da Base.
+    $perguntaNormalizada = mb_strtolower(
+        trim($pergunta . ' ' . $atalho . ' ' . $areaInterpretada),
+        'UTF-8'
+    );
     $resposta = [
         'titulo' => 'Resposta do Assistente Jurídico',
         'texto' => 'Ainda não identifiquei uma consulta específica. Use os botões rápidos ou pergunte sobre clientes, processos, agenda, financeiro ou honorários.',
@@ -272,7 +391,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
 
         // O mesmo número pode pertencer ao CPF de um advogado. Antes de informar
         // que não há cliente, consulta também o cadastro de advogados.
-        $advogadosDocumento = cij_advogados_buscar($conn, $pergunta);
+        $advogadosDocumento = cij_advogados_buscar($conn, $perguntaConsulta);
         if (!empty($advogadosDocumento)) {
             $resposta['titulo'] = count($advogadosDocumento) === 1 ? 'Advogado localizado por CPF' : 'Advogados localizados por CPF';
             $resposta['texto'] = 'Encontrei advogado(s) compatíveis com o documento informado.';
@@ -309,14 +428,14 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
     // Reconhece também OAB digitada diretamente, por exemplo: 85561/PR,
     // sem exigir que o usuário escreva a palavra "advogado" ou "OAB".
     $pareceOabDireta = preg_match('/\b\d{2,8}\s*[\/\-]?\s*[a-z]{2}\b/iu', trim($pergunta)) === 1;
-    $consultaAdvogado = $atalho === '' && (
+    $consultaAdvogado = $atalho === '' && ($areaInterpretada === 'advogados' ||
         str_contains($perguntaNormalizada, 'advogado') ||
         str_contains($perguntaNormalizada, 'advogada') ||
         str_contains($perguntaNormalizada, 'oab') ||
         $pareceOabDireta
     );
     if ($consultaAdvogado) {
-        $advogados = cij_advogados_buscar($conn, $pergunta);
+        $advogados = cij_advogados_buscar($conn, $perguntaConsulta);
         if (!empty($advogados)) {
             $resposta['titulo'] = count($advogados) === 1 ? 'Advogado localizado' : 'Advogados localizados';
             $resposta['texto'] = 'Encontrei advogado(s) compatíveis com a pesquisa informada.';
@@ -350,7 +469,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
 
     // Consulta ampla de processos: aceita número curto, ID interno, número CNJ,
     // nome do cliente, advogado, tipo, comarca, fase ou status.
-    $consultaProcesso = $atalho === '' && (
+    $consultaProcesso = $atalho === '' && ($areaInterpretada === 'processos' ||
         str_contains($perguntaNormalizada, 'processo') ||
         str_contains($perguntaNormalizada, 'processos') ||
         preg_match('/^\s*PRC\d+\s*$/iu', trim($pergunta)) === 1 ||
@@ -358,7 +477,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
     );
 
     if ($consultaProcesso) {
-        $processos = cij_processos_buscar_numero($conn, $pergunta);
+        $processos = cij_processos_buscar_numero($conn, $perguntaConsulta);
 
         if (!empty($processos)) {
             $resposta['titulo'] = count($processos) === 1 ? 'Processo localizado' : 'Processos localizados';
@@ -411,8 +530,8 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
     }
 
     // Busca direta por nome do cliente quando não for CPF/CNPJ nem atalho específico.
-    if ($atalho === '' && $perguntaNormalizada !== '') {
-        $clientesNome = cij_cliente_por_nome($conn, $pergunta);
+    if ($atalho === '' && $perguntaNormalizada !== '' && in_array($areaInterpretada, ['', 'clientes'], true)) {
+        $clientesNome = cij_cliente_por_nome($conn, $perguntaConsulta);
         if (!empty($clientesNome)) {
             $resposta['titulo'] = count($clientesNome) === 1 ? 'Cliente localizado por nome' : 'Clientes localizados por nome';
             $resposta['texto'] = 'Encontrei cliente(s) compatíveis com a pesquisa informada.';
@@ -433,13 +552,13 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         }
     }
 
-    if ($atalho === 'agenda' || str_contains($perguntaNormalizada, 'agenda') || str_contains($perguntaNormalizada, 'audiência') || str_contains($perguntaNormalizada, 'audiencia')) {
+    if ($areaInterpretada === 'agenda' || $atalho === 'agenda' || str_contains($perguntaNormalizada, 'agenda') || str_contains($perguntaNormalizada, 'audiência') || str_contains($perguntaNormalizada, 'audiencia')) {
         $compromissos = [];
 
         if ($atalho === 'agenda' && function_exists('rojex_kb_agenda_hoje')) {
             $compromissos = rojex_kb_agenda_hoje($conn, $hoje, 10);
         } elseif (function_exists('rojex_kb_agenda_por_termo')) {
-            $compromissos = rojex_kb_agenda_por_termo($conn, $pergunta, 10);
+            $compromissos = rojex_kb_agenda_por_termo($conn, $perguntaConsulta, 10);
         }
 
         if ($atalho === 'agenda') {
@@ -507,7 +626,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         return $resposta;
     }
 
-    if ($atalho === 'prazos' || str_contains($perguntaNormalizada, 'prazo') || str_contains($perguntaNormalizada, 'processo')) {
+    if ($areaInterpretada === 'prazos' || $atalho === 'prazos' || str_contains($perguntaNormalizada, 'prazo') || str_contains($perguntaNormalizada, 'processo')) {
         $total = cij_table_exists($conn, 'processos') ? cij_count($conn, "SELECT COUNT(*) AS total FROM processos WHERE status='Em Andamento' AND proximo_prazo BETWEEN '{$hoje}' AND '{$seteDias}'") : 0;
         $linhas = cij_table_exists($conn, 'processos') ? cij_rows($conn, "SELECT numero_processo, tipo_processo, fase_atual, proximo_prazo FROM processos WHERE status='Em Andamento' AND proximo_prazo BETWEEN '{$hoje}' AND '{$seteDias}' ORDER BY proximo_prazo ASC LIMIT 5") : [];
 
@@ -521,7 +640,8 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         return $resposta;
     }
 
-    $consultaFinanceiro = $atalho === 'financeiro'
+    $consultaFinanceiro = $areaInterpretada === 'financeiro'
+        || $atalho === 'financeiro'
         || str_contains($perguntaNormalizada, 'financeiro')
         || str_contains($perguntaNormalizada, 'despesa')
         || str_contains($perguntaNormalizada, 'conta a pagar')
@@ -544,11 +664,11 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
 
         if ($consultaEspecifica) {
             $contasPagar = function_exists('rojex_kb_contas_pagar_por_termo')
-                ? rojex_kb_contas_pagar_por_termo($conn, $pergunta, 10)
+                ? rojex_kb_contas_pagar_por_termo($conn, $perguntaConsulta, 10)
                 : [];
 
             $contasReceber = function_exists('rojex_kb_contas_receber_por_termo')
-                ? rojex_kb_contas_receber_por_termo($conn, $pergunta, 10)
+                ? rojex_kb_contas_receber_por_termo($conn, $perguntaConsulta, 10)
                 : [];
 
             if (!empty($contasPagar) || !empty($contasReceber)) {
@@ -702,7 +822,8 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         return $resposta;
     }
 
-    $consultaHonorarios = $atalho === 'honorarios'
+    $consultaHonorarios = $areaInterpretada === 'honorarios'
+        || $atalho === 'honorarios'
         || str_contains($perguntaNormalizada, 'honorário')
         || str_contains($perguntaNormalizada, 'honorario')
         || str_contains($perguntaNormalizada, 'saldo pendente')
@@ -722,7 +843,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
             );
 
         if ($consultaEspecifica && function_exists('rojex_kb_honorarios_por_termo')) {
-            $honorarios = rojex_kb_honorarios_por_termo($conn, $pergunta, 10);
+            $honorarios = rojex_kb_honorarios_por_termo($conn, $perguntaConsulta, 10);
 
             if (!empty($honorarios)) {
                 $resposta['titulo'] = count($honorarios) === 1
@@ -835,7 +956,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
 
 
     $consultaDocumentos = $atalho === ''
-        && (
+        && ($areaInterpretada === 'documentos' ||
             str_contains($perguntaNormalizada, 'documento')
             || str_contains($perguntaNormalizada, 'documentos')
             || str_contains($perguntaNormalizada, 'arquivo')
@@ -850,7 +971,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         );
 
     if ($consultaDocumentos && function_exists('rojex_kb_documentos_por_termo')) {
-        $documentos = rojex_kb_documentos_por_termo($conn, $pergunta, 10);
+        $documentos = rojex_kb_documentos_por_termo($conn, $perguntaConsulta, 10);
 
         if (!empty($documentos)) {
             $resposta['titulo'] = count($documentos) === 1
@@ -918,7 +1039,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
         return $resposta;
     }
 
-    if ($atalho === 'clientes' || str_contains($perguntaNormalizada, 'cliente')) {
+    if ($atalho === 'clientes' || $areaInterpretada === 'clientes' || str_contains($perguntaNormalizada, 'cliente')) {
         $ativos = cij_table_exists($conn, 'clientes') ? cij_count($conn, "SELECT COUNT(*) AS total FROM clientes WHERE COALESCE(deletado,0)=0 AND status='Ativo'") : 0;
         $novos = cij_table_exists($conn, 'clientes') ? cij_count($conn, "SELECT COUNT(*) AS total FROM clientes WHERE COALESCE(deletado,0)=0 AND data_cadastro BETWEEN '{$inicioMes}' AND '{$fimMes}'") : 0;
 
@@ -933,7 +1054,7 @@ function cij_assistente_responder(mysqli $conn, string $pergunta, string $atalho
 
     // Fallback universal para consultas livres.
     if ($atalho === '' && trim($pergunta) !== '') {
-        $achados = cij_busca_livre_base($conn, $pergunta);
+        $achados = cij_busca_livre_base($conn, $perguntaConsulta);
 
         if (!empty($achados)) {
             $resposta['titulo'] = 'Resultados encontrados';
@@ -1081,13 +1202,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (($_POST['acao_cij'] ?? '') === 'as
 }
 
 $ferramentaCij = preg_replace('/[^a-zA-Z0-9_\-]/', '', (string)($_GET['ferramenta'] ?? ''));
-if ($ferramentaCij === 'gerador') {
-    $arquivoFerramenta = __DIR__ . '/cij/gerador.php';
+
+$ferramentasDisponiveis = [
+    'gerador' => [
+        'arquivo' => __DIR__ . '/cij/gerador.php',
+        'nome' => 'Gerador de Peças',
+    ],
+    'revisor' => [
+        'arquivo' => __DIR__ . '/cij/revisor.php',
+        'nome' => 'Revisor Jurídico',
+    ],
+    'contratos' => [
+        'arquivo' => __DIR__ . '/cij/contratos.php',
+        'nome' => 'Análise de Contratos',
+    ],
+    'documentos' => [
+        'arquivo' => __DIR__ . '/cij/documentos.php',
+        'nome' => 'Análise de Documentos e Provas',
+    ],
+];
+
+if ($ferramentaCij !== '' && isset($ferramentasDisponiveis[$ferramentaCij])) {
+    $configFerramenta = $ferramentasDisponiveis[$ferramentaCij];
+    $arquivoFerramenta = $configFerramenta['arquivo'];
 
     if (is_file($arquivoFerramenta)) {
         include $arquivoFerramenta;
     } else {
-        echo "<div class='alert alert-danger'>Ferramenta do CIJ não encontrada: Gerador de Peças.</div>";
+        echo "<div class='alert alert-danger'>Ferramenta do CIJ não encontrada: "
+            . cij_h($configFerramenta['nome'])
+            . ".</div>";
     }
 
     $conn->close();
@@ -1111,7 +1255,7 @@ if ($ferramentaCij === 'gerador') {
     <div class="card border-0 shadow-sm mb-4">
         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
             <span><i class="bi bi-chat-dots me-2"></i>Assistente Jurídico ROJEX.AI</span>
-            <span class="badge bg-primary">Consulta interna inicial</span>
+            <span class="badge bg-primary">Interpretação inteligente interna</span>
         </div>
         <div class="card-body">
             <form method="POST" class="row g-3">
@@ -1119,8 +1263,8 @@ if ($ferramentaCij === 'gerador') {
                 <input type="hidden" name="atalho_cij" id="atalho_cij" value="">
                 <div class="col-lg-9">
                     <label class="form-label fw-semibold">Pergunte ao ROJEX.AI</label>
-                    <input type="text" name="pergunta_cij" class="form-control form-control-lg" value="<?= cij_h($perguntaCij) ?>" placeholder="Ex.: financeiro em atenção, conta CP001, recebimentos do mês, honorários vencidos...">
-                    <div class="form-text">Nesta etapa, o assistente responde com base nos dados internos do sistema. A IA externa será integrada em etapa futura.</div>
+                    <input type="text" name="pergunta_cij" class="form-control form-control-lg" value="<?= cij_h($perguntaCij) ?>" placeholder="Ex.: Quem é João? Quais processos vencem esta semana? Localize a OAB 85561/PR...">
+                    <div class="form-text">O assistente interpreta perguntas em linguagem natural e responde com os dados internos do sistema. A IA externa será integrada em etapa futura.</div>
                 </div>
                 <div class="col-lg-3">
                     <label class="form-label fw-semibold d-none d-lg-block">&nbsp;</label>
@@ -1196,6 +1340,18 @@ if ($ferramentaCij === 'gerador') {
                             <p class="text-muted mb-3"><?= cij_h($item['descricao']) ?></p>
                             <?php if (($item['titulo'] ?? '') === 'Gerador de Peças'): ?>
                                 <a href="?mod=cij&ferramenta=gerador" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'Revisor Jurídico'): ?>
+                                <a href="?mod=cij&ferramenta=revisor" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'Análise de Contratos'): ?>
+                                <a href="?mod=cij&ferramenta=contratos" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'Análise de Documentos e Provas'): ?>
+                                <a href="?mod=cij&ferramenta=documentos" class="btn btn-sm btn-primary">
                                     <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
                                 </a>
                             <?php else: ?>

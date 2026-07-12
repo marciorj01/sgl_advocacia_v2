@@ -2,7 +2,7 @@
 /**
  * modules/cij/gerador.php
  * Gerador de Peças Jurídicas — ROJEX.AI Enterprise
- * FASE 4.1 — Integração inicial da IA no Gerador Inteligente de Peças.
+ * Sprint 4.1.4 — CIJ Operacional — Gerador de Peças Enterprise.
  *
  * Objetivo:
  * - Preservar a arquitetura atual do CIJ.
@@ -18,6 +18,11 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 $arquivoConfigIa = __DIR__ . '/../../config/ia.php';
 if (is_file($arquivoConfigIa)) {
     require_once $arquivoConfigIa;
+}
+
+$arquivoBaseConhecimento = __DIR__ . '/../../config/base_conhecimento.php';
+if (is_file($arquivoBaseConhecimento)) {
+    require_once $arquivoBaseConhecimento;
 }
 
 function cij_gerador_h($valor): string
@@ -334,20 +339,48 @@ $areasDireito = [
     'Contratual'
 ];
 
-$clientesSistema = cij_gerador_table_exists($conn, 'clientes')
-    ? cij_gerador_rows($conn, "SELECT id, nome, cpf_cnpj FROM clientes WHERE COALESCE(deletado,0)=0 ORDER BY nome ASC LIMIT 300")
-    : [];
+$clientesSistema = [];
+if (function_exists('rojex_kb_tabela_existe') && rojex_kb_tabela_existe($conn, 'clientes')) {
+    $colunasClientes = rojex_kb_colunas_tabela($conn, 'clientes');
+    $filtroClientes = in_array('deletado', $colunasClientes, true)
+        ? ' WHERE COALESCE(deletado, 0) = 0'
+        : ' WHERE 1 = 1';
 
-$processosSistema = cij_gerador_table_exists($conn, 'processos')
-    ? cij_gerador_rows($conn, "
-        SELECT p.id, p.cliente_id, p.numero_processo, p.tipo_processo, p.comarca, p.fase_atual, p.status, c.nome AS cliente_nome
-        FROM processos p
-        LEFT JOIN clientes c ON c.id = p.cliente_id
-        WHERE COALESCE(p.deletado,0)=0
-        ORDER BY p.id DESC
-        LIMIT 300
-    ")
-    : [];
+    $clientesSistema = rojex_kb_consultar(
+        $conn,
+        'SELECT id, nome, ' . (in_array('cpf_cnpj', $colunasClientes, true) ? 'cpf_cnpj' : "'' AS cpf_cnpj") .
+        ' FROM clientes' . $filtroClientes . ' ORDER BY nome ASC LIMIT 300'
+    );
+}
+
+$processosSistema = [];
+if (function_exists('rojex_kb_tabela_existe') && rojex_kb_tabela_existe($conn, 'processos')) {
+    $colunasProcessos = rojex_kb_colunas_tabela($conn, 'processos');
+    $temClientesGerador = rojex_kb_tabela_existe($conn, 'clientes')
+        && in_array('cliente_id', $colunasProcessos, true);
+
+    $joinClienteGerador = $temClientesGerador
+        ? ' LEFT JOIN clientes c ON c.id = p.cliente_id'
+        : '';
+
+    $filtroProcessos = in_array('deletado', $colunasProcessos, true)
+        ? ' WHERE COALESCE(p.deletado, 0) = 0'
+        : ' WHERE 1 = 1';
+
+    $processosSistema = rojex_kb_consultar(
+        $conn,
+        'SELECT p.id, '
+        . (in_array('cliente_id', $colunasProcessos, true) ? 'p.cliente_id' : "NULL AS cliente_id") . ', '
+        . (in_array('numero_processo', $colunasProcessos, true) ? 'p.numero_processo' : "'' AS numero_processo") . ', '
+        . (in_array('tipo_processo', $colunasProcessos, true) ? 'p.tipo_processo' : "'' AS tipo_processo") . ', '
+        . (in_array('comarca', $colunasProcessos, true) ? 'p.comarca' : "'' AS comarca") . ', '
+        . (in_array('fase_atual', $colunasProcessos, true) ? 'p.fase_atual' : "'' AS fase_atual") . ', '
+        . (in_array('status', $colunasProcessos, true) ? 'p.status' : "'' AS status") . ', '
+        . ($temClientesGerador ? "COALESCE(c.nome, '') AS cliente_nome" : "'' AS cliente_nome")
+        . ' FROM processos p' . $joinClienteGerador . $filtroProcessos
+        . ' ORDER BY p.id DESC LIMIT 300'
+    );
+}
 
 $tipo = trim((string)($_POST['tipo_documento'] ?? ''));
 $area = trim((string)($_POST['area_direito'] ?? ''));
@@ -366,29 +399,77 @@ $erroIa = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 'gerar_peca_ia') {
     $gerado = true;
 
+    if ($tipo === '' || $area === '' || $descricaoCaso === '') {
+        $gerado = false;
+        $erroIa = 'Preencha o tipo de documento, a área do Direito e a descrição do caso.';
+    }
+
     $clienteSistema = null;
     $processoSistema = null;
 
-    if ($clienteId !== '' && $clienteId !== '0' && cij_gerador_table_exists($conn, 'clientes')) {
-        $clienteIdSql = $conn->real_escape_string($clienteId);
-        $clienteSistema = cij_gerador_one($conn, "SELECT * FROM clientes WHERE id='{$clienteIdSql}' AND COALESCE(deletado,0)=0 LIMIT 1");
+    if (
+        $clienteId !== ''
+        && $clienteId !== '0'
+        && function_exists('rojex_kb_tabela_existe')
+        && rojex_kb_tabela_existe($conn, 'clientes')
+    ) {
+        $colunasClienteSelecionado = rojex_kb_colunas_tabela($conn, 'clientes');
+        $filtroClienteSelecionado = in_array('deletado', $colunasClienteSelecionado, true)
+            ? ' AND COALESCE(deletado, 0) = 0'
+            : '';
+
+        $clienteSistema = rojex_kb_consultar_um(
+            $conn,
+            'SELECT * FROM clientes WHERE id = ?' . $filtroClienteSelecionado . ' LIMIT 1',
+            's',
+            [$clienteId]
+        );
     }
 
-    if ($processoId > 0 && cij_gerador_table_exists($conn, 'processos')) {
-        $processoSistema = cij_gerador_one($conn, "
-            SELECT p.*, c.nome AS cliente_nome
-            FROM processos p
-            LEFT JOIN clientes c ON c.id = p.cliente_id
-            WHERE p.id={$processoId}
-            LIMIT 1
-        ");
+    if (
+        $processoId > 0
+        && function_exists('rojex_kb_tabela_existe')
+        && rojex_kb_tabela_existe($conn, 'processos')
+    ) {
+        $colunasProcessoSelecionado = rojex_kb_colunas_tabela($conn, 'processos');
+        $temClienteProcesso = rojex_kb_tabela_existe($conn, 'clientes')
+            && in_array('cliente_id', $colunasProcessoSelecionado, true);
+        $joinClienteProcesso = $temClienteProcesso
+            ? ' LEFT JOIN clientes c ON c.id = p.cliente_id'
+            : '';
+        $campoNomeCliente = $temClienteProcesso
+            ? ", COALESCE(c.nome, '') AS cliente_nome"
+            : ", '' AS cliente_nome";
+        $filtroProcessoSelecionado = in_array('deletado', $colunasProcessoSelecionado, true)
+            ? ' AND COALESCE(p.deletado, 0) = 0'
+            : '';
+
+        $processoSistema = rojex_kb_consultar_um(
+            $conn,
+            'SELECT p.*' . $campoNomeCliente
+            . ' FROM processos p' . $joinClienteProcesso
+            . ' WHERE p.id = ?' . $filtroProcessoSelecionado . ' LIMIT 1',
+            'i',
+            [$processoId]
+        );
 
         if (!$clienteSistema && !empty($processoSistema['cliente_id'])) {
-            $clienteProcessoIdSql = $conn->real_escape_string((string)$processoSistema['cliente_id']);
-            $clienteSistema = cij_gerador_one($conn, "SELECT * FROM clientes WHERE id='{$clienteProcessoIdSql}' AND COALESCE(deletado,0)=0 LIMIT 1");
+            $clienteProcessoId = (string)$processoSistema['cliente_id'];
+            $colunasClienteProcesso = rojex_kb_colunas_tabela($conn, 'clientes');
+            $filtroClienteProcesso = in_array('deletado', $colunasClienteProcesso, true)
+                ? ' AND COALESCE(deletado, 0) = 0'
+                : '';
+
+            $clienteSistema = rojex_kb_consultar_um(
+                $conn,
+                'SELECT * FROM clientes WHERE id = ?' . $filtroClienteProcesso . ' LIMIT 1',
+                's',
+                [$clienteProcessoId]
+            );
         }
     }
 
+    if ($gerado) {
     $promptSistema = 'Você é o assistente jurídico do ROJEX.AI Enterprise. Responda em português do Brasil. Não invente fatos, artigos, jurisprudências ou dados ausentes. Use [informar] quando faltar dado. O texto é sempre rascunho para revisão obrigatória de advogado.';
     $promptUsuario = cij_gerador_prompt($tipo, $area, $clienteReferencia, $descricaoCaso, $objetivo, $tom, $clienteSistema, $processoSistema);
 
@@ -411,6 +492,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
             '0',
             ($tipo ?: 'Documento') . ' - ' . $modoResposta
         );
+    }
     }
 }
 ?>
@@ -556,17 +638,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                         </div>
                     <?php else: ?>
                         <div class="d-flex flex-wrap gap-2 mb-3">
-                            <button type="button" class="btn btn-outline-primary btn-sm" onclick="navigator.clipboard.writeText(document.getElementById('resultadoGeradorIA').innerText)">
+                            <button type="button" class="btn btn-outline-primary btn-sm" id="btnCopiarPeca">
                                 <i class="bi bi-clipboard me-1"></i>Copiar
                             </button>
-                            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="window.print()">
+                            <button type="button" class="btn btn-outline-success btn-sm" id="btnBaixarPeca">
+                                <i class="bi bi-file-earmark-word me-1"></i>Baixar Word
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary btn-sm" id="btnImprimirPeca">
                                 <i class="bi bi-printer me-1"></i>Imprimir / PDF
                             </button>
+                            <a href="?mod=cij&ferramenta=gerador" class="btn btn-outline-dark btn-sm">
+                                <i class="bi bi-plus-circle me-1"></i>Nova peça
+                            </a>
                         </div>
 
-                        <div id="resultadoGeradorIA" class="border rounded-3 p-4 bg-light" style="white-space: pre-line; line-height: 1.65; min-height: 480px;">
-<?= cij_gerador_h($respostaIa) ?>
-                        </div>
+                        <label for="resultadoGeradorIA" class="form-label fw-semibold">Minuta editável</label>
+                        <textarea id="resultadoGeradorIA" class="form-control" rows="24" style="line-height:1.65;"><?= cij_gerador_h($respostaIa) ?></textarea>
+                        <div class="form-text">Revise e ajuste a minuta diretamente neste campo antes de copiar, baixar ou imprimir.</div>
 
                         <div class="alert alert-warning mt-3 mb-0">
                             <i class="bi bi-exclamation-triangle me-1"></i>
@@ -616,7 +704,316 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
     }
 
     clienteSelect.addEventListener('change', filtrarProcessos);
+    processoSelect.addEventListener('change', function(){
+        const selecionado = processoSelect.options[processoSelect.selectedIndex];
+        if (!selecionado || selecionado.value === '0') return;
+        const clienteDoProcesso = selecionado.getAttribute('data-cliente') || '0';
+        if (clienteDoProcesso !== '0') {
+            clienteSelect.value = clienteDoProcesso;
+            filtrarProcessos();
+            processoSelect.value = selecionado.value;
+        }
+    });
     filtrarProcessos();
+
+    const resultado = document.getElementById('resultadoGeradorIA');
+    const btnCopiar = document.getElementById('btnCopiarPeca');
+    const btnBaixar = document.getElementById('btnBaixarPeca');
+    const btnImprimir = document.getElementById('btnImprimirPeca');
+
+    if (resultado && btnCopiar) {
+        btnCopiar.addEventListener('click', async function(){
+            try {
+                await navigator.clipboard.writeText(resultado.value);
+                const textoOriginal = btnCopiar.innerHTML;
+                btnCopiar.innerHTML = '<i class="bi bi-check2 me-1"></i>Copiado';
+                setTimeout(function(){ btnCopiar.innerHTML = textoOriginal; }, 1800);
+            } catch (e) {
+                resultado.select();
+                document.execCommand('copy');
+            }
+        });
+    }
+
+    if (resultado && btnBaixar) {
+        btnBaixar.addEventListener('click', function(){
+            const texto = resultado.value.trim();
+            if (texto === '') {
+                alert('Não há conteúdo para baixar.');
+                return;
+            }
+
+            const escaparHtml = function(valor){
+                return valor
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+            };
+
+            const linhas = texto.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+            const blocos = linhas.map(function(linha){
+                const limpa = linha.trim();
+                if (limpa === '') return '<p class="espaco">&nbsp;</p>';
+
+                const ehTitulo = /^(MINUTA|EXCELENTÍSSIMO|EXCELENTISSIMO|AO JUÍZO|AO JUIZO|[0-9]+\.|[IVXLCDM]+\.)/i.test(limpa)
+                    || (limpa.length <= 90 && limpa === limpa.toUpperCase());
+                const ehLista = /^(\[[ xX]?\]|[a-z]\)|[-•])\s*/.test(limpa);
+                const classe = ehTitulo ? 'titulo' : (ehLista ? 'lista' : 'paragrafo');
+                return '<p class="' + classe + '">' + escaparHtml(limpa) + '</p>';
+            }).join('');
+
+            const htmlWord = `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:w="urn:schemas-microsoft-com:office:word"
+      xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta charset="UTF-8">
+<meta name="ProgId" content="Word.Document">
+<meta name="Generator" content="ROJEX.AI Enterprise">
+<title>Minuta Jurídica ROJEX.AI</title>
+<style>
+@page WordSection1 {
+    size: 595.3pt 841.9pt;
+    margin: 85.05pt 56.7pt 56.7pt 85.05pt;
+}
+div.WordSection1 { page: WordSection1; }
+body {
+    font-family: "Times New Roman", serif;
+    font-size: 12pt;
+    line-height: 1.5;
+    color: #000;
+}
+p {
+    margin: 0 0 6pt 0;
+    text-align: justify;
+}
+p.paragrafo {
+    text-indent: 1.25cm;
+}
+p.titulo {
+    text-indent: 0;
+    font-weight: bold;
+    margin-top: 12pt;
+    margin-bottom: 6pt;
+}
+p.lista {
+    text-indent: 0;
+    margin-left: 0;
+}
+p.espaco {
+    margin: 0;
+    line-height: 6pt;
+}
+.rodape {
+    margin-top: 18pt;
+    padding-top: 6pt;
+    border-top: 1px solid #999;
+    font-family: Arial, sans-serif;
+    font-size: 8pt;
+    text-align: center;
+    color: #555;
+}
+</style>
+</head>
+<body>
+<div class="WordSection1">
+${blocos}
+<p class="rodape">Documento gerado como minuta. Revisão obrigatória por advogado antes de protocolo, assinatura ou envio externo.</p>
+</div>
+</body>
+</html>`;
+
+            const blob = new Blob(['\ufeff', htmlWord], {type: 'application/msword;charset=utf-8'});
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'minuta-juridica-rojex-ai.doc';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        });
+    }
+
+
+    if (resultado && btnImprimir) {
+        btnImprimir.addEventListener('click', function(){
+            const texto = resultado.value.trim();
+            if (texto === '') {
+                alert('Não há conteúdo para imprimir.');
+                return;
+            }
+
+            const escaparHtml = function(valor){
+                return valor
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+            };
+
+            const linhas = texto.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+            const conteudo = linhas.map(function(linha){
+                const limpa = linha.trim();
+                if (limpa === '') return '<p class="espaco">&nbsp;</p>';
+
+                const ehTitulo = /^(MINUTA|EXCELENTÍSSIMO|EXCELENTISSIMO|AO JUÍZO|AO JUIZO|[0-9]+\.|[IVXLCDM]+\.)/i.test(limpa)
+                    || (limpa.length <= 90 && limpa === limpa.toUpperCase());
+                const ehLista = /^(\[[ xX]?\]|[a-z]\)|[-•])\s*/.test(limpa);
+                const classe = ehTitulo ? 'titulo' : (ehLista ? 'lista' : 'paragrafo');
+                return '<p class="' + classe + '">' + escaparHtml(limpa) + '</p>';
+            }).join('');
+
+            const janela = window.open('', '_blank', 'width=980,height=760');
+            if (!janela) {
+                alert('O navegador bloqueou a janela de impressão. Permita pop-ups para este endereço e tente novamente.');
+                return;
+            }
+
+            janela.document.open();
+            janela.document.write(`<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minuta Jurídica — ROJEX.AI</title>
+    <style>
+        @page {
+            size: A4 portrait;
+            margin: 3cm 2cm 2cm 3cm;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html, body {
+            margin: 0;
+            padding: 0;
+            background: #fff;
+            color: #000;
+        }
+
+        body {
+            font-family: "Times New Roman", Times, serif;
+            font-size: 12pt;
+            line-height: 1.5;
+        }
+
+        .documento {
+            width: 100%;
+            min-height: 100%;
+            text-align: justify;
+            overflow-wrap: break-word;
+            word-break: normal;
+        }
+
+        .cabecalho-impressao {
+            display: none;
+        }
+
+        .conteudo {
+            white-space: normal;
+        }
+
+        .conteudo p {
+            margin: 0 0 6pt 0;
+            text-align: justify;
+        }
+
+        .conteudo p.paragrafo {
+            text-indent: 1.25cm;
+        }
+
+        .conteudo p.titulo {
+            text-indent: 0;
+            font-weight: bold;
+            margin-top: 12pt;
+            margin-bottom: 6pt;
+        }
+
+        .conteudo p.lista {
+            text-indent: 0;
+        }
+
+        .conteudo p.espaco {
+            margin: 0;
+            line-height: 6pt;
+        }
+
+        .rodape-revisao {
+            margin-top: 24px;
+            padding-top: 10px;
+            border-top: 1px solid #999;
+            font-family: Arial, sans-serif;
+            font-size: 8.5pt;
+            color: #555;
+            text-align: center;
+        }
+
+        @media screen {
+            body {
+                background: #e9ecef;
+                padding: 24px;
+            }
+
+            .documento {
+                max-width: 21cm;
+                min-height: 29.7cm;
+                margin: 0 auto;
+                padding: 3cm 2cm 2cm 3cm;
+                background: #fff;
+                box-shadow: 0 2px 18px rgba(0,0,0,.18);
+            }
+
+            .cabecalho-impressao {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 20px;
+                padding-bottom: 10px;
+                border-bottom: 1px solid #bbb;
+                font-family: Arial, sans-serif;
+                font-size: 9pt;
+                color: #555;
+            }
+        }
+
+        @media print {
+            .documento {
+                min-height: auto;
+            }
+
+            .rodape-revisao {
+                break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+    <main class="documento">
+        <div class="cabecalho-impressao">
+            <strong>ROJEX.AI — Minuta Jurídica</strong>
+            <span>Pré-visualização para impressão</span>
+        </div>
+        <div class="conteudo">${conteudo}</div>
+        <div class="rodape-revisao">
+            Documento gerado como minuta. Revisão obrigatória por advogado antes de protocolo, assinatura ou envio externo.
+        </div>
+    </main>
+    <script>
+        window.addEventListener('load', function(){
+            setTimeout(function(){ window.print(); }, 250);
+        });
+    <\/script>
+</body>
+</html>`);
+            janela.document.close();
+        });
+    }
 })();
 </script>
 

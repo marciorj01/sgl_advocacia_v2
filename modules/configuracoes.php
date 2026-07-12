@@ -1,7 +1,7 @@
 <?php
 /**
  * modules/configuracoes.php
- * Sprint 4.1.3 — Administração Enterprise do ROJEX.AI (Etapa 9 — Central de Atualizações Enterprise).
+ * Sprint 4.1.3 — Administração Enterprise do ROJEX.AI (Etapa 10 — Fechamento Técnico e Homologação Final).
  * Mantém arquitetura modular atual, compatibilidade retroativa, segurança, CSRF e recursos de administração SaaS.
  */
 
@@ -995,9 +995,9 @@ function rojex_backup_validar_arquivo(string $arquivo, ?string $hashEsperado = n
 function rojex_atualizacao_versao_atual(mysqli $conn): string {
     $versao = trim(sgl_cfg_get($conn, 'versao_sistema', ''));
     if ($versao === '') {
-        $versao = trim(sgl_cfg_get($conn, 'versao', '1.0.0'));
+        $versao = trim(sgl_cfg_get($conn, 'versao', '4.1.3'));
     }
-    return $versao !== '' ? $versao : '1.0.0';
+    return $versao !== '' ? $versao : '4.1.3';
 }
 
 function rojex_atualizacao_ambiente(mysqli $conn): string {
@@ -2672,7 +2672,7 @@ if ($acao_cfg === 'salvar_sistema') {
 
     $dominio = strtolower(sgl_limpar_texto((string)($_POST['dominio_saas'] ?? ''), 180));
     $subdominio = strtolower(preg_replace('/[^a-zA-Z0-9.-]/', '', (string)($_POST['subdominio_saas'] ?? '')));
-    $versaoSistema = sgl_limpar_texto((string)($_POST['versao_sistema'] ?? '4.1.2'), 30);
+    $versaoSistema = sgl_limpar_texto((string)($_POST['versao_sistema'] ?? '4.1.3'), 30);
     $versaoBanco = sgl_limpar_texto((string)($_POST['versao_banco'] ?? '1.0'), 30);
 
     $recursosPermitidos = [
@@ -2887,7 +2887,11 @@ $config_padrao = [
     'tenant_id' => '',
     'chave_instalacao' => '',
     'ambiente_sistema' => 'desenvolvimento',
-    'versao_sistema' => '4.1.2',
+    'versao_sistema' => '4.1.3',
+    'sprint_atual' => '4.1.3',
+    'status_homologacao' => 'homologada',
+    'data_homologacao' => '',
+    'homologacao_sprint_4_1_3' => '0',
     'versao_banco' => '1.0',
     'plano_licenca' => 'enterprise',
     'status_licenca' => 'ativa',
@@ -2914,6 +2918,30 @@ $config_padrao = [
 $cfg = [];
 foreach ($config_padrao as $chave => $default) {
     $cfg[$chave] = sgl_cfg_get($conn, $chave, $default);
+}
+
+// Fechamento técnico da Sprint 4.1.3. A migração é executada somente uma vez,
+// preservando versões futuras que venham a ser registradas pela Central de Atualizações.
+if (($cfg['homologacao_sprint_4_1_3'] ?? '0') !== '1') {
+    $dataHomologacao = date('Y-m-d H:i:s');
+    foreach ([
+        'versao_sistema' => '4.1.3',
+        'sprint_atual' => '4.1.3',
+        'status_homologacao' => 'homologada',
+        'data_homologacao' => $dataHomologacao,
+        'homologacao_sprint_4_1_3' => '1',
+    ] as $chaveHomologacao => $valorHomologacao) {
+        sgl_cfg_set($conn, $chaveHomologacao, $valorHomologacao);
+        $cfg[$chaveHomologacao] = $valorHomologacao;
+    }
+
+    sgl_log(
+        $conn,
+        'Homologou Sprint 4.1.3',
+        'configuracoes',
+        '4.1.3',
+        'Fechamento técnico e homologação final da Administração Enterprise.'
+    );
 }
 
 // Identificador técnico permanente: prepara o cadastro para futura vinculação SaaS
@@ -4243,7 +4271,16 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                                 <option value="producao" <?=$cfg['ambiente_sistema']==='producao'?'selected':''?>>Produção</option>
                             </select>
                         </div>
-                        <div class="col-md-3"><label class="form-label">Versão ROJEX</label><input name="versao_sistema" class="form-control" maxlength="30" value="<?=htmlspecialchars($cfg['versao_sistema'])?>"></div>
+                        <div class="col-md-3">
+                            <label class="form-label">Versão ROJEX</label>
+                            <input name="versao_sistema" class="form-control" maxlength="30" value="<?=htmlspecialchars($cfg['versao_sistema'])?>">
+                            <div class="form-text text-success">
+                                Sprint <?=htmlspecialchars($cfg['sprint_atual'] ?? '4.1.3')?> <?=($cfg['status_homologacao'] ?? '') === 'homologada' ? 'homologada' : htmlspecialchars($cfg['status_homologacao'] ?? '')?>
+                                <?php if (!empty($cfg['data_homologacao'])): ?>
+                                    em <?=date('d/m/Y H:i', strtotime($cfg['data_homologacao']))?>
+                                <?php endif; ?>
+                            </div>
+                        </div>
                         <div class="col-md-3"><label class="form-label">Versão SQL</label><input name="versao_banco" class="form-control" maxlength="30" value="<?=htmlspecialchars($cfg['versao_banco'])?>"></div>
                         <div class="col-md-6"><label class="form-label">Alertar prazos em até X dias</label><input type="number" min="1" max="60" name="dias_alerta_prazos" class="form-control" value="<?=htmlspecialchars($cfg['dias_alerta_prazos'])?>"></div>
                         <div class="col-md-6"><label class="form-label">Itens por página</label><input type="number" min="10" max="100" name="itens_por_pagina" class="form-control" value="<?=htmlspecialchars($cfg['itens_por_pagina'])?>"></div>
@@ -5139,10 +5176,11 @@ function rojexEditarAtualizacao(dados) {
 
             <div class="col-md-8">
                 <label class="form-label fw-semibold">Tipo de backup</label>
+                <?php $backupTipoSelecionado = is_array($backupPreview) ? (string)($backupPreview['tipo'] ?? 'banco') : 'banco'; ?>
                 <select name="backup_tipo" class="form-select">
-                    <option value="banco">Banco de dados — arquivo SQL</option>
-                    <option value="arquivos">Arquivos operacionais — arquivo ZIP</option>
-                    <option value="completo">Completo — banco e arquivos em ZIP</option>
+                    <option value="banco" <?=$backupTipoSelecionado==='banco'?'selected':''?>>Banco de dados — arquivo SQL</option>
+                    <option value="arquivos" <?=$backupTipoSelecionado==='arquivos'?'selected':''?>>Arquivos operacionais — arquivo ZIP</option>
+                    <option value="completo" <?=$backupTipoSelecionado==='completo'?'selected':''?>>Completo — banco e arquivos em ZIP</option>
                 </select>
                 <div class="form-text">Primeiro será exibida uma simulação, sem criação de arquivos.</div>
             </div>
@@ -5168,8 +5206,16 @@ function rojexEditarAtualizacao(dados) {
         <div class="row g-3 mb-4">
             <div class="col-md-3">
                 <div class="border rounded p-3 h-100">
+                    <?php
+                    $backupRotulos = [
+                        'banco' => 'Banco de dados (SQL)',
+                        'arquivos' => 'Arquivos operacionais (ZIP)',
+                        'completo' => 'Completo (banco + arquivos)',
+                    ];
+                    $backupTipoPreview = (string)($backupPreview['tipo'] ?? 'banco');
+                    ?>
                     <small class="text-muted">TIPO</small>
-                    <h5 class="mb-0 text-uppercase"><?=htmlspecialchars($backupPreview['tipo'])?></h5>
+                    <h5 class="mb-0"><?=htmlspecialchars($backupRotulos[$backupTipoPreview] ?? ucfirst($backupTipoPreview))?></h5>
                 </div>
             </div>
             <div class="col-md-3">

@@ -1220,6 +1220,30 @@ $ferramentasDisponiveis = [
         'arquivo' => __DIR__ . '/cij/documentos.php',
         'nome' => 'Análise de Documentos e Provas',
     ],
+    'pesquisa' => [
+        'arquivo' => __DIR__ . '/cij/pesquisa.php',
+        'nome' => 'Pesquisa Jurídica',
+    ],
+    'biblioteca' => [
+        'arquivo' => __DIR__ . '/cij/biblioteca.php',
+        'nome' => 'Biblioteca Inteligente',
+    ],
+    'financeiro' => [
+        'arquivo' => __DIR__ . '/cij/financeiro.php',
+        'nome' => 'IA Financeira',
+    ],
+    'estrategia' => [
+        'arquivo' => __DIR__ . '/cij/estrategia.php',
+        'nome' => 'Estratégia Jurídica Inteligente',
+    ],
+    'administrativa' => [
+        'arquivo' => __DIR__ . '/cij/administrativa.php',
+        'nome' => 'IA Administrativa',
+    ],
+    'academia' => [
+        'arquivo' => __DIR__ . '/cij/academia.php',
+        'nome' => 'Academia ROJEX.AI',
+    ],
 ];
 
 if ($ferramentaCij !== '' && isset($ferramentasDisponiveis[$ferramentaCij])) {
@@ -1313,7 +1337,7 @@ if ($ferramentaCij !== '' && isset($ferramentasDisponiveis[$ferramentaCij])) {
         </div>
     </div>
 
-    <div class="row g-4">
+    <div class="row row-cols-1 row-cols-md-2 row-cols-xl-5 g-4">
         <?php
         $modulosCij = [
             ['icone' => 'bi-pencil-square', 'titulo' => 'Gerador de Peças', 'descricao' => 'Criar petições, contratos, notificações, procurações e pareceres.'],
@@ -1323,21 +1347,23 @@ if ($ferramentaCij !== '' && isset($ferramentasDisponiveis[$ferramentaCij])) {
             ['icone' => 'bi-bank', 'titulo' => 'Pesquisa Jurídica', 'descricao' => 'Estrutura para legislação, jurisprudência, fundamentos, teses e referências jurídicas.'],
             ['icone' => 'bi-journal-bookmark', 'titulo' => 'Biblioteca Inteligente', 'descricao' => 'Guardar modelos aprovados, peças geradas, teses e conhecimento do escritório.'],
             ['icone' => 'bi-cash-coin', 'titulo' => 'IA Financeira', 'descricao' => 'Interpretar honorários, inadimplência, fluxo de caixa e indicadores financeiros.'],
+            ['icone' => 'bi-diagram-3', 'titulo' => 'Estratégia Jurídica Inteligente', 'descricao' => 'Analisa o caso, identifica pontos fortes, riscos, provas, teses, contramedidas e próximos passos.'],
             ['icone' => 'bi-graph-up-arrow', 'titulo' => 'IA Administrativa', 'descricao' => 'Apoiar produtividade, desempenho da equipe, agenda e gestão operacional.'],
             ['icone' => 'bi-mortarboard', 'titulo' => 'Academia ROJEX.AI', 'descricao' => 'Espaço para treinamentos, tutoriais, boas práticas e novidades do sistema.'],
         ];
         foreach ($modulosCij as $item):
         ?>
-        <div class="col-xl-4 col-lg-6">
+        <div class="col">
             <div class="card h-100 border-0 shadow-sm">
-                <div class="card-body p-4">
-                    <div class="d-flex align-items-start gap-3">
+                <div class="card-body p-4 d-flex flex-column">
+                    <div class="d-flex align-items-start gap-3 h-100">
                         <div class="rounded-circle bg-primary bg-opacity-10 text-primary d-flex align-items-center justify-content-center" style="width:48px;height:48px;min-width:48px;">
                             <i class="bi <?= cij_h($item['icone']) ?> fs-4"></i>
                         </div>
-                        <div>
+                        <div class="d-flex flex-column flex-grow-1 h-100">
                             <h5 class="fw-bold mb-2"><?= cij_h($item['titulo']) ?></h5>
-                            <p class="text-muted mb-3"><?= cij_h($item['descricao']) ?></p>
+                            <p class="text-muted mb-3 flex-grow-1"><?= cij_h($item['descricao']) ?></p>
+                            <div class="mt-auto">
                             <?php if (($item['titulo'] ?? '') === 'Gerador de Peças'): ?>
                                 <a href="?mod=cij&ferramenta=gerador" class="btn btn-sm btn-primary">
                                     <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
@@ -1354,11 +1380,36 @@ if ($ferramentaCij !== '' && isset($ferramentasDisponiveis[$ferramentaCij])) {
                                 <a href="?mod=cij&ferramenta=documentos" class="btn btn-sm btn-primary">
                                     <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
                                 </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'Pesquisa Jurídica'): ?>
+                                <a href="?mod=cij&ferramenta=pesquisa" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'Biblioteca Inteligente'): ?>
+                                <a href="?mod=cij&ferramenta=biblioteca" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'IA Financeira'): ?>
+                                <a href="?mod=cij&ferramenta=financeiro" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'Estratégia Jurídica Inteligente'): ?>
+                                <a href="?mod=cij&ferramenta=estrategia" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'IA Administrativa'): ?>
+                                <a href="?mod=cij&ferramenta=administrativa" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
+                            <?php elseif (($item['titulo'] ?? '') === 'Academia ROJEX.AI'): ?>
+                                <a href="?mod=cij&ferramenta=academia" class="btn btn-sm btn-primary">
+                                    <i class="bi bi-box-arrow-up-right me-1"></i>Abrir ferramenta
+                                </a>
                             <?php else: ?>
                                 <button type="button" class="btn btn-sm btn-outline-primary" disabled>
                                     Em preparação
                                 </button>
                             <?php endif; ?>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1367,19 +1418,6 @@ if ($ferramentaCij !== '' && isset($ferramentasDisponiveis[$ferramentaCij])) {
         <?php endforeach; ?>
     </div>
 
-    <div class="card border-0 shadow-sm mt-4">
-        <div class="card-header bg-dark text-white">
-            <i class="bi bi-shield-check me-2"></i>Próximas etapas do CIJ
-        </div>
-        <div class="card-body">
-            <div class="row g-3">
-                <div class="col-md-3"><div class="border rounded p-3 h-100"><strong>1. Interface</strong><br><small class="text-muted">Estrutura visual do CIJ.</small></div></div>
-                <div class="col-md-3"><div class="border rounded p-3 h-100"><strong>2. Consultas internas</strong><br><small class="text-muted">Integração com clientes, processos e financeiro.</small></div></div>
-                <div class="col-md-3"><div class="border rounded p-3 h-100"><strong>3. Upload/análise</strong><br><small class="text-muted">Contratos, provas e documentos.</small></div></div>
-                <div class="col-md-3"><div class="border rounded p-3 h-100"><strong>4. IA externa</strong><br><small class="text-muted">Preparação futura para API de IA.</small></div></div>
-            </div>
-        </div>
-    </div>
 </div>
 
 <?php

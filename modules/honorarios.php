@@ -829,6 +829,7 @@ if ($acao === 'editar' && !empty($hon_editar['id'])) {
 
 <script>
 const processosPorClienteHon = <?= json_encode($processosPorCliente, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+const csrfHonorarios = <?= json_encode($csrfHonorarios, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
 
 function normalizarHon(valor) {
     return (valor || '').toString().trim().toUpperCase();
@@ -1012,13 +1013,21 @@ document.addEventListener('DOMContentLoaded', function () {
             const params = new URLSearchParams();
             params.append('parcela_id', parcelaId);
             params.append('valor_pago', valorPago);
+            params.append('csrf_token', csrfHonorarios);
 
             fetch('modules/ajax_salvar_parcela.php', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: params.toString()
             })
-            .then(r => r.json())
+            .then(async response => {
+                const data = await response.json();
+                if (!response.ok && data.ok !== false) {
+                    data.ok = false;
+                    data.erro = data.erro || 'Não foi possível salvar a parcela.';
+                }
+                return data;
+            })
             .then(data => {
                 btn.disabled = false;
                 btn.innerHTML = textoOriginal;

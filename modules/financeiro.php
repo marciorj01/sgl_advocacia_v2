@@ -967,18 +967,37 @@ if ($acao === 'caixa') {
     $totalSaidasOperacionais = 0.0;
     $entradasCaixa = 0.0;
     $entradasBancos = 0.0;
+    $entradasSemDestino = 0.0;
     $saidasCaixa = 0.0;
     $saidasBancos = 0.0;
+    $saidasSemOrigem = 0.0;
 
     foreach ($entradas as $r) {
         $valor = (float)($r['valor_pago'] ?: $r['valor']);
         $totalEntradasOperacionais += $valor;
-        if ($isCaixa($r['banco_nome'] ?? '', $r['banco_tipo'] ?? '')) $entradasCaixa += $valor; else $entradasBancos += $valor;
+
+        $temDestinoFinanceiro = trim((string)($r['banco_nome'] ?? '')) !== '';
+        if (!$temDestinoFinanceiro) {
+            $entradasSemDestino += $valor;
+        } elseif ($isCaixa($r['banco_nome'] ?? '', $r['banco_tipo'] ?? '')) {
+            $entradasCaixa += $valor;
+        } else {
+            $entradasBancos += $valor;
+        }
     }
+
     foreach ($saidas as $r) {
         $valor = (float)($r['valor_pago'] ?: $r['valor']);
         $totalSaidasOperacionais += $valor;
-        if ($isCaixa($r['banco_nome'] ?? '', $r['banco_tipo'] ?? '')) $saidasCaixa += $valor; else $saidasBancos += $valor;
+
+        $temOrigemFinanceira = trim((string)($r['banco_nome'] ?? '')) !== '';
+        if (!$temOrigemFinanceira) {
+            $saidasSemOrigem += $valor;
+        } elseif ($isCaixa($r['banco_nome'] ?? '', $r['banco_tipo'] ?? '')) {
+            $saidasCaixa += $valor;
+        } else {
+            $saidasBancos += $valor;
+        }
     }
 
     $transfEntradaCaixa = 0.0;
@@ -1004,7 +1023,8 @@ if ($acao === 'caixa') {
     $resultadoOperacional = $totalEntradasOperacionais - $totalSaidasOperacionais;
     $saldoPeriodoCaixa = $entradasCaixa - $saidasCaixa + $transfEntradaCaixa - $transfSaidaCaixa;
     $saldoPeriodoBancos = $entradasBancos - $saidasBancos + $transfEntradaBancos - $transfSaidaBancos;
-    $saldoPeriodoGeral = $saldoPeriodoCaixa + $saldoPeriodoBancos;
+    $saldoPeriodoSemDestino = $entradasSemDestino - $saidasSemOrigem;
+    $saldoPeriodoGeral = $saldoPeriodoCaixa + $saldoPeriodoBancos + $saldoPeriodoSemDestino;
     ?>
     <div class="container-fluid caixa-relatorio">
         <style>
@@ -1060,8 +1080,16 @@ if ($acao === 'caixa') {
         </div>
 
         <div class="alert alert-light border small mb-3">
-            <strong>Critério contábil:</strong> transferências internas mudam onde o dinheiro está, mas não representam receita ou despesa. Por isso, o <strong>resultado operacional</strong> considera apenas entradas reais menos despesas reais. O saldo do caixa e o saldo dos bancos consideram também as transferências.
+            <strong>Critério contábil:</strong> transferências internas mudam onde o dinheiro está, mas não representam receita ou despesa. Por isso, o <strong>resultado operacional</strong> considera apenas entradas reais menos despesas reais. Caixa e bancos recebem somente movimentos com origem/destino financeiro definido.
         </div>
+
+        <?php if (abs($saldoPeriodoSemDestino) > 0.009): ?>
+        <div class="alert alert-warning border small mb-3">
+            <strong>Movimentos sem destino financeiro:</strong>
+            <?= fmtBrlFin($saldoPeriodoSemDestino) ?>.
+            Esses valores compõem o resultado geral, mas não são classificados como Caixa ou Banco até que uma conta financeira seja vinculada.
+        </div>
+        <?php endif; ?>
 
         <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-success text-white fw-bold">Entradas operacionais</div><div class="table-responsive"><table class="table table-sm table-relatorio align-middle mb-0"><thead><tr><th>Data</th><th>Descrição</th><th>Cliente</th><th>Forma</th><th>Destino financeiro</th><th class="text-end">Valor</th></tr></thead><tbody>
         <?php if(empty($entradas)): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma entrada operacional no período.</td></tr><?php endif; ?>
@@ -1079,7 +1107,7 @@ if ($acao === 'caixa') {
         </tbody></table></div></div>
 
         <div class="row g-3 mb-3">
-            <div class="col-md-4"><div class="kpi-card p-3"><div class="small-title">Saldo do período geral</div><div class="big-number <?= $saldoPeriodoGeral>=0?'text-primary':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoGeral) ?></div><small class="text-muted">Caixa + bancos no período</small></div></div>
+            <div class="col-md-4"><div class="kpi-card p-3"><div class="small-title">Saldo do período geral</div><div class="big-number <?= $saldoPeriodoGeral>=0?'text-primary':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoGeral) ?></div><small class="text-muted">Caixa + bancos + movimentos sem destino</small></div></div>
             <div class="col-md-4"><div class="kpi-card p-3"><div class="small-title">Caixa físico</div><div class="big-number <?= $saldoPeriodoCaixa>=0?'text-success':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoCaixa) ?></div><small class="text-muted">Entradas/saídas que afetaram o caixa</small></div></div>
             <div class="col-md-4"><div class="kpi-card p-3"><div class="small-title">Bancos</div><div class="big-number <?= $saldoPeriodoBancos>=0?'text-success':'text-danger' ?>"><?= fmtBrlFin($saldoPeriodoBancos) ?></div><small class="text-muted">Entradas/saídas que afetaram bancos</small></div></div>
         </div>

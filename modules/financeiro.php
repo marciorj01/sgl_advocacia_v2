@@ -197,6 +197,22 @@ function fmtBrlFin($v): string
     return 'R$ ' . number_format((float)$v, 2, ',', '.');
 }
 
+
+function financeiroFormasRecebimento(): array
+{
+    return [
+        'Boleto',
+        'Pix',
+        'Cartão de débito',
+        'Cartão de crédito',
+        'Dinheiro',
+        'Transferência bancária',
+        'Depósito bancário',
+        'Cheque',
+        'Outro',
+    ];
+}
+
 function sqlText(mysqli $conn, string $valor): string
 {
     return "'" . $conn->real_escape_string(trim($valor)) . "'";
@@ -249,7 +265,7 @@ function financeiroSelectBanco(mysqli $conn, $selecionado = null): string
         $nome = htmlspecialchars($b['nome'] . ' - ' . ($b['tipo'] ?? ''), ENT_QUOTES, 'UTF-8');
         $html .= "<option value=\"{$id}\"{$sel}>{$nome}</option>";
     }
-    $html .= '</select><div class="form-text">Use para identificar em qual caixa/banco entrou ou saiu o dinheiro.</div>';
+    $html .= '</select><div class="form-text">Informe em qual Caixa ou Banco o dinheiro entrou ou saiu. Obrigatório para contas recebidas ou parciais.</div>';
     return $html;
 }
 
@@ -447,24 +463,88 @@ if (isset($_GET['receber_cr'])) {
     if (function_exists('validarTokenCsrf') && !validarTokenCsrf($_GET['csrf_token'] ?? null)) {
         $msg = '<div class="alert alert-danger">Token de segurança inválido. Atualize a página e tente novamente.</div>';
     } else {
-        $id = $conn->real_escape_string((string)$_GET['receber_cr']);
-        $res = $conn->query("SELECT valor, forma_recebimento FROM contas_receber WHERE id = '$id' LIMIT 1");
-        if ($res && $res->num_rows) {
-            $cr = $res->fetch_assoc();
-            $valor = (float)($cr['valor'] ?? 0);
-            $hojeSql = date('Y-m-d');
-            $conn->query("UPDATE contas_receber SET valor_pago = {$valor}, valor_pendente = 0, status = 'Recebido', data_recebimento = '{$hojeSql}' WHERE id = '$id'");
-            $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
-            if ($reciboId) {
-                $msg = '<div class="alert alert-success">✅ Recebimento confirmado e recibo gerado automaticamente.</div>';
-                if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Confirmou recebimento', 'contas_receber', $id, 'Recibo automático: ' . $reciboId); }
-            } else {
-                $msg = '<div class="alert alert-warning">Recebimento confirmado, mas o recibo automático não pôde ser gerado.</div>';
-            }
+        $id = trim((string)$_GET['receber_cr']);
+
+        $stmtConta = $conn->prepare(
+            "SELECT valor, forma_recebimento, banco_id
+             FROM contas_receber
+             WHERE id = ?
+               AND deletado = 0
+             LIMIT 1"
+        );
+
+        if ($stmtConta) {
+            $stmtConta->bind_param('s', $id);
+            $stmtConta->execute();
+            $res = $stmtConta->get_result();
+            $cr = $res ? $res->fetch_assoc() : null;
+            $stmtConta->close();
         } else {
+            $cr = null;
+        }
+
+        if (!$cr) {
             $msg = '<div class="alert alert-danger">Conta a receber não encontrada.</div>';
+        } elseif (trim((string)($cr['forma_recebimento'] ?? '')) === '' || (int)($cr['banco_id'] ?? 0) <= 0) {
+            $msg = '<div class="alert alert-warning">Antes de confirmar o recebimento, edite a conta e informe a forma de recebimento e o destino Caixa/Banco.</div>';
+        } else {
+            $valor = round((float)($cr['valor'] ?? 0), 2);
+            $hojeSql = date('Y-m-d');
+
+            $stmtAtualiza = $conn->prepare(
+                "UPDATE contas_receber
+                 SET valor_pago = ?,
+                     valor_pendente = 0,
+                     status = 'Recebido',
+                     data_recebimento = ?
+                 WHERE id = ?"
+            );
+
+            if ($stmtAtualiza) {
+                $stmtAtualiza->bind_param('dss', $valor, $hojeSql, $id);
+                $okAtualiza = $stmtAtualiza->execute();
+                $stmtAtualiza->close();
+            } else {
+                $okAtualiza = false;
+            }
+
+            if ($okAtualiza) {
+                $sync = function_exists('sgl_sincronizar_conta_receber_honorario')
+                    ? sgl_sincronizar_conta_receber_honorario($conn, $id)
+                    : ['ok' => true, 'resultado' => 'INDISPONIVEL'];
+
+                $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
+
+                if (($sync['ok'] ?? false) && $reciboId) {
+                    $msg = '<div class="alert alert-success">✅ Recebimento confirmado, Honorários sincronizados e recibo gerado automaticamente.</div>';
+                } elseif (!($sync['ok'] ?? false)) {
+                    $msg = '<div class="alert alert-warning">Recebimento confirmado, mas a sincronização com Honorários precisa ser conferida.</div>';
+                } else {
+                    $msg = '<div class="alert alert-warning">Recebimento confirmado, mas o recibo automático não pôde ser gerado.</div>';
+                }
+
+                if (function_exists('sgl_registrar_log')) {
+                    sgl_registrar_log(
+                        $conn,
+                        'Confirmou recebimento',
+                        'contas_receber',
+                        $id,
+                        'Recibo automático: ' . ($reciboId ?: 'não gerado'),
+                        [
+                            'tipo_acao' => 'EDICAO',
+                            'modulo' => 'Financeiro',
+                            'origem' => 'Ação rápida de recebimento',
+                            'resultado' => ($sync['ok'] ?? true) ? 'SUCESSO' : 'PARCIAL',
+                            'nivel' => ($sync['ok'] ?? true) ? 'INFO' : 'AVISO',
+                        ]
+                    );
+                }
+            } else {
+                $msg = '<div class="alert alert-danger">Não foi possível confirmar o recebimento.</div>';
+            }
         }
     }
+
     $aba = 'cr';
     $acao = 'listar';
 }
@@ -473,22 +553,77 @@ if (isset($_GET['gerar_recibo_cr'])) {
     if (function_exists('validarTokenCsrf') && !validarTokenCsrf($_GET['csrf_token'] ?? null)) {
         $msg = '<div class="alert alert-danger">Token de segurança inválido. Atualize a página e tente novamente.</div>';
     } else {
-        $id = $conn->real_escape_string((string)$_GET['gerar_recibo_cr']);
-        $res = $conn->query("SELECT valor, valor_pago, status, data_recebimento FROM contas_receber WHERE id = '$id' LIMIT 1");
-        if ($res && $res->num_rows) {
-            $cr = $res->fetch_assoc();
-            $valor = (float)($cr['valor_pago'] ?? 0);
-            if ($valor <= 0) $valor = (float)($cr['valor'] ?? 0);
-            $dataReceb = $cr['data_recebimento'] ?: date('Y-m-d');
-            $conn->query("UPDATE contas_receber SET valor_pago = " . sqlMoney($valor) . ", valor_pendente = 0, status = 'Recebido', data_recebimento = '" . $conn->real_escape_string($dataReceb) . "' WHERE id = '$id'");
-            $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
-            $msg = $reciboId
-                ? '<div class="alert alert-success">✅ Recibo gerado com sucesso para a conta a receber.</div>'
-                : '<div class="alert alert-warning">A conta foi marcada como recebida, mas o recibo não pôde ser gerado.</div>';
+        $id = trim((string)$_GET['gerar_recibo_cr']);
+
+        $stmtConta = $conn->prepare(
+            "SELECT valor, valor_pago, status, data_recebimento, forma_recebimento, banco_id
+             FROM contas_receber
+             WHERE id = ?
+               AND deletado = 0
+             LIMIT 1"
+        );
+
+        if ($stmtConta) {
+            $stmtConta->bind_param('s', $id);
+            $stmtConta->execute();
+            $res = $stmtConta->get_result();
+            $cr = $res ? $res->fetch_assoc() : null;
+            $stmtConta->close();
         } else {
+            $cr = null;
+        }
+
+        if (!$cr) {
             $msg = '<div class="alert alert-danger">Conta a receber não encontrada.</div>';
+        } elseif (trim((string)($cr['forma_recebimento'] ?? '')) === '' || (int)($cr['banco_id'] ?? 0) <= 0) {
+            $msg = '<div class="alert alert-warning">Antes de gerar o recibo, informe a forma de recebimento e o destino Caixa/Banco.</div>';
+        } else {
+            $valor = round((float)($cr['valor_pago'] ?? 0), 2);
+            if ($valor <= 0) {
+                $valor = round((float)($cr['valor'] ?? 0), 2);
+            }
+
+            $dataReceb = !empty($cr['data_recebimento'])
+                ? (string)$cr['data_recebimento']
+                : date('Y-m-d');
+
+            $stmtAtualiza = $conn->prepare(
+                "UPDATE contas_receber
+                 SET valor_pago = ?,
+                     valor_pendente = 0,
+                     status = 'Recebido',
+                     data_recebimento = ?
+                 WHERE id = ?"
+            );
+
+            if ($stmtAtualiza) {
+                $stmtAtualiza->bind_param('dss', $valor, $dataReceb, $id);
+                $okAtualiza = $stmtAtualiza->execute();
+                $stmtAtualiza->close();
+            } else {
+                $okAtualiza = false;
+            }
+
+            if ($okAtualiza) {
+                $sync = function_exists('sgl_sincronizar_conta_receber_honorario')
+                    ? sgl_sincronizar_conta_receber_honorario($conn, $id)
+                    : ['ok' => true];
+
+                $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
+
+                if (($sync['ok'] ?? false) && $reciboId) {
+                    $msg = '<div class="alert alert-success">✅ Recibo gerado e Honorários sincronizados.</div>';
+                } elseif (!($sync['ok'] ?? false)) {
+                    $msg = '<div class="alert alert-warning">A conta foi recebida, mas a sincronização com Honorários precisa ser conferida.</div>';
+                } else {
+                    $msg = '<div class="alert alert-warning">A conta foi marcada como recebida, mas o recibo não pôde ser gerado.</div>';
+                }
+            } else {
+                $msg = '<div class="alert alert-danger">Não foi possível atualizar a conta para gerar o recibo.</div>';
+            }
         }
     }
+
     $aba = 'cr';
     $acao = 'listar';
 }
@@ -787,92 +922,176 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_parcela_cp']))
    ====================================================== */
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
-    $id   = $_POST['id'] ?? '';
-    $novo = $id === '';
-    if ($novo) {
-        $id = gerarIdFin($conn, 'CR');
-    }
-
-    $descricao        = trim($_POST['descricao'] ?? '');
-    $valor             = brlParaFloatFin($_POST['valor'] ?? '0');
-    $data_vencimento   = trim($_POST['data_vencimento'] ?? '');
-    $data_recebimento  = trim($_POST['data_recebimento'] ?? '');
-    $status            = trim($_POST['status'] ?? 'Pendente');
-    $forma_recebimento = trim($_POST['forma_recebimento'] ?? '');
-    $observacoes       = trim($_POST['observacoes'] ?? '');
-    $banco_id          = (int)($_POST['banco_id'] ?? 0);
-    $banco_sql         = $banco_id > 0 ? (string)$banco_id : 'NULL';
-
-    $valor_pago = 0.00;
-    $valor_pendente = $valor;
-
-    if (in_array($status, ['Recebido','Pago','Quitada'], true)) {
-        $status = 'Recebido';
-        if ($data_recebimento === '') $data_recebimento = date('Y-m-d');
-        $valor_pago = $valor;
-        $valor_pendente = 0.00;
-    } elseif ($status === 'Parcial') {
-        // Nesta tela simples ainda não há campo de pagamento parcial.
-        // Mantemos o saldo total pendente até implantarmos parcelas de CR.
-        $valor_pago = 0.00;
-        $valor_pendente = $valor;
-    } elseif ($status === 'Cancelado') {
-        $valor_pago = 0.00;
-        $valor_pendente = 0.00;
-    }
-
-    if ($novo) {
-        $sql = "INSERT INTO contas_receber
-            (id, descricao, valor, valor_parcela, valor_pago, valor_pendente, data_vencimento, data_recebimento, forma_recebimento, status, observacoes, banco_id, deletado)
-            VALUES (
-                " . sqlText($conn, $id) . ",
-                " . sqlNullableText($conn, $descricao) . ",
-                " . sqlMoney($valor) . ",
-                " . sqlMoney($valor) . ",
-                " . sqlMoney($valor_pago) . ",
-                " . sqlMoney($valor_pendente) . ",
-                " . sqlNullableDate($conn, $data_vencimento) . ",
-                " . sqlNullableDate($conn, $data_recebimento) . ",
-                " . sqlNullableText($conn, $forma_recebimento) . ",
-                " . sqlText($conn, $status) . ",
-                " . sqlNullableText($conn, $observacoes) . ",
-                {$banco_sql},
-                0
-            )";
+    if (function_exists('validarTokenCsrf') && !validarTokenCsrf($_POST['csrf_token'] ?? null)) {
+        $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Atualize a página e tente novamente.</div>';
+        $acao = !empty($_POST['id']) ? 'editar_cr' : 'novo_cr';
+        $aba = 'cr';
     } else {
-        $sql = "UPDATE contas_receber SET
-                descricao          = " . sqlNullableText($conn, $descricao) . ",
-                valor              = " . sqlMoney($valor) . ",
-                valor_parcela      = " . sqlMoney($valor) . ",
-                valor_pago         = " . sqlMoney($valor_pago) . ",
-                valor_pendente     = " . sqlMoney($valor_pendente) . ",
-                data_vencimento    = " . sqlNullableDate($conn, $data_vencimento) . ",
-                data_recebimento   = " . sqlNullableDate($conn, $data_recebimento) . ",
-                forma_recebimento  = " . sqlNullableText($conn, $forma_recebimento) . ",
-                status             = " . sqlText($conn, $status) . ",
-                observacoes        = " . sqlNullableText($conn, $observacoes) . ",
-                banco_id           = {$banco_sql}
-            WHERE id = " . sqlText($conn, $id);
-    }
+        $id = trim((string)($_POST['id'] ?? ''));
+        $novo = $id === '';
 
-    if ($conn->query($sql)) {
-        if ($status === 'Recebido') {
-            $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
-            if ($reciboId) {
-                $msg = "<div class='alert alert-success'>✅ Conta a Receber <strong>{$id}</strong> salva, marcada como recebida e recibo gerado automaticamente.</div>";
-            } else {
-                $msg = "<div class='alert alert-warning'>Conta a Receber <strong>{$id}</strong> foi salva como recebida, mas o recibo automático não pôde ser gerado.</div>";
-            }
-        } else {
-            $msg = "<div class='alert alert-success'>✅ Conta a Receber <strong>{$id}</strong> salva.</div>";
+        if ($novo) {
+            $id = gerarIdFin($conn, 'CR');
         }
-        if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, $novo ? 'Cadastrou conta a receber' : 'Atualizou conta a receber', 'contas_receber', $id, $descricao); }
-        $acao = 'listar';
-        $aba  = 'cr';
-    } else {
-        $msg  = "<div class='alert alert-danger'>Erro ao salvar: " . htmlspecialchars($conn->error) . "</div>";
-        $acao = $novo ? 'novo_cr' : 'editar_cr';
-        $aba  = 'cr';
+
+        $descricao = trim((string)($_POST['descricao'] ?? ''));
+        $valor = round(brlParaFloatFin((string)($_POST['valor'] ?? '0')), 2);
+        $valorRecebidoInformado = round(brlParaFloatFin((string)($_POST['valor_recebido'] ?? '0')), 2);
+        $dataVencimento = trim((string)($_POST['data_vencimento'] ?? ''));
+        $dataRecebimento = trim((string)($_POST['data_recebimento'] ?? ''));
+        $status = trim((string)($_POST['status'] ?? 'Pendente'));
+        $formaRecebimento = trim((string)($_POST['forma_recebimento'] ?? ''));
+        $observacoes = trim((string)($_POST['observacoes'] ?? ''));
+        $bancoId = (int)($_POST['banco_id'] ?? 0);
+        $bancoSql = $bancoId > 0 ? (string)$bancoId : 'NULL';
+
+        $formasPermitidas = financeiroFormasRecebimento();
+
+        $valorPago = 0.00;
+        $valorPendente = $valor;
+
+        if ($status === 'Recebido') {
+            $valorPago = $valor;
+            $valorPendente = 0.00;
+            if ($dataRecebimento === '') {
+                $dataRecebimento = date('Y-m-d');
+            }
+        } elseif ($status === 'Parcial') {
+            $valorPago = $valorRecebidoInformado;
+            $valorPendente = round(max(0.0, $valor - $valorPago), 2);
+
+            if ($dataRecebimento === '' && $valorPago > 0) {
+                $dataRecebimento = date('Y-m-d');
+            }
+        } elseif ($status === 'Cancelado') {
+            $valorPago = 0.00;
+            $valorPendente = 0.00;
+            $dataRecebimento = '';
+        } else {
+            $status = 'Pendente';
+            $valorPago = 0.00;
+            $valorPendente = $valor;
+            $dataRecebimento = '';
+        }
+
+        $erroValidacao = '';
+
+        if ($descricao === '') {
+            $erroValidacao = 'Informe a descrição da conta a receber.';
+        } elseif ($valor <= 0) {
+            $erroValidacao = 'Informe um valor maior que zero.';
+        } elseif ($status === 'Parcial' && ($valorPago <= 0 || $valorPago >= $valor)) {
+            $erroValidacao = 'Para pagamento parcial, o valor recebido deve ser maior que zero e menor que o valor total.';
+        } elseif (in_array($status, ['Recebido', 'Parcial'], true) && $formaRecebimento === '') {
+            $erroValidacao = 'Informe a forma de recebimento.';
+        } elseif ($formaRecebimento !== '' && !in_array($formaRecebimento, $formasPermitidas, true)) {
+            $erroValidacao = 'Forma de recebimento inválida.';
+        } elseif (in_array($status, ['Recebido', 'Parcial'], true) && $bancoId <= 0) {
+            $erroValidacao = 'Selecione o Caixa ou Banco onde o valor entrou.';
+        }
+
+        if ($erroValidacao !== '') {
+            $msg = '<div class="alert alert-danger">' . htmlspecialchars($erroValidacao, ENT_QUOTES, 'UTF-8') . '</div>';
+            $acao = $novo ? 'novo_cr' : 'editar_cr';
+            $aba = 'cr';
+            $_GET['id'] = $novo ? null : $id;
+        } else {
+            if ($novo) {
+                $sql = "INSERT INTO contas_receber
+                    (id, descricao, valor, valor_parcela, valor_pago, valor_pendente,
+                     data_vencimento, data_recebimento, forma_recebimento, status,
+                     observacoes, banco_id, deletado)
+                    VALUES (
+                        " . sqlText($conn, $id) . ",
+                        " . sqlNullableText($conn, $descricao) . ",
+                        " . sqlMoney($valor) . ",
+                        " . sqlMoney($valor) . ",
+                        " . sqlMoney($valorPago) . ",
+                        " . sqlMoney($valorPendente) . ",
+                        " . sqlNullableDate($conn, $dataVencimento) . ",
+                        " . sqlNullableDate($conn, $dataRecebimento) . ",
+                        " . sqlNullableText($conn, $formaRecebimento) . ",
+                        " . sqlText($conn, $status) . ",
+                        " . sqlNullableText($conn, $observacoes) . ",
+                        {$bancoSql},
+                        0
+                    )";
+            } else {
+                $sql = "UPDATE contas_receber SET
+                        descricao = " . sqlNullableText($conn, $descricao) . ",
+                        valor = " . sqlMoney($valor) . ",
+                        valor_parcela = " . sqlMoney($valor) . ",
+                        valor_pago = " . sqlMoney($valorPago) . ",
+                        valor_pendente = " . sqlMoney($valorPendente) . ",
+                        data_vencimento = " . sqlNullableDate($conn, $dataVencimento) . ",
+                        data_recebimento = " . sqlNullableDate($conn, $dataRecebimento) . ",
+                        forma_recebimento = " . sqlNullableText($conn, $formaRecebimento) . ",
+                        status = " . sqlText($conn, $status) . ",
+                        observacoes = " . sqlNullableText($conn, $observacoes) . ",
+                        banco_id = {$bancoSql}
+                    WHERE id = " . sqlText($conn, $id);
+            }
+
+            if ($conn->query($sql)) {
+                $sync = function_exists('sgl_sincronizar_conta_receber_honorario')
+                    ? sgl_sincronizar_conta_receber_honorario($conn, $id)
+                    : [
+                        'ok' => true,
+                        'resultado' => 'INDISPONIVEL',
+                        'vinculado' => false,
+                    ];
+
+                $reciboId = null;
+                if ($status === 'Recebido') {
+                    $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $id);
+                }
+
+                if (!($sync['ok'] ?? false)) {
+                    $msg = "<div class='alert alert-warning'>Conta a Receber <strong>{$id}</strong> salva, mas a sincronização com Honorários precisa ser conferida.</div>";
+                } elseif ($status === 'Recebido' && $reciboId) {
+                    $msg = "<div class='alert alert-success'>✅ Conta a Receber <strong>{$id}</strong> salva, Honorários sincronizados e recibo gerado.</div>";
+                } elseif ($status === 'Recebido') {
+                    $msg = "<div class='alert alert-warning'>Conta a Receber <strong>{$id}</strong> salva como recebida, mas o recibo não pôde ser gerado.</div>";
+                } elseif ($status === 'Parcial') {
+                    $msg = "<div class='alert alert-success'>✅ Pagamento parcial de <strong>" . fmtBrlFin($valorPago) . "</strong> registrado na conta <strong>{$id}</strong> e sincronizado.</div>";
+                } else {
+                    $msg = "<div class='alert alert-success'>✅ Conta a Receber <strong>{$id}</strong> salva.</div>";
+                }
+
+                if (function_exists('sgl_registrar_log')) {
+                    sgl_registrar_log(
+                        $conn,
+                        $novo ? 'Cadastrou conta a receber' : 'Atualizou conta a receber',
+                        'contas_receber',
+                        $id,
+                        $descricao,
+                        [
+                            'tipo_acao' => $novo ? 'INCLUSAO' : 'EDICAO',
+                            'modulo' => 'Financeiro',
+                            'origem' => 'Formulário de Contas a Receber',
+                            'resultado' => ($sync['ok'] ?? true) ? 'SUCESSO' : 'PARCIAL',
+                            'nivel' => ($sync['ok'] ?? true) ? 'INFO' : 'AVISO',
+                            'dados_novos' => [
+                                'valor' => $valor,
+                                'valor_pago' => $valorPago,
+                                'valor_pendente' => $valorPendente,
+                                'status' => $status,
+                                'forma_recebimento' => $formaRecebimento,
+                                'banco_id' => $bancoId > 0 ? $bancoId : null,
+                                'sincronizacao_honorarios' => $sync,
+                            ],
+                        ]
+                    );
+                }
+
+                $acao = 'listar';
+                $aba = 'cr';
+            } else {
+                $msg = "<div class='alert alert-danger'>Não foi possível salvar a Conta a Receber.</div>";
+                $acao = $novo ? 'novo_cr' : 'editar_cr';
+                $aba = 'cr';
+            }
+        }
     }
 }
 
@@ -1647,6 +1866,8 @@ if ($acao === 'bancos') {
                     'id'               => '',
                     'descricao'        => '',
                     'valor'            => 0,
+                    'valor_pago'       => 0,
+                    'valor_pendente'   => 0,
                     'data_vencimento'  => '',
                     'data_recebimento' => '',
                     'status'           => 'Pendente',
@@ -1671,6 +1892,7 @@ if ($acao === 'bancos') {
                     <div class="card-body">
                         <form method="POST" class="row g-3">
                             <input type="hidden" name="salvar_cr" value="1">
+                            <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrf_token_fin, ENT_QUOTES, 'UTF-8') ?>">
                             <input type="hidden" name="id" value="<?= htmlspecialchars($conta_cr['id']) ?>">
 
                             <div class="col-md-6">
@@ -1684,6 +1906,14 @@ if ($acao === 'bancos') {
                                 <input type="text" name="valor" class="form-control"
                                        value="<?= fmtBrlFin($conta_cr['valor'] ?? 0) ?>"
                                        oninput="aplicarMascaraMoedaFin(this);">
+                            </div>
+
+                            <div class="col-md-3">
+                                <label class="form-label">Valor Recebido</label>
+                                <input type="text" name="valor_recebido" class="form-control text-success fw-bold"
+                                       value="<?= fmtBrlFin($conta_cr['valor_pago'] ?? 0) ?>"
+                                       oninput="aplicarMascaraMoedaFin(this);">
+                                <div class="form-text">Use este campo quando o status for Parcial.</div>
                             </div>
 
                             <div class="col-md-3">
@@ -1710,9 +1940,20 @@ if ($acao === 'bancos') {
                             <div class="col-md-4">
                                 <label class="form-label">Forma de Recebimento</label>
                                 <select name="forma_recebimento" class="form-select">
-                                    <?php foreach (['','PIX','Dinheiro','Cartão','Transferência','Boleto','Cheque','Outro'] as $forma): ?>
-                                        <option value="<?= htmlspecialchars($forma) ?>" <?= ($conta_cr['forma_recebimento'] ?? '') === $forma ? 'selected' : '' ?>>
-                                            <?= $forma === '' ? 'Selecione' : htmlspecialchars($forma) ?>
+                                    <option value="">-- Selecione --</option>
+                                    <?php
+                                    $formaRecebimentoAtual = trim((string)($conta_cr['forma_recebimento'] ?? ''));
+                                    $formasRecebimento = financeiroFormasRecebimento();
+                                    ?>
+                                    <?php if ($formaRecebimentoAtual !== '' && !in_array($formaRecebimentoAtual, $formasRecebimento, true)): ?>
+                                        <option value="<?= htmlspecialchars($formaRecebimentoAtual, ENT_QUOTES, 'UTF-8') ?>" selected>
+                                            <?= htmlspecialchars($formaRecebimentoAtual, ENT_QUOTES, 'UTF-8') ?> (valor anterior)
+                                        </option>
+                                    <?php endif; ?>
+                                    <?php foreach ($formasRecebimento as $forma): ?>
+                                        <option value="<?= htmlspecialchars($forma, ENT_QUOTES, 'UTF-8') ?>"
+                                            <?= $formaRecebimentoAtual === $forma ? 'selected' : '' ?>>
+                                            <?= htmlspecialchars($forma, ENT_QUOTES, 'UTF-8') ?>
                                         </option>
                                     <?php endforeach; ?>
                                 </select>

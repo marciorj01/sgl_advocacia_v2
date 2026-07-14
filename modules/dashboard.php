@@ -89,7 +89,10 @@ function dashboardSaldoBanco(mysqli $conn, int $bancoId): float
         FROM contas_receber
         WHERE deletado=0
           AND banco_id={$bancoId}
-          AND status IN ('Recebido','Pago','Quitada')
+          AND (
+              status IN ('Recebido','Pago','Quitada')
+              OR (status = 'Parcial' AND valor_pago > 0)
+          )
     ");
 
     $saldo -= totalScalar($conn, "
@@ -167,14 +170,20 @@ $recebidoContasMes = totalScalar($conn, "
     SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END), 0) AS total
     FROM contas_receber
     WHERE deletado = 0
-      AND status IN ('Recebido','Pago','Quitada')
+      AND (
+          status IN ('Recebido','Pago','Quitada')
+          OR (status = 'Parcial' AND valor_pago > 0)
+      )
       AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
 ");
 
 $recebidoHonorariosSemContaMes = totalScalar($conn, "
     SELECT COALESCE(SUM(hp.valor_pago), 0) AS total
     FROM honorarios_parcelas hp
-    WHERE hp.status_pagamento IN ('Pago','Quitada','Recebido')
+    WHERE (
+          hp.status_pagamento IN ('Pago','Quitada','Recebido')
+          OR (hp.status_pagamento = 'Parcial' AND hp.valor_pago > 0)
+      )
       AND COALESCE(hp.data_pagamento, hp.data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
       AND NOT EXISTS (
           SELECT 1 FROM contas_receber cr
@@ -228,7 +237,10 @@ $entradasCaixaRecebimentosHoje = totalScalar($conn, "
     FROM contas_receber cr
     LEFT JOIN bancos_caixa b ON b.id = cr.banco_id
     WHERE cr.deletado = 0
-      AND cr.status IN ('Recebido','Pago','Quitada')
+      AND (
+          cr.status IN ('Recebido','Pago','Quitada')
+          OR (cr.status = 'Parcial' AND cr.valor_pago > 0)
+      )
       AND COALESCE(cr.data_recebimento, DATE(cr.atualizado_em), cr.data_vencimento) = '{$hoje}'
       AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
 ");
@@ -261,7 +273,10 @@ $entradasCaixaRecebimentosMes = totalScalar($conn, "
     FROM contas_receber cr
     LEFT JOIN bancos_caixa b ON b.id = cr.banco_id
     WHERE cr.deletado = 0
-      AND cr.status IN ('Recebido','Pago','Quitada')
+      AND (
+          cr.status IN ('Recebido','Pago','Quitada')
+          OR (cr.status = 'Parcial' AND cr.valor_pago > 0)
+      )
       AND COALESCE(cr.data_recebimento, DATE(cr.atualizado_em), cr.data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
       AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
 ");
@@ -347,7 +362,10 @@ $recebimentosSemana = totalScalar($conn, "
     SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END), 0) AS total
     FROM contas_receber
     WHERE deletado = 0
-      AND status IN ('Recebido','Pago','Quitada')
+      AND (
+          status IN ('Recebido','Pago','Quitada')
+          OR (status = 'Parcial' AND valor_pago > 0)
+      )
       AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) BETWEEN '{$inicioSemana}' AND '{$fimSemana}'
 ");
 

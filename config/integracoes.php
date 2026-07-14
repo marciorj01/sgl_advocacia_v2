@@ -1,6 +1,6 @@
 <?php
 /**
- * Integrações internas do SGL Advocacia.
+ * Integrações internas do ROJEX.AI ERP Jurídico Enterprise.
  *
  * Objetivo: manter os módulos conversando entre si sem reescrever a arquitetura atual.
  * Fluxo inicial implementado:
@@ -9,57 +9,104 @@
 
 
 
+
+/**
+ * Cache interno por requisição/conexão.
+ *
+ * Evita repetir SHOW COLUMNS, CREATE TABLE IF NOT EXISTS e outras garantias
+ * estruturais dentro da mesma execução PHP.
+ */
+if (!function_exists('sgl_int_cache_key')) {
+    function sgl_int_cache_key(mysqli $conn, string $sufixo): string
+    {
+        return spl_object_id($conn) . ':' . $sufixo;
+    }
+}
+
+if (!function_exists('sgl_int_log_erro')) {
+    function sgl_int_log_erro(string $contexto, Throwable|string $erro): void
+    {
+        $mensagem = $erro instanceof Throwable ? $erro->getMessage() : $erro;
+        error_log('[ROJEX INTEGRAÇÕES][' . $contexto . '] ' . $mensagem);
+    }
+}
+
+if (!function_exists('sgl_int_eh_colisao_chave')) {
+    function sgl_int_eh_colisao_chave(mysqli_sql_exception|Throwable $e): bool
+    {
+        $codigo = (int)$e->getCode();
+        $mensagem = mb_strtolower($e->getMessage(), 'UTF-8');
+
+        return $codigo === 1062
+            || str_contains($mensagem, 'duplicate entry')
+            || str_contains($mensagem, 'duplicada')
+            || str_contains($mensagem, 'unique constraint');
+    }
+}
+
 if (!function_exists('sgl_garantir_logs')) {
     function sgl_garantir_logs(mysqli $conn): void
     {
-        $conn->query("CREATE TABLE IF NOT EXISTS logs_sistema (
-            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-            usuario_id INT NULL,
-            usuario_nome VARCHAR(150) NULL,
-            usuario_login VARCHAR(80) NULL,
-            usuario_perfil VARCHAR(80) NULL,
-            acao VARCHAR(120) NOT NULL,
-            tipo_acao VARCHAR(50) NULL,
-            modulo VARCHAR(100) NULL,
-            tabela VARCHAR(80) NULL,
-            registro_id VARCHAR(80) NULL,
-            detalhes TEXT NULL,
-            dados_anteriores LONGTEXT NULL,
-            dados_novos LONGTEXT NULL,
-            origem VARCHAR(80) NULL,
-            resultado VARCHAR(30) NOT NULL DEFAULT 'SUCESSO',
-            nivel VARCHAR(20) NOT NULL DEFAULT 'INFO',
-            ip VARCHAR(45) NULL,
-            sessao_id VARCHAR(128) NULL,
-            user_agent VARCHAR(255) NULL,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            INDEX idx_logs_usuario (usuario_id),
-            INDEX idx_logs_acao (acao),
-            INDEX idx_logs_tipo_acao (tipo_acao),
-            INDEX idx_logs_modulo (modulo),
-            INDEX idx_logs_tabela (tabela),
-            INDEX idx_logs_registro (registro_id),
-            INDEX idx_logs_resultado (resultado),
-            INDEX idx_logs_data (criado_em)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        static $garantido = [];
+        $cacheKey = sgl_int_cache_key($conn, 'logs');
 
-        if (!function_exists('sgl_int_add_coluna')) {
+        if (!empty($garantido[$cacheKey])) {
             return;
         }
 
-        // Evolução segura para bancos já existentes. Nenhuma coluna é recriada.
-        sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_nome', "usuario_nome VARCHAR(150) NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_login', "usuario_login VARCHAR(80) NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_perfil', "usuario_perfil VARCHAR(80) NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'tipo_acao', "tipo_acao VARCHAR(50) NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'modulo', "modulo VARCHAR(100) NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'dados_anteriores', "dados_anteriores LONGTEXT NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'dados_novos', "dados_novos LONGTEXT NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'origem', "origem VARCHAR(80) NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'resultado', "resultado VARCHAR(30) NOT NULL DEFAULT 'SUCESSO'");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'nivel', "nivel VARCHAR(20) NOT NULL DEFAULT 'INFO'");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'sessao_id', "sessao_id VARCHAR(128) NULL");
-        sgl_int_add_coluna($conn, 'logs_sistema', 'user_agent', "user_agent VARCHAR(255) NULL");
+        try {
+            if (!$conn->query("CREATE TABLE IF NOT EXISTS logs_sistema (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                usuario_id INT NULL,
+                usuario_nome VARCHAR(150) NULL,
+                usuario_login VARCHAR(80) NULL,
+                usuario_perfil VARCHAR(80) NULL,
+                acao VARCHAR(120) NOT NULL,
+                tipo_acao VARCHAR(50) NULL,
+                modulo VARCHAR(100) NULL,
+                tabela VARCHAR(80) NULL,
+                registro_id VARCHAR(80) NULL,
+                detalhes TEXT NULL,
+                dados_anteriores LONGTEXT NULL,
+                dados_novos LONGTEXT NULL,
+                origem VARCHAR(80) NULL,
+                resultado VARCHAR(30) NOT NULL DEFAULT 'SUCESSO',
+                nivel VARCHAR(20) NOT NULL DEFAULT 'INFO',
+                ip VARCHAR(45) NULL,
+                sessao_id VARCHAR(128) NULL,
+                user_agent VARCHAR(255) NULL,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_logs_usuario (usuario_id),
+                INDEX idx_logs_acao (acao),
+                INDEX idx_logs_tipo_acao (tipo_acao),
+                INDEX idx_logs_modulo (modulo),
+                INDEX idx_logs_tabela (tabela),
+                INDEX idx_logs_registro (registro_id),
+                INDEX idx_logs_resultado (resultado),
+                INDEX idx_logs_data (criado_em)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")) {
+                throw new RuntimeException($conn->error ?: 'Falha ao garantir a tabela de logs.');
+            }
+
+            if (function_exists('sgl_int_add_coluna')) {
+                sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_nome', "usuario_nome VARCHAR(150) NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_login', "usuario_login VARCHAR(80) NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_perfil', "usuario_perfil VARCHAR(80) NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'tipo_acao', "tipo_acao VARCHAR(50) NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'modulo', "modulo VARCHAR(100) NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'dados_anteriores', "dados_anteriores LONGTEXT NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'dados_novos', "dados_novos LONGTEXT NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'origem', "origem VARCHAR(80) NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'resultado', "resultado VARCHAR(30) NOT NULL DEFAULT 'SUCESSO'");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'nivel', "nivel VARCHAR(20) NOT NULL DEFAULT 'INFO'");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'sessao_id', "sessao_id VARCHAR(128) NULL");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'user_agent', "user_agent VARCHAR(255) NULL");
+            }
+
+            $garantido[$cacheKey] = true;
+        } catch (Throwable $e) {
+            sgl_int_log_erro('GARANTIR_LOGS', $e);
+        }
     }
 }
 
@@ -231,18 +278,66 @@ if (!function_exists('sgl_completar_logs_sem_responsavel')) {
 if (!function_exists('sgl_int_coluna_existe')) {
     function sgl_int_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool
     {
-        $tabela = $conn->real_escape_string($tabela);
-        $coluna = $conn->real_escape_string($coluna);
-        $res = $conn->query("SHOW COLUMNS FROM `{$tabela}` LIKE '{$coluna}'");
-        return $res && $res->num_rows > 0;
+        static $cache = [];
+
+        $tabela = trim($tabela);
+        $coluna = trim($coluna);
+        $cacheKey = sgl_int_cache_key($conn, 'coluna:' . mb_strtolower($tabela . '.' . $coluna, 'UTF-8'));
+
+        if (array_key_exists($cacheKey, $cache)) {
+            return $cache[$cacheKey];
+        }
+
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $tabela) || !preg_match('/^[A-Za-z0-9_ ]+$/', $coluna)) {
+            $cache[$cacheKey] = false;
+            return false;
+        }
+
+        try {
+            $tabelaSql = str_replace('`', '``', $tabela);
+            $stmt = $conn->prepare("SHOW COLUMNS FROM `{$tabelaSql}` LIKE ?");
+            if (!$stmt) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar consulta de coluna.');
+            }
+
+            $stmt->bind_param('s', $coluna);
+
+            if (!$stmt->execute()) {
+                throw new RuntimeException($stmt->error ?: 'Falha ao consultar coluna.');
+            }
+
+            $res = $stmt->get_result();
+            $cache[$cacheKey] = $res && $res->num_rows > 0;
+            $stmt->close();
+
+            return $cache[$cacheKey];
+        } catch (Throwable $e) {
+            sgl_int_log_erro('COLUNA_EXISTE', $e);
+            $cache[$cacheKey] = false;
+            return false;
+        }
     }
 }
 
 if (!function_exists('sgl_int_add_coluna')) {
     function sgl_int_add_coluna(mysqli $conn, string $tabela, string $coluna, string $definicao): void
     {
-        if (!sgl_int_coluna_existe($conn, $tabela, $coluna)) {
-            @$conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}");
+        if (sgl_int_coluna_existe($conn, $tabela, $coluna)) {
+            return;
+        }
+
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $tabela)) {
+            sgl_int_log_erro('ADD_COLUNA', 'Nome de tabela inválido: ' . $tabela);
+            return;
+        }
+
+        try {
+            $tabelaSql = str_replace('`', '``', $tabela);
+            if (!$conn->query("ALTER TABLE `{$tabelaSql}` ADD COLUMN {$definicao}")) {
+                throw new RuntimeException($conn->error ?: 'Falha ao adicionar coluna.');
+            }
+        } catch (Throwable $e) {
+            sgl_int_log_erro('ADD_COLUNA', $e);
         }
     }
 }
@@ -250,6 +345,13 @@ if (!function_exists('sgl_int_add_coluna')) {
 if (!function_exists('sgl_integracao_garantir_financeiro')) {
     function sgl_integracao_garantir_financeiro(mysqli $conn): void
     {
+        static $garantido = [];
+        $cacheKey = sgl_int_cache_key($conn, 'financeiro');
+
+        if (!empty($garantido[$cacheKey])) {
+            return;
+        }
+
         sgl_int_add_coluna($conn, 'contas_receber', 'honorario_id', "honorario_id VARCHAR(20) NULL");
         sgl_int_add_coluna($conn, 'contas_receber', 'parcela_id', "parcela_id VARCHAR(20) NULL");
         sgl_int_add_coluna($conn, 'contas_receber', 'origem', "origem VARCHAR(50) NULL");
@@ -260,41 +362,57 @@ if (!function_exists('sgl_integracao_garantir_financeiro')) {
         sgl_int_add_coluna($conn, 'contas_receber', 'criado_em', "criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
         sgl_int_add_coluna($conn, 'contas_receber', 'atualizado_em', "atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP");
         sgl_int_add_coluna($conn, 'contas_receber', 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0");
+
+        $garantido[$cacheKey] = true;
     }
 }
 
 if (!function_exists('sgl_integracao_garantir_recibos')) {
     function sgl_integracao_garantir_recibos(mysqli $conn): void
     {
-        $conn->query("CREATE TABLE IF NOT EXISTS recibos (
-            id VARCHAR(20) PRIMARY KEY,
-            numero VARCHAR(30) NOT NULL UNIQUE,
-            cliente_id VARCHAR(10) NULL,
-            nome_cliente VARCHAR(150) NOT NULL,
-            cpf_cnpj VARCHAR(25) NULL,
-            processo_numero VARCHAR(80) NULL,
-            honorario_id VARCHAR(20) NULL,
-            parcela_id VARCHAR(20) NULL,
-            conta_receber_id VARCHAR(20) NULL,
-            data_emissao DATE NOT NULL,
-            data_pagamento DATE NULL,
-            referente VARCHAR(255) NOT NULL,
-            forma_pagamento VARCHAR(80) NULL,
-            valor DECIMAL(12,2) NOT NULL DEFAULT 0,
-            observacoes TEXT NULL,
-            status ENUM('Emitido','Cancelado') NOT NULL DEFAULT 'Emitido',
-            chave_validacao VARCHAR(80) NULL,
-            deletado TINYINT(1) NOT NULL DEFAULT 0,
-            criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_rec_numero (numero),
-            INDEX idx_rec_cliente (cliente_id),
-            INDEX idx_rec_status (status),
-            INDEX idx_rec_deletado (deletado),
-            INDEX idx_rec_data (data_emissao)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        static $garantido = [];
+        $cacheKey = sgl_int_cache_key($conn, 'recibos');
 
-        sgl_int_add_coluna($conn, 'recibos', 'conta_receber_id', "conta_receber_id VARCHAR(20) NULL");
+        if (!empty($garantido[$cacheKey])) {
+            return;
+        }
+
+        try {
+            if (!$conn->query("CREATE TABLE IF NOT EXISTS recibos (
+                id VARCHAR(20) PRIMARY KEY,
+                numero VARCHAR(30) NOT NULL UNIQUE,
+                cliente_id VARCHAR(10) NULL,
+                nome_cliente VARCHAR(150) NOT NULL,
+                cpf_cnpj VARCHAR(25) NULL,
+                processo_numero VARCHAR(80) NULL,
+                honorario_id VARCHAR(20) NULL,
+                parcela_id VARCHAR(20) NULL,
+                conta_receber_id VARCHAR(20) NULL,
+                data_emissao DATE NOT NULL,
+                data_pagamento DATE NULL,
+                referente VARCHAR(255) NOT NULL,
+                forma_pagamento VARCHAR(80) NULL,
+                valor DECIMAL(12,2) NOT NULL DEFAULT 0,
+                observacoes TEXT NULL,
+                status ENUM('Emitido','Cancelado') NOT NULL DEFAULT 'Emitido',
+                chave_validacao VARCHAR(80) NULL,
+                deletado TINYINT(1) NOT NULL DEFAULT 0,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_rec_numero (numero),
+                INDEX idx_rec_cliente (cliente_id),
+                INDEX idx_rec_status (status),
+                INDEX idx_rec_deletado (deletado),
+                INDEX idx_rec_data (data_emissao)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")) {
+                throw new RuntimeException($conn->error ?: 'Falha ao garantir a tabela de recibos.');
+            }
+
+            sgl_int_add_coluna($conn, 'recibos', 'conta_receber_id', "conta_receber_id VARCHAR(20) NULL");
+            $garantido[$cacheKey] = true;
+        } catch (Throwable $e) {
+            sgl_int_log_erro('GARANTIR_RECIBOS', $e);
+        }
     }
 }
 
@@ -333,68 +451,714 @@ if (!function_exists('sgl_integracao_gerar_numero_recibo')) {
 }
 
 if (!function_exists('sgl_sincronizar_honorario_financeiro')) {
-    function sgl_sincronizar_honorario_financeiro(mysqli $conn, string $honorario_id): void
+    /**
+     * Sincroniza Honorários -> Contas a Receber -> Recibos.
+     *
+     * O retorno estruturado preserva compatibilidade: chamadas antigas podem
+     * continuar ignorando o resultado.
+     *
+     * @return array{
+     *   ok: bool,
+     *   resultado: string,
+     *   honorario_id: string,
+     *   parcelas_processadas: int,
+     *   contas_criadas: int,
+     *   contas_atualizadas: int,
+     *   contas_restauradas: int,
+     *   recibos_gerados: int,
+     *   falhas: array<int,string>
+     * }
+     */
+    function sgl_sincronizar_honorario_financeiro(mysqli $conn, string $honorario_id): array
     {
-        sgl_integracao_garantir_financeiro($conn);
-        $honorario_id_sql = $conn->real_escape_string($honorario_id);
+        $retorno = [
+            'ok' => false,
+            'resultado' => 'FALHA',
+            'honorario_id' => $honorario_id,
+            'parcelas_processadas' => 0,
+            'contas_criadas' => 0,
+            'contas_atualizadas' => 0,
+            'contas_restauradas' => 0,
+            'recibos_gerados' => 0,
+            'falhas' => [],
+        ];
 
-        $res = $conn->query("SELECT * FROM honorarios WHERE id = '{$honorario_id_sql}' LIMIT 1");
-        if (!$res || $res->num_rows === 0) return;
-        $h = $res->fetch_assoc();
+        try {
+            sgl_integracao_garantir_financeiro($conn);
 
-        $resParcelas = $conn->query("SELECT * FROM honorarios_parcelas WHERE honorario_id = '{$honorario_id_sql}' ORDER BY parcela_numero ASC");
-        if (!$resParcelas) return;
-
-        while ($p = $resParcelas->fetch_assoc()) {
-            $parcelaId = (string)$p['id'];
-            $parcelaIdSql = $conn->real_escape_string($parcelaId);
-
-            $valor = (float)($p['valor_parcela'] ?? 0);
-            $valorPago = (float)($p['valor_pago'] ?? 0);
-            $saldo = (float)($p['saldo_devedor'] ?? max(0, $valor - $valorPago));
-            $statusParcela = (string)($p['status_pagamento'] ?? 'Pendente');
-            $statusCR = 'Pendente';
-            if ($statusParcela === 'Pago') $statusCR = 'Recebido';
-            elseif ($statusParcela === 'Parcial') $statusCR = 'Parcial';
-
-            $dataRecebimento = null;
-            if ($statusCR === 'Recebido' && sgl_int_coluna_existe($conn, 'honorarios_parcelas', 'data_pagamento')) {
-                $dataRecebimento = $p['data_pagamento'] ?: date('Y-m-d');
-            } elseif ($statusCR === 'Recebido') {
-                $dataRecebimento = date('Y-m-d');
+            $stmtHonorario = $conn->prepare(
+                "SELECT id, cliente_id, nome_cliente, forma_pagamento, observacoes
+                 FROM honorarios
+                 WHERE id = ?
+                 LIMIT 1"
+            );
+            if (!$stmtHonorario) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar honorário.');
             }
 
-            $descricao = 'Honorários - ' . ($p['nome_cliente'] ?: ($h['nome_cliente'] ?? 'Cliente')) . ' - Parcela ' . (int)$p['parcela_numero'];
-            if (!empty($p['numero_processo'])) {
-                $descricao .= ' - Proc. ' . $p['numero_processo'];
+            $stmtHonorario->bind_param('s', $honorario_id);
+            if (!$stmtHonorario->execute()) {
+                throw new RuntimeException($stmtHonorario->error ?: 'Falha ao consultar honorário.');
             }
 
-            $ex = $conn->query("SELECT id FROM contas_receber WHERE honorario_id = '{$honorario_id_sql}' AND parcela_id = '{$parcelaIdSql}' LIMIT 1");
-            if ($ex && $ex->num_rows) {
-                $crId = $ex->fetch_assoc()['id'];
-                $stmt = $conn->prepare("UPDATE contas_receber SET cliente_id=?, descricao=?, valor=?, valor_parcela=?, valor_pago=?, valor_pendente=?, data_vencimento=?, data_recebimento=?, forma_recebimento=?, status=?, observacoes=?, origem='honorarios', deletado=0 WHERE id=?");
-                $obs = $p['observacoes'] ?? ($h['observacoes'] ?? '');
-                $clienteId = $p['cliente_id'] ?? ($h['cliente_id'] ?? null);
-                $forma = $p['forma_pagamento'] ?? ($h['forma_pagamento'] ?? '');
-                $dataVenc = $p['data_vencimento'] ?? null;
-                $stmt->bind_param('ssddddssssss', $clienteId, $descricao, $valor, $valor, $valorPago, $saldo, $dataVenc, $dataRecebimento, $forma, $statusCR, $obs, $crId);
-                @$stmt->execute();
-                @$stmt->close();
+            $resHonorario = $stmtHonorario->get_result();
+            $h = $resHonorario ? $resHonorario->fetch_assoc() : null;
+            $stmtHonorario->close();
+
+            if (!$h) {
+                $retorno['falhas'][] = 'Honorário não encontrado.';
+                return $retorno;
+            }
+
+            $temDataPagamento = sgl_int_coluna_existe($conn, 'honorarios_parcelas', 'data_pagamento');
+
+            $stmtParcelas = $conn->prepare(
+                "SELECT
+                    id, cliente_id, nome_cliente, numero_processo, parcela_numero,
+                    valor_parcela, valor_pago, saldo_devedor, status_pagamento,
+                    data_vencimento, forma_pagamento, observacoes"
+                    . ($temDataPagamento ? ", data_pagamento" : "") . "
+                 FROM honorarios_parcelas
+                 WHERE honorario_id = ?
+                 ORDER BY parcela_numero ASC"
+            );
+            if (!$stmtParcelas) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar parcelas.');
+            }
+
+            $stmtParcelas->bind_param('s', $honorario_id);
+            if (!$stmtParcelas->execute()) {
+                throw new RuntimeException($stmtParcelas->error ?: 'Falha ao consultar parcelas.');
+            }
+
+            $resParcelas = $stmtParcelas->get_result();
+
+            while ($p = $resParcelas->fetch_assoc()) {
+                $retorno['parcelas_processadas']++;
+
+                try {
+                    $parcelaId = (string)$p['id'];
+                    $valor = round((float)($p['valor_parcela'] ?? 0), 2);
+                    $valorPago = round((float)($p['valor_pago'] ?? 0), 2);
+                    $saldo = round((float)($p['saldo_devedor'] ?? max(0, $valor - $valorPago)), 2);
+                    $statusParcela = (string)($p['status_pagamento'] ?? 'Pendente');
+
+                    $statusCR = match ($statusParcela) {
+                        'Pago' => 'Recebido',
+                        'Parcial' => 'Parcial',
+                        default => 'Pendente',
+                    };
+
+                    $dataRecebimento = null;
+                    if ($statusCR === 'Recebido') {
+                        $dataRecebimento = $temDataPagamento && !empty($p['data_pagamento'])
+                            ? (string)$p['data_pagamento']
+                            : date('Y-m-d');
+                    }
+
+                    $nomeCliente = trim((string)($p['nome_cliente'] ?? ''))
+                        ?: trim((string)($h['nome_cliente'] ?? ''))
+                        ?: 'Cliente';
+
+                    $descricao = 'Honorários - ' . $nomeCliente . ' - Parcela ' . (int)$p['parcela_numero'];
+                    if (!empty($p['numero_processo'])) {
+                        $descricao .= ' - Proc. ' . $p['numero_processo'];
+                    }
+
+                    $obs = (string)($p['observacoes'] ?? ($h['observacoes'] ?? ''));
+                    $clienteId = $p['cliente_id'] ?? ($h['cliente_id'] ?? null);
+                    $forma = (string)($p['forma_pagamento'] ?? ($h['forma_pagamento'] ?? ''));
+                    $dataVenc = $p['data_vencimento'] ?? null;
+
+                    $stmtExiste = $conn->prepare(
+                        "SELECT id, deletado
+                         FROM contas_receber
+                         WHERE honorario_id = ?
+                           AND parcela_id = ?
+                         LIMIT 1"
+                    );
+                    if (!$stmtExiste) {
+                        throw new RuntimeException($conn->error ?: 'Falha ao preparar busca da conta.');
+                    }
+
+                    $stmtExiste->bind_param('ss', $honorario_id, $parcelaId);
+                    if (!$stmtExiste->execute()) {
+                        throw new RuntimeException($stmtExiste->error ?: 'Falha ao localizar conta vinculada.');
+                    }
+
+                    $resExiste = $stmtExiste->get_result();
+                    $existente = $resExiste ? $resExiste->fetch_assoc() : null;
+                    $stmtExiste->close();
+
+                    if ($existente) {
+                        $crId = (string)$existente['id'];
+                        $estavaDeletado = (int)($existente['deletado'] ?? 0) === 1;
+
+                        $stmt = $conn->prepare(
+                            "UPDATE contas_receber SET
+                                cliente_id = ?,
+                                descricao = ?,
+                                valor = ?,
+                                valor_parcela = ?,
+                                valor_pago = ?,
+                                valor_pendente = ?,
+                                data_vencimento = ?,
+                                data_recebimento = ?,
+                                forma_recebimento = ?,
+                                status = ?,
+                                observacoes = ?,
+                                origem = 'honorarios',
+                                deletado = 0
+                             WHERE id = ?"
+                        );
+                        if (!$stmt) {
+                            throw new RuntimeException($conn->error ?: 'Falha ao preparar atualização financeira.');
+                        }
+
+                        $stmt->bind_param(
+                            'ssddddssssss',
+                            $clienteId,
+                            $descricao,
+                            $valor,
+                            $valor,
+                            $valorPago,
+                            $saldo,
+                            $dataVenc,
+                            $dataRecebimento,
+                            $forma,
+                            $statusCR,
+                            $obs,
+                            $crId
+                        );
+
+                        if (!$stmt->execute()) {
+                            throw new RuntimeException($stmt->error ?: 'Falha ao atualizar conta a receber.');
+                        }
+
+                        $stmt->close();
+                        $retorno['contas_atualizadas']++;
+
+                        if ($estavaDeletado) {
+                            $retorno['contas_restauradas']++;
+                        }
+                    } else {
+                        $crId = '';
+                        $inserido = false;
+
+                        for ($tentativa = 1; $tentativa <= 3 && !$inserido; $tentativa++) {
+                            $crId = sgl_integracao_gerar_id_cr($conn);
+
+                            try {
+                                $stmt = $conn->prepare(
+                                    "INSERT INTO contas_receber (
+                                        id, cliente_id, descricao, valor, qtd_parcelas,
+                                        valor_parcela, valor_pago, valor_pendente,
+                                        data_vencimento, data_recebimento, forma_recebimento,
+                                        status, observacoes, deletado, honorario_id,
+                                        parcela_id, origem
+                                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'honorarios')"
+                                );
+                                if (!$stmt) {
+                                    throw new RuntimeException($conn->error ?: 'Falha ao preparar criação financeira.');
+                                }
+
+                                $stmt->bind_param(
+                                    'sssddddsssssss',
+                                    $crId,
+                                    $clienteId,
+                                    $descricao,
+                                    $valor,
+                                    $valor,
+                                    $valorPago,
+                                    $saldo,
+                                    $dataVenc,
+                                    $dataRecebimento,
+                                    $forma,
+                                    $statusCR,
+                                    $obs,
+                                    $honorario_id,
+                                    $parcelaId
+                                );
+
+                                if (!$stmt->execute()) {
+                                    $erro = new mysqli_sql_exception(
+                                        $stmt->error ?: 'Falha ao criar conta a receber.',
+                                        $stmt->errno
+                                    );
+                                    $stmt->close();
+                                    throw $erro;
+                                }
+
+                                $stmt->close();
+                                $inserido = true;
+                                $retorno['contas_criadas']++;
+                            } catch (Throwable $e) {
+                                if ($tentativa < 3 && sgl_int_eh_colisao_chave($e)) {
+                                    usleep(20000 * $tentativa);
+                                    continue;
+                                }
+                                throw $e;
+                            }
+                        }
+
+                        if (!$inserido) {
+                            throw new RuntimeException('Não foi possível gerar uma conta a receber única.');
+                        }
+                    }
+
+                    if ($statusCR === 'Recebido') {
+                        $reciboId = sgl_gerar_recibo_de_conta_receber($conn, $crId);
+                        if ($reciboId !== null) {
+                            $retorno['recibos_gerados']++;
+                        }
+                    }
+                } catch (Throwable $e) {
+                    $retorno['falhas'][] = 'Parcela ' . ((string)($p['id'] ?? '?')) . ': ' . $e->getMessage();
+                    sgl_int_log_erro('SINCRONIZAR_PARCELA', $e);
+                }
+            }
+
+            $stmtParcelas->close();
+
+            $retorno['ok'] = empty($retorno['falhas']);
+            $retorno['resultado'] = $retorno['ok'] ? 'SUCESSO' : 'PARCIAL';
+
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Sincronização de honorário com o Financeiro',
+                    'honorarios',
+                    $honorario_id,
+                    'Sincronização de parcelas, contas a receber e recibos.',
+                    [
+                        'tipo_acao' => 'SINCRONIZACAO',
+                        'modulo' => 'Honorários / Financeiro',
+                        'origem' => 'Integração interna',
+                        'resultado' => $retorno['resultado'],
+                        'nivel' => $retorno['ok'] ? 'INFO' : 'AVISO',
+                        'dados_novos' => $retorno,
+                    ]
+                );
+            }
+
+            return $retorno;
+        } catch (Throwable $e) {
+            $retorno['falhas'][] = $e->getMessage();
+            sgl_int_log_erro('SINCRONIZAR_HONORARIO', $e);
+
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Falha na sincronização de honorário com o Financeiro',
+                    'honorarios',
+                    $honorario_id,
+                    'A sincronização não foi concluída.',
+                    [
+                        'tipo_acao' => 'SINCRONIZACAO',
+                        'modulo' => 'Honorários / Financeiro',
+                        'origem' => 'Integração interna',
+                        'resultado' => 'FALHA',
+                        'nivel' => 'ERRO',
+                        'dados_novos' => $retorno,
+                    ]
+                );
+            }
+
+            return $retorno;
+        }
+    }
+}
+
+
+if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
+    /**
+     * Sincroniza uma Conta a Receber vinculada de volta para sua parcela
+     * e para o total global do Honorário.
+     *
+     * Contas independentes do Financeiro são ignoradas com sucesso, pois
+     * nem toda receita representa honorários advocatícios.
+     *
+     * @return array{
+     *   ok: bool,
+     *   resultado: string,
+     *   vinculado: bool,
+     *   conta_receber_id: string,
+     *   honorario_id: ?string,
+     *   parcela_id: ?string,
+     *   parcela_atualizada: bool,
+     *   honorario_recalculado: bool,
+     *   mensagem: string,
+     *   falhas: array<int,string>
+     * }
+     */
+    function sgl_sincronizar_conta_receber_honorario(
+        mysqli $conn,
+        string $conta_receber_id,
+        bool $usarTransacao = true
+    ): array {
+        $retorno = [
+            'ok' => false,
+            'resultado' => 'FALHA',
+            'vinculado' => false,
+            'conta_receber_id' => $conta_receber_id,
+            'honorario_id' => null,
+            'parcela_id' => null,
+            'parcela_atualizada' => false,
+            'honorario_recalculado' => false,
+            'mensagem' => '',
+            'falhas' => [],
+        ];
+
+        $transacaoIniciada = false;
+
+        try {
+            sgl_integracao_garantir_financeiro($conn);
+
+            if ($usarTransacao) {
+                $conn->begin_transaction();
+                $transacaoIniciada = true;
+            }
+
+            $stmtConta = $conn->prepare(
+                "SELECT
+                    id, origem, honorario_id, parcela_id, valor, valor_parcela,
+                    valor_pago, valor_pendente, status, data_recebimento,
+                    forma_recebimento, deletado
+                 FROM contas_receber
+                 WHERE id = ?
+                 LIMIT 1
+                 FOR UPDATE"
+            );
+
+            if (!$stmtConta) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar a conta a receber.');
+            }
+
+            $stmtConta->bind_param('s', $conta_receber_id);
+
+            if (!$stmtConta->execute()) {
+                throw new RuntimeException($stmtConta->error ?: 'Falha ao consultar a conta a receber.');
+            }
+
+            $resConta = $stmtConta->get_result();
+            $conta = $resConta ? $resConta->fetch_assoc() : null;
+            $stmtConta->close();
+
+            if (!$conta) {
+                throw new RuntimeException('Conta a receber não encontrada.');
+            }
+
+            $origem = mb_strtolower(trim((string)($conta['origem'] ?? '')), 'UTF-8');
+            $honorarioId = trim((string)($conta['honorario_id'] ?? ''));
+            $parcelaId = trim((string)($conta['parcela_id'] ?? ''));
+
+            $retorno['honorario_id'] = $honorarioId !== '' ? $honorarioId : null;
+            $retorno['parcela_id'] = $parcelaId !== '' ? $parcelaId : null;
+
+            if (
+                $origem !== 'honorarios'
+                || $honorarioId === ''
+                || $parcelaId === ''
+            ) {
+                if ($transacaoIniciada) {
+                    $conn->commit();
+                    $transacaoIniciada = false;
+                }
+
+                $retorno['ok'] = true;
+                $retorno['resultado'] = 'IGNORADO';
+                $retorno['mensagem'] = 'Conta independente do módulo de Honorários.';
+                return $retorno;
+            }
+
+            $retorno['vinculado'] = true;
+
+            if ((int)($conta['deletado'] ?? 0) === 1) {
+                throw new RuntimeException('Conta vinculada está na lixeira.');
+            }
+
+            $statusConta = trim((string)($conta['status'] ?? 'Pendente'));
+
+            if ($statusConta === 'Cancelado') {
+                if ($transacaoIniciada) {
+                    $conn->commit();
+                    $transacaoIniciada = false;
+                }
+
+                $retorno['ok'] = true;
+                $retorno['resultado'] = 'IGNORADO';
+                $retorno['mensagem'] = 'Conta cancelada não altera automaticamente o Honorário.';
+                return $retorno;
+            }
+
+            $stmtParcela = $conn->prepare(
+                "SELECT
+                    id, honorario_id, valor_parcela, valor_pago,
+                    saldo_devedor, status_pagamento, forma_pagamento
+                 FROM honorarios_parcelas
+                 WHERE id = ?
+                   AND honorario_id = ?
+                 LIMIT 1
+                 FOR UPDATE"
+            );
+
+            if (!$stmtParcela) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar a parcela de honorário.');
+            }
+
+            $stmtParcela->bind_param('ss', $parcelaId, $honorarioId);
+
+            if (!$stmtParcela->execute()) {
+                throw new RuntimeException($stmtParcela->error ?: 'Falha ao consultar a parcela de honorário.');
+            }
+
+            $resParcela = $stmtParcela->get_result();
+            $parcela = $resParcela ? $resParcela->fetch_assoc() : null;
+            $stmtParcela->close();
+
+            if (!$parcela) {
+                throw new RuntimeException('Parcela vinculada ao honorário não foi encontrada.');
+            }
+
+            $valorParcela = round((float)($parcela['valor_parcela'] ?? 0), 2);
+            if ($valorParcela <= 0) {
+                throw new RuntimeException('A parcela vinculada possui valor inválido.');
+            }
+
+            $valorPago = round((float)($conta['valor_pago'] ?? 0), 2);
+            $valorPago = max(0.0, min($valorParcela, $valorPago));
+            $saldo = round(max(0.0, $valorParcela - $valorPago), 2);
+
+            $statusParcela = 'Pendente';
+            if ($saldo <= 0.01 && $valorPago > 0) {
+                $statusParcela = 'Pago';
+                $saldo = 0.0;
+            } elseif ($valorPago > 0) {
+                $statusParcela = 'Parcial';
+            }
+
+            $formaRecebimento = trim((string)($conta['forma_recebimento'] ?? ''));
+            $dataRecebimento = !empty($conta['data_recebimento'])
+                ? (string)$conta['data_recebimento']
+                : null;
+
+            $temDataPagamento = sgl_int_coluna_existe(
+                $conn,
+                'honorarios_parcelas',
+                'data_pagamento'
+            );
+
+            if ($temDataPagamento) {
+                $stmtAtualizaParcela = $conn->prepare(
+                    "UPDATE honorarios_parcelas
+                     SET valor_pago = ?,
+                         saldo_devedor = ?,
+                         status_pagamento = ?,
+                         data_pagamento = ?,
+                         forma_pagamento = ?
+                     WHERE id = ?
+                       AND honorario_id = ?"
+                );
+
+                if (!$stmtAtualizaParcela) {
+                    throw new RuntimeException($conn->error ?: 'Falha ao preparar atualização da parcela.');
+                }
+
+                $dataPagamento = $valorPago > 0
+                    ? ($dataRecebimento ?: date('Y-m-d'))
+                    : null;
+
+                $stmtAtualizaParcela->bind_param(
+                    'ddsssss',
+                    $valorPago,
+                    $saldo,
+                    $statusParcela,
+                    $dataPagamento,
+                    $formaRecebimento,
+                    $parcelaId,
+                    $honorarioId
+                );
             } else {
-                $crId = sgl_integracao_gerar_id_cr($conn);
-                $obs = $p['observacoes'] ?? ($h['observacoes'] ?? '');
-                $clienteId = $p['cliente_id'] ?? ($h['cliente_id'] ?? null);
-                $forma = $p['forma_pagamento'] ?? ($h['forma_pagamento'] ?? '');
-                $dataVenc = $p['data_vencimento'] ?? null;
-                $stmt = $conn->prepare("INSERT INTO contas_receber (id, cliente_id, descricao, valor, qtd_parcelas, valor_parcela, valor_pago, valor_pendente, data_vencimento, data_recebimento, forma_recebimento, status, observacoes, deletado, honorario_id, parcela_id, origem) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'honorarios')");
-                $stmt->bind_param('sssddddsssssss', $crId, $clienteId, $descricao, $valor, $valor, $valorPago, $saldo, $dataVenc, $dataRecebimento, $forma, $statusCR, $obs, $honorario_id, $parcelaId);
-                @$stmt->execute();
-                @$stmt->close();
+                $stmtAtualizaParcela = $conn->prepare(
+                    "UPDATE honorarios_parcelas
+                     SET valor_pago = ?,
+                         saldo_devedor = ?,
+                         status_pagamento = ?,
+                         forma_pagamento = ?
+                     WHERE id = ?
+                       AND honorario_id = ?"
+                );
+
+                if (!$stmtAtualizaParcela) {
+                    throw new RuntimeException($conn->error ?: 'Falha ao preparar atualização da parcela.');
+                }
+
+                $stmtAtualizaParcela->bind_param(
+                    'ddssss',
+                    $valorPago,
+                    $saldo,
+                    $statusParcela,
+                    $formaRecebimento,
+                    $parcelaId,
+                    $honorarioId
+                );
             }
 
-            if ($statusCR === 'Recebido') {
-                sgl_gerar_recibo_de_conta_receber($conn, $crId);
+            if (!$stmtAtualizaParcela->execute()) {
+                throw new RuntimeException(
+                    $stmtAtualizaParcela->error ?: 'Falha ao atualizar a parcela.'
+                );
             }
+
+            $stmtAtualizaParcela->close();
+            $retorno['parcela_atualizada'] = true;
+
+            $stmtTotais = $conn->prepare(
+                "SELECT
+                    COALESCE(SUM(valor_pago), 0) AS total_pago,
+                    COALESCE(SUM(saldo_devedor), 0) AS total_saldo
+                 FROM honorarios_parcelas
+                 WHERE honorario_id = ?"
+            );
+
+            if (!$stmtTotais) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar o recálculo do honorário.');
+            }
+
+            $stmtTotais->bind_param('s', $honorarioId);
+
+            if (!$stmtTotais->execute()) {
+                throw new RuntimeException($stmtTotais->error ?: 'Falha ao recalcular o honorário.');
+            }
+
+            $resTotais = $stmtTotais->get_result();
+            $totais = $resTotais ? $resTotais->fetch_assoc() : null;
+            $stmtTotais->close();
+
+            if (!$totais) {
+                throw new RuntimeException('Totais do honorário não foram encontrados.');
+            }
+
+            $totalPago = round((float)$totais['total_pago'], 2);
+            $totalSaldo = round((float)$totais['total_saldo'], 2);
+
+            $statusHonorario = 'Pendente';
+            if ($totalSaldo <= 0.01) {
+                $statusHonorario = 'Pago';
+                $totalSaldo = 0.0;
+            } elseif ($totalPago > 0) {
+                $statusHonorario = 'Parcial';
+            }
+
+            $stmtHonorario = $conn->prepare(
+                "UPDATE honorarios
+                 SET valor_pago = ?,
+                     valor_pendente = ?,
+                     status = ?,
+                     forma_pagamento = ?
+                 WHERE id = ?
+                   AND deletado = 0"
+            );
+
+            if (!$stmtHonorario) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar atualização do honorário.');
+            }
+
+            $stmtHonorario->bind_param(
+                'ddsss',
+                $totalPago,
+                $totalSaldo,
+                $statusHonorario,
+                $formaRecebimento,
+                $honorarioId
+            );
+
+            if (!$stmtHonorario->execute()) {
+                throw new RuntimeException($stmtHonorario->error ?: 'Falha ao atualizar o honorário.');
+            }
+
+            $stmtHonorario->close();
+            $retorno['honorario_recalculado'] = true;
+
+            if ($transacaoIniciada) {
+                $conn->commit();
+                $transacaoIniciada = false;
+            }
+
+            $retorno['ok'] = true;
+            $retorno['resultado'] = 'SUCESSO';
+            $retorno['mensagem'] = 'Conta, parcela e honorário sincronizados.';
+
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Conta a receber sincronizada com Honorários',
+                    'contas_receber',
+                    $conta_receber_id,
+                    'Pagamento financeiro refletido na parcela e no honorário global.',
+                    [
+                        'tipo_acao' => 'SINCRONIZACAO',
+                        'modulo' => 'Financeiro / Honorários',
+                        'origem' => 'Sincronização reversa',
+                        'resultado' => 'SUCESSO',
+                        'nivel' => 'INFO',
+                        'dados_anteriores' => [
+                            'parcela_id' => $parcelaId,
+                            'honorario_id' => $honorarioId,
+                            'valor_pago' => (float)($parcela['valor_pago'] ?? 0),
+                            'saldo_devedor' => (float)($parcela['saldo_devedor'] ?? 0),
+                            'status_pagamento' => (string)($parcela['status_pagamento'] ?? ''),
+                            'forma_pagamento' => (string)($parcela['forma_pagamento'] ?? ''),
+                        ],
+                        'dados_novos' => [
+                            'conta_receber_id' => $conta_receber_id,
+                            'parcela_id' => $parcelaId,
+                            'honorario_id' => $honorarioId,
+                            'valor_pago' => $valorPago,
+                            'saldo_devedor' => $saldo,
+                            'status_pagamento' => $statusParcela,
+                            'forma_pagamento' => $formaRecebimento,
+                            'honorario_valor_pago' => $totalPago,
+                            'honorario_valor_pendente' => $totalSaldo,
+                            'honorario_status' => $statusHonorario,
+                        ],
+                    ]
+                );
+            }
+
+            return $retorno;
+        } catch (Throwable $e) {
+            if ($transacaoIniciada) {
+                try {
+                    $conn->rollback();
+                } catch (Throwable $rollbackErro) {
+                    sgl_int_log_erro('SINCRONIZAR_CR_HONORARIO_ROLLBACK', $rollbackErro);
+                }
+            }
+
+            $retorno['falhas'][] = $e->getMessage();
+            $retorno['mensagem'] = 'A sincronização reversa não foi concluída.';
+            sgl_int_log_erro('SINCRONIZAR_CR_HONORARIO', $e);
+
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Falha ao sincronizar Conta a Receber com Honorários',
+                    'contas_receber',
+                    $conta_receber_id,
+                    'A parcela e o honorário não foram atualizados.',
+                    [
+                        'tipo_acao' => 'SINCRONIZACAO',
+                        'modulo' => 'Financeiro / Honorários',
+                        'origem' => 'Sincronização reversa',
+                        'resultado' => 'FALHA',
+                        'nivel' => 'ERRO',
+                        'dados_novos' => $retorno,
+                    ]
+                );
+            }
+
+            return $retorno;
         }
     }
 }
@@ -402,66 +1166,191 @@ if (!function_exists('sgl_sincronizar_honorario_financeiro')) {
 if (!function_exists('sgl_gerar_recibo_de_conta_receber')) {
     function sgl_gerar_recibo_de_conta_receber(mysqli $conn, string $conta_receber_id): ?string
     {
-        sgl_integracao_garantir_recibos($conn);
-        $crIdSql = $conn->real_escape_string($conta_receber_id);
+        try {
+            sgl_integracao_garantir_recibos($conn);
 
-        $ja = $conn->query("SELECT id FROM recibos WHERE conta_receber_id = '{$crIdSql}' AND status <> 'Cancelado' AND deletado = 0 LIMIT 1");
-        if ($ja && $ja->num_rows) return $ja->fetch_assoc()['id'];
-
-        $res = $conn->query("SELECT cr.*, c.nome AS cliente_nome, c.cpf_cnpj FROM contas_receber cr LEFT JOIN clientes c ON c.id = cr.cliente_id WHERE cr.id = '{$crIdSql}' LIMIT 1");
-        if (!$res || $res->num_rows === 0) return null;
-        $cr = $res->fetch_assoc();
-
-        $nomeCliente = $cr['cliente_nome'] ?: 'Cliente não informado';
-        $cpfCnpj = $cr['cpf_cnpj'] ?? '';
-        $valor = (float)($cr['valor_pago'] ?? 0);
-        if ($valor <= 0) $valor = (float)($cr['valor'] ?? 0);
-        if ($valor <= 0) return null;
-
-        $id = sgl_integracao_gerar_id_recibo($conn);
-        $numero = sgl_integracao_gerar_numero_recibo($conn);
-        $dataHoje = date('Y-m-d');
-        $dataPagamento = $cr['data_recebimento'] ?: $dataHoje;
-        $referente = $cr['descricao'] ?: 'Recebimento de honorários';
-        $forma = $cr['forma_recebimento'] ?? '';
-        $honorarioId = $cr['honorario_id'] ?? null;
-        $parcelaId = $cr['parcela_id'] ?? null;
-        $clienteId = $cr['cliente_id'] ?? null;
-        $chave = hash('sha256', $numero . $nomeCliente . microtime(true));
-
-        $stmt = $conn->prepare("INSERT INTO recibos (id, numero, cliente_id, nome_cliente, cpf_cnpj, honorario_id, parcela_id, conta_receber_id, data_emissao, data_pagamento, referente, forma_pagamento, valor, observacoes, chave_validacao) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        $obs = 'Recibo gerado automaticamente pelo Centro Financeiro.';
-        $stmt->bind_param('ssssssssssssdss', $id, $numero, $clienteId, $nomeCliente, $cpfCnpj, $honorarioId, $parcelaId, $conta_receber_id, $dataHoje, $dataPagamento, $referente, $forma, $valor, $obs, $chave);
-        if (@$stmt->execute()) {
-            @$stmt->close();
-            sgl_registrar_log(
-                $conn,
-                'Gerou recibo automático',
-                'recibos',
-                $id,
-                'Conta a receber vinculada: ' . $conta_receber_id,
-                [
-                    'tipo_acao' => 'RECIBO_AUTOMATICO',
-                    'modulo' => 'Financeiro / Recibos',
-                    'origem' => 'Integração interna',
-                    'resultado' => 'SUCESSO',
-                    'nivel' => 'INFO',
-                    'dados_novos' => [
-                        'recibo_id' => $id,
-                        'numero' => $numero,
-                        'conta_receber_id' => $conta_receber_id,
-                        'valor' => $valor,
-                        'data_pagamento' => $dataPagamento,
-                    ],
-                ]
+            $stmtJa = $conn->prepare(
+                "SELECT id
+                 FROM recibos
+                 WHERE conta_receber_id = ?
+                   AND status <> 'Cancelado'
+                   AND deletado = 0
+                 ORDER BY data_emissao DESC, id DESC
+                 LIMIT 1"
             );
-                return $id;
+            if (!$stmtJa) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar busca de recibo.');
+            }
+
+            $stmtJa->bind_param('s', $conta_receber_id);
+            if (!$stmtJa->execute()) {
+                throw new RuntimeException($stmtJa->error ?: 'Falha ao buscar recibo.');
+            }
+
+            $resJa = $stmtJa->get_result();
+            $existente = $resJa ? $resJa->fetch_assoc() : null;
+            $stmtJa->close();
+
+            if ($existente) {
+                return (string)$existente['id'];
+            }
+
+            $stmtConta = $conn->prepare(
+                "SELECT
+                    cr.id, cr.cliente_id, cr.descricao, cr.valor, cr.valor_pago,
+                    cr.data_recebimento, cr.forma_recebimento, cr.honorario_id,
+                    cr.parcela_id, c.nome AS cliente_nome, c.cpf_cnpj
+                 FROM contas_receber cr
+                 LEFT JOIN clientes c ON c.id = cr.cliente_id
+                 WHERE cr.id = ?
+                 LIMIT 1"
+            );
+            if (!$stmtConta) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar conta para recibo.');
+            }
+
+            $stmtConta->bind_param('s', $conta_receber_id);
+            if (!$stmtConta->execute()) {
+                throw new RuntimeException($stmtConta->error ?: 'Falha ao consultar conta para recibo.');
+            }
+
+            $resConta = $stmtConta->get_result();
+            $cr = $resConta ? $resConta->fetch_assoc() : null;
+            $stmtConta->close();
+
+            if (!$cr) {
+                return null;
+            }
+
+            $nomeCliente = trim((string)($cr['cliente_nome'] ?? '')) ?: 'Cliente não informado';
+            $cpfCnpj = (string)($cr['cpf_cnpj'] ?? '');
+            $valor = (float)($cr['valor_pago'] ?? 0);
+            if ($valor <= 0) {
+                $valor = (float)($cr['valor'] ?? 0);
+            }
+            if ($valor <= 0) {
+                return null;
+            }
+
+            $dataHoje = date('Y-m-d');
+            $dataPagamento = !empty($cr['data_recebimento'])
+                ? (string)$cr['data_recebimento']
+                : $dataHoje;
+            $referente = trim((string)($cr['descricao'] ?? '')) ?: 'Recebimento de honorários';
+            $forma = (string)($cr['forma_recebimento'] ?? '');
+            $honorarioId = $cr['honorario_id'] ?? null;
+            $parcelaId = $cr['parcela_id'] ?? null;
+            $clienteId = $cr['cliente_id'] ?? null;
+            $obs = 'Recibo gerado automaticamente pelo Centro Financeiro.';
+
+            for ($tentativa = 1; $tentativa <= 3; $tentativa++) {
+                $id = sgl_integracao_gerar_id_recibo($conn);
+                $numero = sgl_integracao_gerar_numero_recibo($conn);
+                $chave = hash('sha256', $numero . $nomeCliente . microtime(true) . random_int(1000, 999999));
+
+                try {
+                    $stmt = $conn->prepare(
+                        "INSERT INTO recibos (
+                            id, numero, cliente_id, nome_cliente, cpf_cnpj,
+                            honorario_id, parcela_id, conta_receber_id,
+                            data_emissao, data_pagamento, referente,
+                            forma_pagamento, valor, observacoes, chave_validacao
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    );
+                    if (!$stmt) {
+                        throw new RuntimeException($conn->error ?: 'Falha ao preparar criação de recibo.');
+                    }
+
+                    $stmt->bind_param(
+                        'ssssssssssssdss',
+                        $id,
+                        $numero,
+                        $clienteId,
+                        $nomeCliente,
+                        $cpfCnpj,
+                        $honorarioId,
+                        $parcelaId,
+                        $conta_receber_id,
+                        $dataHoje,
+                        $dataPagamento,
+                        $referente,
+                        $forma,
+                        $valor,
+                        $obs,
+                        $chave
+                    );
+
+                    if (!$stmt->execute()) {
+                        $erro = new mysqli_sql_exception(
+                            $stmt->error ?: 'Falha ao inserir recibo.',
+                            $stmt->errno
+                        );
+                        $stmt->close();
+                        throw $erro;
+                    }
+
+                    $stmt->close();
+
+                    if (function_exists('sgl_registrar_log')) {
+                        sgl_registrar_log(
+                            $conn,
+                            'Gerou recibo automático',
+                            'recibos',
+                            $id,
+                            'Conta a receber vinculada: ' . $conta_receber_id,
+                            [
+                                'tipo_acao' => 'RECIBO_AUTOMATICO',
+                                'modulo' => 'Financeiro / Recibos',
+                                'origem' => 'Integração interna',
+                                'resultado' => 'SUCESSO',
+                                'nivel' => 'INFO',
+                                'dados_novos' => [
+                                    'recibo_id' => $id,
+                                    'numero' => $numero,
+                                    'conta_receber_id' => $conta_receber_id,
+                                    'valor' => $valor,
+                                    'data_pagamento' => $dataPagamento,
+                                ],
+                            ]
+                        );
+                    }
+
+                    return $id;
+                } catch (Throwable $e) {
+                    if ($tentativa < 3 && sgl_int_eh_colisao_chave($e)) {
+                        usleep(20000 * $tentativa);
+                        continue;
+                    }
+
+                    throw $e;
+                }
+            }
+
+            return null;
+        } catch (Throwable $e) {
+            sgl_int_log_erro('GERAR_RECIBO', $e);
+
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'Falha ao gerar recibo automático',
+                    'contas_receber',
+                    $conta_receber_id,
+                    'O recibo automático não foi criado.',
+                    [
+                        'tipo_acao' => 'RECIBO_AUTOMATICO',
+                        'modulo' => 'Financeiro / Recibos',
+                        'origem' => 'Integração interna',
+                        'resultado' => 'FALHA',
+                        'nivel' => 'ERRO',
+                    ]
+                );
+            }
+
+            return null;
         }
-        @$stmt->close();
-        return null;
     }
 }
-
 
 if (!function_exists('buscarReciboPorContaReceber')) {
     /**
@@ -470,13 +1359,36 @@ if (!function_exists('buscarReciboPorContaReceber')) {
      */
     function buscarReciboPorContaReceber(mysqli $conn, string $conta_receber_id): ?array
     {
-        sgl_integracao_garantir_recibos($conn);
-        $id = $conn->real_escape_string($conta_receber_id);
-        $res = $conn->query("SELECT * FROM recibos WHERE conta_receber_id = '{$id}' AND deletado = 0 AND status <> 'Cancelado' ORDER BY data_emissao DESC, id DESC LIMIT 1");
-        if ($res && $res->num_rows > 0) {
-            return $res->fetch_assoc();
+        try {
+            sgl_integracao_garantir_recibos($conn);
+
+            $stmt = $conn->prepare(
+                "SELECT *
+                 FROM recibos
+                 WHERE conta_receber_id = ?
+                   AND deletado = 0
+                   AND status <> 'Cancelado'
+                 ORDER BY data_emissao DESC, id DESC
+                 LIMIT 1"
+            );
+            if (!$stmt) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar busca de recibo.');
+            }
+
+            $stmt->bind_param('s', $conta_receber_id);
+            if (!$stmt->execute()) {
+                throw new RuntimeException($stmt->error ?: 'Falha ao buscar recibo.');
+            }
+
+            $res = $stmt->get_result();
+            $recibo = $res && $res->num_rows > 0 ? $res->fetch_assoc() : null;
+            $stmt->close();
+
+            return $recibo;
+        } catch (Throwable $e) {
+            sgl_int_log_erro('BUSCAR_RECIBO', $e);
+            return null;
         }
-        return null;
     }
 }
 
@@ -493,18 +1405,97 @@ if (!function_exists('marcarContaPagarPaga')) {
      */
     function marcarContaPagarPaga(mysqli $conn, string $conta_id, ?string $data_pagamento = null): bool
     {
-        $id = $conn->real_escape_string($conta_id);
-        $data = $conn->real_escape_string($data_pagamento ?: date('Y-m-d'));
-        $res = $conn->query("SELECT valor FROM contas_pagar WHERE id = '{$id}' AND deletado = 0 LIMIT 1");
-        if (!$res || $res->num_rows === 0) {
+        $dataPagamento = $data_pagamento ?: date('Y-m-d');
+        $transacaoIniciadaAqui = false;
+
+        try {
+            if (!$conn->in_transaction) {
+                $conn->begin_transaction();
+                $transacaoIniciadaAqui = true;
+            }
+
+            $stmtConta = $conn->prepare(
+                "SELECT valor
+                 FROM contas_pagar
+                 WHERE id = ?
+                   AND deletado = 0
+                 LIMIT 1
+                 FOR UPDATE"
+            );
+            if (!$stmtConta) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar conta a pagar.');
+            }
+
+            $stmtConta->bind_param('s', $conta_id);
+            if (!$stmtConta->execute()) {
+                throw new RuntimeException($stmtConta->error ?: 'Falha ao consultar conta a pagar.');
+            }
+
+            $res = $stmtConta->get_result();
+            $conta = $res ? $res->fetch_assoc() : null;
+            $stmtConta->close();
+
+            if (!$conta) {
+                if ($transacaoIniciadaAqui) {
+                    $conn->rollback();
+                }
+                return false;
+            }
+
+            $valor = round((float)($conta['valor'] ?? 0), 2);
+
+            $stmtAtualiza = $conn->prepare(
+                "UPDATE contas_pagar
+                 SET valor_pago = ?,
+                     valor_pendente = 0,
+                     status = 'Pago',
+                     data_pagamento = ?
+                 WHERE id = ?
+                   AND deletado = 0"
+            );
+            if (!$stmtAtualiza) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar pagamento da conta.');
+            }
+
+            $stmtAtualiza->bind_param('dss', $valor, $dataPagamento, $conta_id);
+            if (!$stmtAtualiza->execute()) {
+                throw new RuntimeException($stmtAtualiza->error ?: 'Falha ao marcar conta como paga.');
+            }
+            $stmtAtualiza->close();
+
+            $stmtParcelas = $conn->prepare(
+                "UPDATE contas_pagar_parcelas
+                 SET valor_pago = valor_parcela,
+                     saldo_devedor = 0,
+                     status_pagamento = 'Pago'
+                 WHERE conta_id = ?"
+            );
+            if (!$stmtParcelas) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar parcelas da conta.');
+            }
+
+            $stmtParcelas->bind_param('s', $conta_id);
+            if (!$stmtParcelas->execute()) {
+                throw new RuntimeException($stmtParcelas->error ?: 'Falha ao atualizar parcelas da conta.');
+            }
+            $stmtParcelas->close();
+
+            if ($transacaoIniciadaAqui) {
+                $conn->commit();
+            }
+
+            return true;
+        } catch (Throwable $e) {
+            if ($transacaoIniciadaAqui) {
+                try {
+                    $conn->rollback();
+                } catch (Throwable $rollbackErro) {
+                    sgl_int_log_erro('PAGAR_CONTA_ROLLBACK', $rollbackErro);
+                }
+            }
+
+            sgl_int_log_erro('PAGAR_CONTA', $e);
             return false;
         }
-        $valor = (float)($res->fetch_assoc()['valor'] ?? 0);
-        $valorSql = number_format($valor, 2, '.', '');
-        $ok = $conn->query("UPDATE contas_pagar SET valor_pago = {$valorSql}, valor_pendente = 0, status = 'Pago', data_pagamento = '{$data}' WHERE id = '{$id}'");
-        if ($ok) {
-            @$conn->query("UPDATE contas_pagar_parcelas SET valor_pago = valor_parcela, saldo_devedor = 0, status_pagamento = 'Pago' WHERE conta_id = '{$id}'");
-        }
-        return (bool)$ok;
     }
 }

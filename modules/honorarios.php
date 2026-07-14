@@ -256,6 +256,17 @@ function recalcHonorario(mysqli $conn, string $honorario_id)
 
 $tiposHonorario = ['Contrato', 'Êxito', 'Consultoria', 'Acordo', 'Outro'];
 $statusOptions = ['Pendente', 'Parcial', 'Pago', 'Cancelado'];
+$formasPagamentoHonorario = [
+    'Boleto',
+    'Pix',
+    'Cartão de débito',
+    'Cartão de crédito',
+    'Dinheiro',
+    'Transferência bancária',
+    'Depósito bancário',
+    'Cheque',
+    'Outro',
+];
 
 $csrfHonorarios = gerarTokenCsrf();
 
@@ -570,6 +581,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_honorario']
     } else {
         $valor_parcela  = round($valor_total / $qtd_parcelas, 2);
         $valor_pendente = max($valor_total - $valor_pago, 0);
+        $dadosAnteriores = buscarHonorarioAuditoria($conn, $id);
 
         $sql = "UPDATE honorarios SET
                     cliente_id      = '$cliente_id',
@@ -1136,7 +1148,26 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 <div class="col-md-3">
                     <label class="form-label">Forma de Pagamento</label>
-                    <input type="text" name="forma_pagamento" class="form-control" value="<?= htmlspecialchars($f['forma_pagamento']) ?>" placeholder="Ex: Pix, Boleto, Cartão">
+                    <select name="forma_pagamento" class="form-select">
+                        <option value="">-- Selecione --</option>
+                        <?php
+                        $formaAtual = trim((string)($f['forma_pagamento'] ?? ''));
+                        $formaAtualConhecida = in_array($formaAtual, $formasPagamentoHonorario, true);
+                        ?>
+                        <?php if ($formaAtual !== '' && !$formaAtualConhecida): ?>
+                            <option value="<?= htmlspecialchars($formaAtual, ENT_QUOTES, 'UTF-8') ?>" selected>
+                                <?= htmlspecialchars($formaAtual, ENT_QUOTES, 'UTF-8') ?> (valor anterior)
+                            </option>
+                        <?php endif; ?>
+                        <?php foreach ($formasPagamentoHonorario as $formaPagamento): ?>
+                            <option
+                                value="<?= htmlspecialchars($formaPagamento, ENT_QUOTES, 'UTF-8') ?>"
+                                <?= $formaAtual === $formaPagamento ? 'selected' : '' ?>
+                            >
+                                <?= htmlspecialchars($formaPagamento, ENT_QUOTES, 'UTF-8') ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
                 </div>
 
                 <div class="col-md-3">

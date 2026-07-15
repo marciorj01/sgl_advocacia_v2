@@ -320,7 +320,19 @@ $cancelados = $conn->query("SELECT COUNT(*) c FROM recibos WHERE deletado=0 AND 
 ?>
 <div class="d-flex justify-content-between align-items-start mb-4">
     <div><h2 class="fw-bold text-primary"><i class="bi bi-receipt"></i> Recibos</h2><p class="text-muted mb-0">Geração, controle, impressão e histórico de recibos do escritório.</p></div>
-    <a href="?mod=recibos&acao=novo" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo Recibo</a>
+    <div class="d-flex flex-wrap gap-2">
+        <?php
+        $paramsRelatorioRecibos = [];
+        if ($q !== '') { $paramsRelatorioRecibos['q'] = $q; }
+        if ($status !== '') { $paramsRelatorioRecibos['status'] = $status; }
+        $urlRelatorioRecibos = 'modules/relatorios/recibos.php'
+            . ($paramsRelatorioRecibos ? '?' . http_build_query($paramsRelatorioRecibos) : '');
+        ?>
+        <a href="<?= hRec($urlRelatorioRecibos) ?>" target="_blank" rel="noopener" class="btn btn-outline-secondary">
+            <i class="bi bi-file-earmark-pdf"></i> Relatório / Salvar PDF
+        </a>
+        <a href="?mod=recibos&acao=novo" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo Recibo</a>
+    </div>
 </div>
 <?= $msg ?>
 <div class="row g-3 mb-4">

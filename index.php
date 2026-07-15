@@ -1,17 +1,133 @@
 <?php
-date_default_timezone_set('America/Sao_Paulo');
 require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/config/auth.php';
 require_once __DIR__ . '/config/integracoes.php';
+
 iniciarSessaoSegura();
 exigirLogin('auth/login.php');
 
-$modulo = isset($_GET['mod']) ? trim($_GET['mod']) : 'dashboard';
+date_default_timezone_set(
+    defined('ROJEX_APP_TIMEZONE')
+        ? ROJEX_APP_TIMEZONE
+        : 'America/Sao_Paulo'
+);
+
+/*
+ * Headers compatíveis de hardening.
+ * A CSP rígida será ativada somente após remover estilos/scripts inline
+ * e revisar as dependências externas atualmente homologadas.
+ */
+if (!headers_sent()) {
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: SAMEORIGIN');
+    header('Referrer-Policy: strict-origin-when-cross-origin');
+    header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+    header('Cross-Origin-Opener-Policy: same-origin');
+}
+
+if (!function_exists('rojexPerfilAtual')) {
+    function rojexPerfilAtual(): string
+    {
+        return trim((string)($_SESSION['perfil'] ?? 'Usuário'));
+    }
+}
+
+if (!function_exists('rojexEhAdministrador')) {
+    function rojexEhAdministrador(): bool
+    {
+        return in_array(
+            rojexPerfilAtual(),
+            ['Administrador Master', 'Administrador'],
+            true
+        );
+    }
+}
+
+if (!function_exists('rojexPodeAcessarModulo')) {
+    function rojexPodeAcessarModulo(string $modulo): bool
+    {
+        /*
+         * Compatibilidade homologada:
+         * todos os usuários autenticados podem abrir Configurações.
+         *
+         * O próprio modules/configuracoes.php mantém as abas e ações
+         * administrativas restritas ao usuário MASTER, enquanto usuários
+         * comuns continuam com acesso às opções permitidas.
+         */
+        return true;
+    }
+}
+
+if (!function_exists('rojexRegistrarAcessoModuloNegado')) {
+    function rojexRegistrarAcessoModuloNegado(string $modulo): void
+    {
+        try {
+            if (!function_exists('sgl_registrar_log')) {
+                return;
+            }
+
+            $connLog = conectar();
+
+            sgl_registrar_log(
+                $connLog,
+                'Tentativa de acesso a módulo não autorizado',
+                'sistema',
+                null,
+                'Acesso negado ao módulo solicitado.',
+                [
+                    'tipo_acao' => 'EVENTO',
+                    'modulo' => 'Autorização',
+                    'origem' => 'index.php',
+                    'resultado' => 'NEGADO',
+                    'nivel' => 'AVISO',
+                    'dados_novos' => [
+                        'modulo_solicitado' => mb_substr($modulo, 0, 80, 'UTF-8'),
+                        'perfil' => rojexPerfilAtual(),
+                    ],
+                ]
+            );
+
+            $connLog->close();
+        } catch (Throwable $e) {
+            error_log('[ROJEX AUTORIZAÇÃO] ' . $e->getMessage());
+        }
+    }
+}
+
 $modulos_validos = [
-    'dashboard', 'advogados', 'clientes', 'processos', 'honorarios', 'agenda',
-    'financeiro', 'recibos', 'documentos', 'modelos', 'configuracoes', 'busca', 'cij'
+    'dashboard',
+    'advogados',
+    'clientes',
+    'processos',
+    'honorarios',
+    'agenda',
+    'financeiro',
+    'recibos',
+    'documentos',
+    'modelos',
+    'configuracoes',
+    'busca',
+    'cij',
 ];
-if (!in_array($modulo, $modulos_validos, true)) { $modulo = 'dashboard'; }
+
+$moduloInformado = isset($_GET['mod'])
+    ? trim((string)$_GET['mod'])
+    : 'dashboard';
+
+if (!in_array($moduloInformado, $modulos_validos, true)) {
+    if ($moduloInformado !== '') {
+        rojexRegistrarAcessoModuloNegado($moduloInformado);
+    }
+
+    $modulo = 'dashboard';
+} elseif (!rojexPodeAcessarModulo($moduloInformado)) {
+    rojexRegistrarAcessoModuloNegado($moduloInformado);
+    $modulo = 'dashboard';
+    $_SESSION['rojex_aviso_autorizacao'] =
+        'Você não possui permissão para acessar o módulo solicitado.';
+} else {
+    $modulo = $moduloInformado;
+}
 
 $titulos = [
     'dashboard' => 'Dashboard',
@@ -60,7 +176,7 @@ function sgl_table_columns(mysqli $conn, string $tabela): array {
 }
 
 function sgl_busca_global(mysqli $conn, string $termo): array {
-    $termo = trim($termo);
+    $termo = mb_substr(trim($termo), 0, 160, 'UTF-8');
     if ($termo === '') { return []; }
 
     $digitos = preg_replace('/\D+/', '', $termo);
@@ -158,8 +274,31 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
             if (in_array($possivel, $cols, true)) { $principal = $possivel; break; }
         }
 
-        $whereDeletado = in_array('deletado', $cols, true) ? " AND COALESCE(`deletado`,0)=0" : '';
-        $sql = "SELECT * FROM `{$tabela}` WHERE (" . implode(' OR ', $wheres) . "){$whereDeletado} ORDER BY id DESC LIMIT 10";
+        $whereDeletado = in_array('deletado', $cols, true)
+            ? " AND COALESCE(`deletado`,0)=0"
+            : '';
+
+        $camposSelect = array_values(array_unique(array_merge(
+            ['id', $principal],
+            $tabela === 'clientes' && in_array('cpf_cnpj', $cols, true)
+                ? ['cpf_cnpj']
+                : []
+        )));
+
+        $selectSql = implode(
+            ', ',
+            array_map(
+                static fn(string $campo): string => "`{$campo}`",
+                $camposSelect
+            )
+        );
+
+        $sql = "SELECT {$selectSql}
+                FROM `{$tabela}`
+                WHERE (" . implode(' OR ', $wheres) . ")
+                {$whereDeletado}
+                ORDER BY id DESC
+                LIMIT 10";
 
         try {
             $stmt = $conn->prepare($sql);
@@ -189,6 +328,10 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
             }
             $stmt->close();
         } catch (Throwable $e) {
+            error_log(
+                '[ROJEX BUSCA GLOBAL][' . $tabela . '] ' .
+                $e->getMessage()
+            );
             continue;
         }
     }
@@ -203,7 +346,7 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ROJEX.AI - <?= htmlspecialchars($tituloPagina) ?> | ERP Jurídico Enterprise</title>
+    <title>ROJEX.AI - <?= htmlspecialchars($tituloPagina, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> | ERP Jurídico Enterprise</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
     <link href="assets/css/style.css" rel="stylesheet">
@@ -373,15 +516,31 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
                 <input type="hidden" name="mod" value="busca">
                 <div class="input-group shadow-sm">
                     <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                    <input type="search" name="q" class="form-control" value="<?= htmlspecialchars($_GET['q'] ?? '', ENT_QUOTES, 'UTF-8') ?>" placeholder="Busca global: cliente, processo, documento, agenda...">
+                    <input type="search" name="q" class="form-control" maxlength="160" value="<?= htmlspecialchars((string)($_GET['q'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="Busca global: cliente, processo, documento, agenda...">
                     <button class="btn btn-primary" type="submit">Buscar</button>
                 </div>
             </form>
         </div>
 
+        <?php if (!empty($_SESSION['rojex_aviso_autorizacao'])): ?>
+            <div class="alert alert-warning shadow-sm">
+                <?= htmlspecialchars(
+                    (string)$_SESSION['rojex_aviso_autorizacao'],
+                    ENT_QUOTES | ENT_SUBSTITUTE,
+                    'UTF-8'
+                ) ?>
+            </div>
+            <?php unset($_SESSION['rojex_aviso_autorizacao']); ?>
+        <?php endif; ?>
+
         <?php
         if ($modulo === 'busca') {
-            $q = trim((string)($_GET['q'] ?? ''));
+            $q = mb_substr(
+                trim((string)($_GET['q'] ?? '')),
+                0,
+                160,
+                'UTF-8'
+            );
             echo "<div class='mb-4'><h3 class='text-primary mb-1'><i class='bi bi-search me-2'></i>Busca Global</h3><p class='text-muted mb-0'>Pesquise clientes, processos, advogados, agenda, documentos e modelos em um único lugar.</p></div>";
 
             if ($q === '') {

@@ -16,63 +16,260 @@ if (usuarioLogado()) {
 
 $mensagem_erro = '';
 
-function colunaExiste(mysqli $conn, string $tabela, string $coluna): bool
-{
-    $stmt = $conn->prepare("SHOW COLUMNS FROM `$tabela` LIKE ?");
-    $stmt->bind_param('s', $coluna);
-    $stmt->execute();
-    $existe = $stmt->get_result()->num_rows > 0;
-    $stmt->close();
-    return $existe;
+if (!function_exists('rojexLoginColunaExiste')) {
+    function rojexLoginColunaExiste(mysqli $conn, string $tabela, string $coluna): bool
+    {
+        if (
+            !preg_match('/^[A-Za-z0-9_]+$/', $tabela)
+            || !preg_match('/^[A-Za-z0-9_]+$/', $coluna)
+        ) {
+            return false;
+        }
+
+        $stmt = $conn->prepare(
+            "SELECT COUNT(*) AS total
+             FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = ?
+               AND COLUMN_NAME = ?"
+        );
+
+        if (!$stmt) {
+            return false;
+        }
+
+        $stmt->bind_param('ss', $tabela, $coluna);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return (int)($row['total'] ?? 0) > 0;
+    }
 }
 
+if (!function_exists('rojexNormalizarPerfil')) {
+    function rojexNormalizarPerfil(string $perfil): string
+    {
+        $perfil = trim($perfil);
+        $normalizado = mb_strtolower($perfil, 'UTF-8');
 
-function rojexRegistrarEventoLogin(
-    ?mysqli $conn,
-    string $acao,
-    string $resultado,
-    string $nivel,
-    string $usuarioInformado,
-    ?array $usuarioEncontrado = null,
-    ?string $detalhes = null
-): void {
-    if (!$conn || !function_exists('sgl_registrar_log')) {
-        return;
+        return match ($normalizado) {
+            'administrador master', 'master' => 'Administrador Master',
+            'administrador', 'admin' => 'Administrador',
+            'advogado' => 'Advogado',
+            'financeiro' => 'Financeiro',
+            'secretária', 'secretaria' => 'Secretária',
+            'estagiário', 'estagiario' => 'Estagiário',
+            'usuário', 'usuario' => 'Usuário',
+            default => $perfil !== '' ? $perfil : 'Usuário',
+        };
     }
+}
 
-    try {
-        $registroId = isset($usuarioEncontrado['id']) ? (string)$usuarioEncontrado['id'] : null;
+if (!function_exists('rojexValidarSenhaCompatível')) {
+    /**
+     * @return array{ok:bool,legado:bool,tipo:string}
+     */
+    function rojexValidarSenhaCompatível(string $senhaInformada, string $senhaArmazenada): array
+    {
+        if ($senhaArmazenada === '') {
+            return ['ok' => false, 'legado' => false, 'tipo' => 'ausente'];
+        }
 
-        sgl_registrar_log(
-            $conn,
-            $acao,
-            'usuarios',
-            $registroId,
-            $detalhes,
-            [
-                'tipo_acao' => 'LOGIN',
-                'modulo' => 'Autenticação',
-                'origem' => 'Tela de login',
-                'resultado' => $resultado,
-                'nivel' => $nivel,
-                'dados_novos' => [
-                    'usuario_informado' => mb_substr($usuarioInformado, 0, 80, 'UTF-8'),
-                    'usuario_localizado' => $usuarioEncontrado !== null,
-                ],
-            ]
+        $info = password_get_info($senhaArmazenada);
+
+        if (($info['algo'] ?? null) !== null && (int)($info['algo'] ?? 0) !== 0) {
+            return [
+                'ok' => password_verify($senhaInformada, $senhaArmazenada),
+                'legado' => false,
+                'tipo' => 'password_hash',
+            ];
+        }
+
+        if (
+            preg_match('/^[a-f0-9]{32}$/i', $senhaArmazenada)
+            && hash_equals(mb_strtolower($senhaArmazenada, 'UTF-8'), md5($senhaInformada))
+        ) {
+            return ['ok' => true, 'legado' => true, 'tipo' => 'md5'];
+        }
+
+        if (hash_equals($senhaArmazenada, $senhaInformada)) {
+            return ['ok' => true, 'legado' => true, 'tipo' => 'texto_puro'];
+        }
+
+        return ['ok' => false, 'legado' => false, 'tipo' => 'invalida'];
+    }
+}
+
+if (!function_exists('rojexMigrarSenhaLegada')) {
+    function rojexMigrarSenhaLegada(
+        mysqli $conn,
+        string $tabelaOrigem,
+        int $usuarioId,
+        string $senha
+    ): bool {
+        $tabelasPermitidas = ['usuarios', 'usuarios_sistema'];
+
+        if (!in_array($tabelaOrigem, $tabelasPermitidas, true)) {
+            return false;
+        }
+
+        $novoHash = password_hash($senha, PASSWORD_DEFAULT);
+
+        if (!is_string($novoHash) || $novoHash === '') {
+            return false;
+        }
+
+        $tabelaSql = '`' . $tabelaOrigem . '`';
+        $sql = "UPDATE {$tabelaSql} SET senha = ?";
+
+        if (rojexLoginColunaExiste($conn, $tabelaOrigem, 'atualizado_em')) {
+            $sql .= ", atualizado_em = NOW()";
+        }
+
+        $sql .= " WHERE id = ?";
+
+        $stmt = $conn->prepare($sql);
+
+        if (!$stmt) {
+            return false;
+        }
+
+        $stmt->bind_param('si', $novoHash, $usuarioId);
+        $ok = $stmt->execute();
+        $stmt->close();
+
+        return $ok;
+    }
+}
+
+if (!function_exists('rojexLoginAplicarAtrasoSeguro')) {
+    function rojexLoginAplicarAtrasoSeguro(int $tentativas): void
+    {
+        if ($tentativas <= 0) {
+            return;
+        }
+
+        $microssegundos = min(1500000, 150000 * $tentativas);
+        usleep($microssegundos);
+    }
+}
+
+if (!function_exists('rojexLoginBloqueadoTemporariamente')) {
+    function rojexLoginBloqueadoTemporariamente(): bool
+    {
+        $bloqueadoAte = (int)($_SESSION['login_bloqueado_ate'] ?? 0);
+
+        if ($bloqueadoAte <= time()) {
+            unset($_SESSION['login_bloqueado_ate']);
+            return false;
+        }
+
+        return true;
+    }
+}
+
+if (!function_exists('rojexLoginRegistrarFalhaLocal')) {
+    function rojexLoginRegistrarFalhaLocal(): void
+    {
+        $agora = time();
+        $janela = 900;
+        $limite = 5;
+
+        $inicioJanela = (int)($_SESSION['login_falhas_inicio'] ?? 0);
+
+        if ($inicioJanela <= 0 || ($agora - $inicioJanela) > $janela) {
+            $_SESSION['login_falhas_inicio'] = $agora;
+            $_SESSION['login_falhas_total'] = 0;
+        }
+
+        $_SESSION['login_falhas_total'] = (int)($_SESSION['login_falhas_total'] ?? 0) + 1;
+
+        if ($_SESSION['login_falhas_total'] >= $limite) {
+            $_SESSION['login_bloqueado_ate'] = $agora + 300;
+        }
+    }
+}
+
+if (!function_exists('rojexLoginLimparFalhasLocais')) {
+    function rojexLoginLimparFalhasLocais(): void
+    {
+        unset(
+            $_SESSION['login_falhas_inicio'],
+            $_SESSION['login_falhas_total'],
+            $_SESSION['login_bloqueado_ate']
         );
-    } catch (Throwable $e) {
-        error_log('ROJEX LOGIN LOG: ' . $e->getMessage());
+    }
+}
+
+if (!function_exists('rojexRegistrarEventoLogin')) {
+    function rojexRegistrarEventoLogin(
+        ?mysqli $conn,
+        string $acao,
+        string $resultado,
+        string $nivel,
+        string $usuarioInformado,
+        ?array $usuarioEncontrado = null,
+        ?string $detalhes = null
+    ): void {
+        if (!$conn || !function_exists('sgl_registrar_log')) {
+            return;
+        }
+
+        try {
+            $registroId = isset($usuarioEncontrado['id'])
+                ? (string)$usuarioEncontrado['id']
+                : null;
+
+            sgl_registrar_log(
+                $conn,
+                $acao,
+                'usuarios',
+                $registroId,
+                $detalhes,
+                [
+                    'tipo_acao' => 'LOGIN',
+                    'modulo' => 'Autenticação',
+                    'origem' => 'Tela de login',
+                    'resultado' => $resultado,
+                    'nivel' => $nivel,
+                    'dados_novos' => [
+                        'usuario_informado' => mb_substr(
+                            $usuarioInformado,
+                            0,
+                            80,
+                            'UTF-8'
+                        ),
+                        'usuario_localizado' => $usuarioEncontrado !== null,
+                    ],
+                ]
+            );
+        } catch (Throwable $e) {
+            error_log('ROJEX LOGIN LOG: ' . $e->getMessage());
+        }
     }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $usuario = trim((string)($_POST['usuario'] ?? ''));
+    $usuario = mb_substr(
+        trim((string)($_POST['usuario'] ?? '')),
+        0,
+        80,
+        'UTF-8'
+    );
     $senha = (string)($_POST['senha'] ?? '');
     $csrf = (string)($_POST['csrf_token'] ?? '');
     $conn = null;
 
-    if (!validarTokenCsrf($csrf)) {
+    if (rojexLoginBloqueadoTemporariamente()) {
+        rojexLoginAplicarAtrasoSeguro(
+            (int)($_SESSION['login_falhas_total'] ?? 5)
+        );
+        $mensagem_erro =
+            'Muitas tentativas de acesso. Aguarde alguns minutos e tente novamente.';
+    } elseif (!validarTokenCsrf($csrf)) {
+        rojexLoginRegistrarFalhaLocal();
+
         try {
             $conn = conectar();
             rojexRegistrarEventoLogin(
@@ -89,8 +286,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             error_log('ROJEX LOGIN CSRF LOG: ' . $eLog->getMessage());
         }
 
-        $mensagem_erro = 'Sessão expirada ou formulário inválido. Atualize a página e tente novamente.';
+        $mensagem_erro =
+            'Sessão expirada ou formulário inválido. Atualize a página e tente novamente.';
     } elseif ($usuario === '' || $senha === '') {
+        rojexLoginRegistrarFalhaLocal();
+
         try {
             $conn = conectar();
             rojexRegistrarEventoLogin(
@@ -108,25 +308,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $mensagem_erro = 'Por favor, preencha todos os campos.';
+    } elseif (strlen($senha) > 1024) {
+        rojexLoginRegistrarFalhaLocal();
+        $mensagem_erro = 'Usuário ou senha inválidos.';
     } else {
         try {
             $conn = conectar();
             $user = null;
             $usuarioLocalizado = null;
             $usuarioInativo = null;
+            $tabelaOrigem = null;
 
-            /*
-             * Mantém compatibilidade com as estruturas de usuários existentes.
-             */
             $consultasLogin = [
-                "SELECT id, nome, usuario, senha, perfil, status FROM usuarios WHERE usuario = ? LIMIT 1",
-                "SELECT id, nome, usuario, senha, perfil, status FROM usuarios_sistema WHERE usuario = ? LIMIT 1",
-                "SELECT id, nome, usuario, senha, perfil, status FROM usuarios_sistema_backup_login WHERE usuario = ? LIMIT 1",
+                'usuarios' =>
+                    "SELECT id, nome, usuario, senha, perfil, status
+                     FROM usuarios
+                     WHERE usuario = ?
+                     LIMIT 1",
+                'usuarios_sistema' =>
+                    "SELECT id, nome, usuario, senha, perfil, status
+                     FROM usuarios_sistema
+                     WHERE usuario = ?
+                     LIMIT 1",
+                'usuarios_sistema_backup_login' =>
+                    "SELECT id, nome, usuario, senha, perfil, status
+                     FROM usuarios_sistema_backup_login
+                     WHERE usuario = ?
+                     LIMIT 1",
             ];
 
-            foreach ($consultasLogin as $sql) {
+            foreach ($consultasLogin as $nomeTabela => $sql) {
                 try {
                     $stmt = $conn->prepare($sql);
+
                     if (!$stmt) {
                         continue;
                     }
@@ -139,25 +353,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($result instanceof mysqli_result) {
                         $result->free();
                     }
+
                     $stmt->close();
 
                     if ($registro) {
                         $usuarioLocalizado = $registro;
+                        $tabelaOrigem = $nomeTabela;
                         $status = trim((string)($registro['status'] ?? 'Ativo'));
 
-                        if ($status === '' || strcasecmp($status, 'Ativo') === 0 || $status === '1') {
+                        if (
+                            $status === ''
+                            || strcasecmp($status, 'Ativo') === 0
+                            || $status === '1'
+                        ) {
                             $user = $registro;
                         } else {
                             $usuarioInativo = $registro;
                         }
+
                         break;
                     }
                 } catch (Throwable $eTabela) {
-                    error_log('ROJEX LOGIN consulta ignorada: ' . $eTabela->getMessage());
+                    error_log(
+                        'ROJEX LOGIN consulta ignorada em ' .
+                        $nomeTabela . ': ' . $eTabela->getMessage()
+                    );
                 }
             }
 
             if ($usuarioInativo) {
+                rojexLoginRegistrarFalhaLocal();
+                rojexLoginAplicarAtrasoSeguro(
+                    (int)($_SESSION['login_falhas_total'] ?? 1)
+                );
+
                 rojexRegistrarEventoLogin(
                     $conn,
                     'Tentativa de login de usuário inativo',
@@ -171,22 +400,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $mensagem_erro = 'Usuário ou senha inválidos.';
                 $conn->close();
             } else {
-                $senhaOk = false;
+                $validacaoSenha = [
+                    'ok' => false,
+                    'legado' => false,
+                    'tipo' => 'ausente',
+                ];
 
                 if ($user) {
-                    $hash = (string)$user['senha'];
-                    $senhaOk = password_verify($senha, $hash)
-                        || hash_equals($hash, md5($senha))
-                        || hash_equals($hash, $senha);
+                    $validacaoSenha = rojexValidarSenhaCompatível(
+                        $senha,
+                        (string)$user['senha']
+                    );
+                } else {
+                    /*
+                     * Equaliza parcialmente o custo temporal para usuário inexistente.
+                     * O hash é estático e não representa nenhuma credencial real.
+                     */
+                    password_verify(
+                        $senha,
+                        '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2uheWG/igi.'
+                    );
                 }
 
-                if ($user && $senhaOk) {
+                if ($user && $validacaoSenha['ok']) {
+                    $senhaMigrada = false;
+
+                    if (
+                        $validacaoSenha['legado']
+                        && is_string($tabelaOrigem)
+                    ) {
+                        try {
+                            $senhaMigrada = rojexMigrarSenhaLegada(
+                                $conn,
+                                $tabelaOrigem,
+                                (int)$user['id'],
+                                $senha
+                            );
+                        } catch (Throwable $eMigracao) {
+                            error_log(
+                                'ROJEX MIGRAÇÃO SENHA: ' .
+                                $eMigracao->getMessage()
+                            );
+                        }
+                    }
+
                     session_regenerate_id(true);
+
                     $_SESSION['user_id'] = (int)$user['id'];
                     $_SESSION['username'] = (string)$user['usuario'];
                     $_SESSION['nome'] = (string)$user['nome'];
-                    $_SESSION['perfil'] = (string)$user['perfil'];
-                    $_SESSION['ultimo_acesso'] = time();
+                    $_SESSION['perfil'] = rojexNormalizarPerfil(
+                        (string)$user['perfil']
+                    );
+
+                    registrarInicioSessaoAutenticada();
+                    rojexLoginLimparFalhasLocais();
 
                     rojexRegistrarEventoLogin(
                         $conn,
@@ -195,14 +463,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'INFO',
                         $usuario,
                         $user,
-                        'Sessão autenticada e iniciada com sucesso.'
+                        $senhaMigrada
+                            ? 'Sessão autenticada. Senha legada migrada automaticamente para hash seguro.'
+                            : 'Sessão autenticada e iniciada com sucesso.'
                     );
 
-                    // Atualização compatível: executa apenas se a coluna existir.
+                    if ($senhaMigrada) {
+                        rojexRegistrarEventoLogin(
+                            $conn,
+                            'Senha legada migrada automaticamente',
+                            'SUCESSO',
+                            'INFO',
+                            $usuario,
+                            $user,
+                            'Formato anterior: ' . $validacaoSenha['tipo'] .
+                            '. Novo formato: password_hash.'
+                        );
+                    }
+
                     try {
-                        if (colunaExiste($conn, 'usuarios', 'ultimo_login')) {
+                        if (
+                            $tabelaOrigem === 'usuarios'
+                            && rojexLoginColunaExiste(
+                                $conn,
+                                'usuarios',
+                                'ultimo_login'
+                            )
+                        ) {
                             $idUsuario = (int)$user['id'];
-                            $stmtLogin = $conn->prepare("UPDATE usuarios SET ultimo_login = NOW() WHERE id = ?");
+                            $stmtLogin = $conn->prepare(
+                                "UPDATE usuarios
+                                 SET ultimo_login = NOW()
+                                 WHERE id = ?"
+                            );
+
                             if ($stmtLogin) {
                                 $stmtLogin->bind_param('i', $idUsuario);
                                 $stmtLogin->execute();
@@ -210,13 +504,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             }
                         }
                     } catch (Throwable $eUltimoLogin) {
-                        error_log('ROJEX ULTIMO LOGIN: ' . $eUltimoLogin->getMessage());
+                        error_log(
+                            'ROJEX ULTIMO LOGIN: ' .
+                            $eUltimoLogin->getMessage()
+                        );
                     }
 
                     $conn->close();
                     header('Location: ../index.php');
                     exit();
                 }
+
+                rojexLoginRegistrarFalhaLocal();
+                rojexLoginAplicarAtrasoSeguro(
+                    (int)($_SESSION['login_falhas_total'] ?? 1)
+                );
 
                 rojexRegistrarEventoLogin(
                     $conn,
@@ -255,7 +557,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 error_log('ROJEX LOGIN ERRO LOG: ' . $eLog->getMessage());
             }
 
-            $mensagem_erro = 'Erro ao tentar fazer login. Verifique o banco de dados e tente novamente.';
+            $mensagem_erro =
+                'Não foi possível concluir o acesso. Tente novamente em instantes.';
         }
     }
 }
@@ -308,15 +611,15 @@ $logoLogin = '../' . $empresa->logoOficial();
             <?php if ($mensagem_erro): ?>
                 <div class="mensagem-erro"><?= htmlspecialchars($mensagem_erro, ENT_QUOTES, 'UTF-8') ?></div>
             <?php endif; ?>
-            <form action="login.php" method="POST" autocomplete="off">
+            <form action="login.php" method="POST" autocomplete="on">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                 <div class="form-group">
                     <label for="usuario">Usuário</label>
-                    <input type="text" id="usuario" name="usuario" required autofocus>
+                    <input type="text" id="usuario" name="usuario" maxlength="80" autocomplete="username" required autofocus>
                 </div>
                 <div class="form-group">
                     <label for="senha">Senha</label>
-                    <input type="password" id="senha" name="senha" required>
+                    <input type="password" id="senha" name="senha" maxlength="1024" autocomplete="current-password" required>
                 </div>
                 <button type="submit"><i class="bi bi-box-arrow-in-right"></i> Entrar</button>
             </form>

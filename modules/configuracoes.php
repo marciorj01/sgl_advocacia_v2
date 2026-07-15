@@ -241,6 +241,110 @@ function sgl_cfg_set(mysqli $conn, string $chave, string $valor): void {
     $stmt->close();
 }
 
+
+/**
+ * Busca as preferências visuais individuais do usuário autenticado.
+ *
+ * A ausência de registro é válida e retorna os padrões seguros.
+ * A tabela é criada exclusivamente pela migração oficial 4.4.2.
+ */
+function rojex_usuario_preferencias_get(mysqli $conn, int $usuarioId): array {
+    $padroes = [
+        'tema_modo' => 'claro',
+        'tema_densidade' => 'confortavel',
+        'tema_bordas' => 'suaves',
+        'tema_fonte_percentual' => '100',
+    ];
+
+    if ($usuarioId <= 0 || !sgl_tabela_existe($conn, 'usuarios_preferencias')) {
+        return $padroes;
+    }
+
+    try {
+        $stmt = $conn->prepare(
+            "SELECT tema_modo, tema_densidade, tema_bordas, tema_fonte_percentual
+               FROM usuarios_preferencias
+              WHERE usuario_id = ?
+              LIMIT 1"
+        );
+        $stmt->bind_param('i', $usuarioId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$row) {
+            return $padroes;
+        }
+
+        return [
+            'tema_modo' => in_array((string)($row['tema_modo'] ?? ''), ['claro','escuro','automatico'], true)
+                ? (string)$row['tema_modo']
+                : $padroes['tema_modo'],
+            'tema_densidade' => in_array((string)($row['tema_densidade'] ?? ''), ['compacta','confortavel'], true)
+                ? (string)$row['tema_densidade']
+                : $padroes['tema_densidade'],
+            'tema_bordas' => in_array((string)($row['tema_bordas'] ?? ''), ['retas','suaves','arredondadas'], true)
+                ? (string)$row['tema_bordas']
+                : $padroes['tema_bordas'],
+            'tema_fonte_percentual' => (string)max(
+                90,
+                min(115, (int)($row['tema_fonte_percentual'] ?? 100))
+            ),
+        ];
+    } catch (Throwable $e) {
+        return $padroes;
+    }
+}
+
+/**
+ * Insere ou atualiza somente as preferências do usuário autenticado.
+ */
+function rojex_usuario_preferencias_set(
+    mysqli $conn,
+    int $usuarioId,
+    string $modo,
+    string $densidade,
+    string $bordas,
+    int $fonte
+): bool {
+    if ($usuarioId <= 0 || !sgl_tabela_existe($conn, 'usuarios_preferencias')) {
+        return false;
+    }
+
+    try {
+        $stmt = $conn->prepare(
+            "INSERT INTO usuarios_preferencias
+                (usuario_id, tema_modo, tema_densidade, tema_bordas, tema_fonte_percentual)
+             VALUES (?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE
+                tema_modo = VALUES(tema_modo),
+                tema_densidade = VALUES(tema_densidade),
+                tema_bordas = VALUES(tema_bordas),
+                tema_fonte_percentual = VALUES(tema_fonte_percentual)"
+        );
+        $stmt->bind_param('isssi', $usuarioId, $modo, $densidade, $bordas, $fonte);
+        $ok = $stmt->execute();
+        $stmt->close();
+        return $ok;
+    } catch (Throwable $e) {
+        return false;
+    }
+}
+
+/**
+ * Restaura somente as preferências individuais do usuário.
+ */
+function rojex_usuario_preferencias_reset(mysqli $conn, int $usuarioId): bool {
+    return rojex_usuario_preferencias_set(
+        $conn,
+        $usuarioId,
+        'claro',
+        'confortavel',
+        'suaves',
+        100
+    );
+}
+
 function sgl_limpar_texto(string $texto, int $max = 255): string {
     $texto = trim(strip_tags($texto));
     return mb_substr($texto, 0, $max, 'UTF-8');
@@ -350,6 +454,7 @@ function sgl_buscar_lixeira(mysqli $conn): array {
         'contas_receber' => ['campo' => sgl_coluna_existe($conn, 'contas_receber', 'descricao') ? 'descricao' : 'cliente', 'cond' => sgl_coluna_existe($conn, 'contas_receber', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Contas a Receber'],
         'documentos_arquivos' => ['campo' => sgl_coluna_existe($conn, 'documentos_arquivos', 'titulo') ? 'titulo' : 'nome_arquivo', 'cond' => sgl_coluna_existe($conn, 'documentos_arquivos', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Documentos'],
         'modelos_documentos' => ['campo' => sgl_coluna_existe($conn, 'modelos_documentos', 'titulo') ? 'titulo' : 'nome', 'cond' => sgl_coluna_existe($conn, 'modelos_documentos', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Modelos'],
+        'recibos' => ['campo' => sgl_coluna_existe($conn, 'recibos', 'numero') ? 'numero' : 'nome_cliente', 'cond' => sgl_coluna_existe($conn, 'recibos', 'deletado') ? 'deletado = 1' : "status='Cancelado'", 'tipo' => 'Recibos'],
     ];
 
     $stmtLog = null;
@@ -436,7 +541,7 @@ function sgl_lixeira_item_valido(string $valor, array $permitidas): ?array {
     $tabela = preg_replace('/[^a-zA-Z0-9_]/', '', $partes[0]);
     $id = trim($partes[1]);
 
-    if (!in_array($tabela, $permitidas, true) || $id === '' || !preg_match('/^\d+$/', $id)) {
+    if (!in_array($tabela, $permitidas, true) || $id === '' || !preg_match('/^[A-Za-z0-9_-]{1,80}$/', $id)) {
         return null;
     }
 
@@ -2269,6 +2374,10 @@ if ($acao_cfg === 'salvar_marca') {
 }
 
 if ($acao_cfg === 'salvar_tema') {
+    if ($usuarioSessaoId <= 0) {
+        sgl_redirect_cfg('tema', 'erro', 'Sessão de usuário inválida. Entre novamente no sistema.');
+    }
+
     $modoTema = in_array(($_POST['tema_modo'] ?? 'claro'), ['claro','escuro','automatico'], true)
         ? (string)$_POST['tema_modo']
         : 'claro';
@@ -2280,37 +2389,91 @@ if ($acao_cfg === 'salvar_tema') {
         : 'suaves';
     $fonte = max(90, min(115, (int)($_POST['tema_fonte_percentual'] ?? 100)));
 
-    sgl_cfg_set($conn, 'cor_primaria', sgl_validar_hex((string)($_POST['cor_primaria'] ?? ''), '#1a3c5e'));
-    sgl_cfg_set($conn, 'cor_secundaria', sgl_validar_hex((string)($_POST['cor_secundaria'] ?? ''), '#2c6fad'));
-    sgl_cfg_set($conn, 'cor_accent', sgl_validar_hex((string)($_POST['cor_accent'] ?? ''), '#f0a500'));
-    sgl_cfg_set($conn, 'cor_fundo', sgl_validar_hex((string)($_POST['cor_fundo'] ?? ''), '#f4f6f9'));
-    sgl_cfg_set($conn, 'cor_texto', sgl_validar_hex((string)($_POST['cor_texto'] ?? ''), '#212529'));
-    sgl_cfg_set($conn, 'tema_modo', $modoTema);
-    sgl_cfg_set($conn, 'tema_densidade', $densidade);
-    sgl_cfg_set($conn, 'tema_bordas', $bordas);
-    sgl_cfg_set($conn, 'tema_fonte_percentual', (string)$fonte);
+    if (!rojex_usuario_preferencias_set(
+        $conn,
+        $usuarioSessaoId,
+        $modoTema,
+        $densidade,
+        $bordas,
+        $fonte
+    )) {
+        sgl_redirect_cfg(
+            'tema',
+            'erro',
+            'Não foi possível salvar suas preferências. Confirme a migração 4.4.2.'
+        );
+    }
 
-    sgl_log($conn, 'Atualizou identidade visual Enterprise', 'configuracoes', null, 'Cores, modo, densidade, bordas e escala de fonte.');
-    sgl_redirect_cfg('tema', 'sucesso', 'Tema Enterprise salvo com sucesso.');
+    $detalhesLog = "Modo: {$modoTema}; Densidade: {$densidade}; Bordas: {$bordas}; Fonte: {$fonte}%.";
+
+    if ($ehUsuarioMaster) {
+        sgl_cfg_set($conn, 'cor_primaria', sgl_validar_hex((string)($_POST['cor_primaria'] ?? ''), '#1a3c5e'));
+        sgl_cfg_set($conn, 'cor_secundaria', sgl_validar_hex((string)($_POST['cor_secundaria'] ?? ''), '#2c6fad'));
+        sgl_cfg_set($conn, 'cor_accent', sgl_validar_hex((string)($_POST['cor_accent'] ?? ''), '#f0a500'));
+        sgl_cfg_set($conn, 'cor_fundo', sgl_validar_hex((string)($_POST['cor_fundo'] ?? ''), '#f4f6f9'));
+        sgl_cfg_set($conn, 'cor_texto', sgl_validar_hex((string)($_POST['cor_texto'] ?? ''), '#212529'));
+
+        $detalhesLog .= ' Identidade institucional atualizada pelo MASTER.';
+        sgl_log(
+            $conn,
+            'Atualizou tema e identidade visual Enterprise',
+            'usuarios_preferencias',
+            (string)$usuarioSessaoId,
+            $detalhesLog
+        );
+        sgl_redirect_cfg('tema', 'sucesso', 'Identidade institucional e suas preferências foram salvas.');
+    }
+
+    sgl_log(
+        $conn,
+        'Atualizou preferências visuais individuais',
+        'usuarios_preferencias',
+        (string)$usuarioSessaoId,
+        $detalhesLog
+    );
+    sgl_redirect_cfg('tema', 'sucesso', 'Suas preferências visuais foram salvas.');
 }
 
 if ($acao_cfg === 'restaurar_tema') {
-    $padroesTema = [
-        'cor_primaria' => '#1a3c5e',
-        'cor_secundaria' => '#2c6fad',
-        'cor_accent' => '#f0a500',
-        'cor_fundo' => '#f4f6f9',
-        'cor_texto' => '#212529',
-        'tema_modo' => 'claro',
-        'tema_densidade' => 'confortavel',
-        'tema_bordas' => 'suaves',
-        'tema_fonte_percentual' => '100',
-    ];
-    foreach ($padroesTema as $chaveTema => $valorTema) {
-        sgl_cfg_set($conn, $chaveTema, $valorTema);
+    if ($usuarioSessaoId <= 0) {
+        sgl_redirect_cfg('tema', 'erro', 'Sessão de usuário inválida. Entre novamente no sistema.');
     }
-    sgl_log($conn, 'Restaurou tema padrão', 'configuracoes');
-    sgl_redirect_cfg('tema', 'aviso', 'Tema padrão restaurado.');
+
+    if (!rojex_usuario_preferencias_reset($conn, $usuarioSessaoId)) {
+        sgl_redirect_cfg(
+            'tema',
+            'erro',
+            'Não foi possível restaurar suas preferências. Confirme a migração 4.4.2.'
+        );
+    }
+
+    if ($ehUsuarioMaster) {
+        foreach ([
+            'cor_primaria' => '#1a3c5e',
+            'cor_secundaria' => '#2c6fad',
+            'cor_accent' => '#f0a500',
+            'cor_fundo' => '#f4f6f9',
+            'cor_texto' => '#212529',
+        ] as $chaveTema => $valorTema) {
+            sgl_cfg_set($conn, $chaveTema, $valorTema);
+        }
+
+        sgl_log(
+            $conn,
+            'Restaurou tema institucional e preferências individuais',
+            'usuarios_preferencias',
+            (string)$usuarioSessaoId
+        );
+        sgl_redirect_cfg('tema', 'aviso', 'Tema institucional e suas preferências foram restaurados.');
+    }
+
+    sgl_log(
+        $conn,
+        'Restaurou preferências visuais individuais',
+        'usuarios_preferencias',
+        (string)$usuarioSessaoId
+    );
+    sgl_redirect_cfg('tema', 'aviso', 'Suas preferências visuais foram restauradas.');
 }
 
 if ($acao_cfg === 'novo_usuario') {
@@ -2727,7 +2890,7 @@ if ($acao_cfg === 'salvar_sistema') {
     sgl_redirect_cfg('sistema', 'sucesso', 'Configurações do Sistema Enterprise salvas com sucesso.');
 }
 
-$lixeira_permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos'];
+$lixeira_permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos','recibos'];
 
 if ($acao_cfg === 'restaurar_item_lixeira' && !empty($_POST['tabela']) && !empty($_POST['item_id'])) {
     $item = sgl_lixeira_item_valido((string)$_POST['tabela'] . '|' . (string)$_POST['item_id'], $lixeira_permitidas);
@@ -2874,10 +3037,6 @@ $config_padrao = [
     'cor_accent' => '#f0a500',
     'cor_fundo' => '#f4f6f9',
     'cor_texto' => '#212529',
-    'tema_modo' => 'claro',
-    'tema_densidade' => 'confortavel',
-    'tema_bordas' => 'suaves',
-    'tema_fonte_percentual' => '100',
     'modo_debug' => '0',
     'dias_alerta_prazos' => '7',
     'itens_por_pagina' => '25',
@@ -2919,6 +3078,10 @@ $cfg = [];
 foreach ($config_padrao as $chave => $default) {
     $cfg[$chave] = sgl_cfg_get($conn, $chave, $default);
 }
+
+// Preferências visuais são individuais e nunca são lidas da tabela global.
+$preferenciasUsuario = rojex_usuario_preferencias_get($conn, $usuarioSessaoId);
+$cfg = array_merge($cfg, $preferenciasUsuario);
 
 // Fechamento técnico da Sprint 4.1.3. A migração é executada somente uma vez,
 // preservando versões futuras que venham a ser registradas pela Central de Atualizações.
@@ -3946,11 +4109,25 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                     <div class="col-md-6">
                         <label class="form-label fw-semibold"><?=$c[1]?></label>
                         <div class="input-group">
-                            <input type="color" name="<?=$c[0]?>" id="<?=$c[0]?>" class="form-control form-control-color" value="<?=htmlspecialchars($cfg[$c[0]])?>" oninput="syncCor('<?=$c[0]?>');atualizarPreviewTema();">
-                            <input type="text" id="<?=$c[0]?>_txt" class="form-control" value="<?=htmlspecialchars($cfg[$c[0]])?>" maxlength="7" style="font-family:monospace" oninput="syncTxt('<?=$c[0]?>');atualizarPreviewTema();">
+                            <input type="color" name="<?=$c[0]?>" id="<?=$c[0]?>" class="form-control form-control-color" value="<?=htmlspecialchars($cfg[$c[0]])?>" <?=$ehUsuarioMaster?'':'disabled'?> oninput="syncCor('<?=$c[0]?>');atualizarPreviewTema();">
+                            <input type="text" id="<?=$c[0]?>_txt" class="form-control" value="<?=htmlspecialchars($cfg[$c[0]])?>" maxlength="7" style="font-family:monospace" <?=$ehUsuarioMaster?'':'disabled'?> oninput="syncTxt('<?=$c[0]?>');atualizarPreviewTema();">
                         </div>
                     </div>
                     <?php endforeach; ?>
+
+                    <div class="col-12">
+                        <?php if ($ehUsuarioMaster): ?>
+                            <div class="alert alert-primary small mb-0">
+                                <i class="bi bi-building-gear me-1"></i>
+                                As cores acima são institucionais e afetam todos os usuários deste escritório.
+                            </div>
+                        <?php else: ?>
+                            <div class="alert alert-secondary small mb-0">
+                                <i class="bi bi-lock me-1"></i>
+                                As cores institucionais são administradas pelo usuário MASTER. As opções abaixo são exclusivas da sua conta.
+                            </div>
+                        <?php endif; ?>
+                    </div>
 
                     <div class="col-md-6">
                         <label class="form-label fw-semibold">Modo visual</label>
@@ -4001,9 +4178,9 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
             </div>
 
             <div class="col-12 d-flex gap-2 flex-wrap">
-                <button class="btn btn-primary"><i class="bi bi-floppy me-1"></i>Salvar tema Enterprise</button>
+                <button class="btn btn-primary"><i class="bi bi-floppy me-1"></i><?=$ehUsuarioMaster?'Salvar tema Enterprise':'Salvar minhas preferências'?></button>
         </form>
-                <form method="POST" onsubmit="return confirm('Restaurar o tema padrão do sistema?')">
+                <form method="POST" onsubmit="return confirm('<?=$ehUsuarioMaster?'Restaurar o tema institucional e suas preferências?':'Restaurar somente suas preferências visuais?'?>')">
                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                     <input type="hidden" name="acao_cfg" value="restaurar_tema">
                     <button class="btn btn-outline-secondary"><i class="bi bi-arrow-counterclockwise me-1"></i>Restaurar padrão</button>

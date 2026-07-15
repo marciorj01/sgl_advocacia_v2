@@ -811,9 +811,22 @@ if ($acao === 'editar' && !empty($hon_editar['id'])) {
             <a href="?mod=honorarios&acao=lixeira" class="btn btn-outline-danger">
                 <i class="bi bi-trash"></i> Ver Lixeira
             </a>
-            <button onclick="window.print()" class="btn btn-outline-secondary">
-                <i class="bi bi-printer"></i> Imprimir / Salvar PDF
-            </button>
+            <?php
+            $paramsRelatorioHonorarios = http_build_query([
+                'busca' => (string)($_GET['busca'] ?? ''),
+                'status' => (string)($_GET['status'] ?? ''),
+                'tipo' => (string)($_GET['tipo'] ?? ''),
+                'vencimento' => (string)($_GET['vencimento'] ?? ''),
+            ]);
+            ?>
+            <a
+                href="modules/relatorios/honorarios.php?<?= htmlspecialchars($paramsRelatorioHonorarios, ENT_QUOTES, 'UTF-8') ?>"
+                target="_blank"
+                rel="noopener"
+                class="btn btn-outline-secondary"
+            >
+                <i class="bi bi-printer"></i> Relatório / Salvar PDF
+            </a>
             <a href="?mod=honorarios&acao=novo" class="btn btn-primary">
                 <i class="bi bi-plus"></i> Novo Honorário
             </a>

@@ -1248,8 +1248,8 @@ if ($acao === 'caixa') {
     <div class="container-fluid caixa-relatorio">
         <style>
             .relatorio-print-head{display:none;}
-            .kpi-card{border:1px solid #e5e7eb;border-radius:12px;background:#fff;box-shadow:0 4px 14px rgba(15,23,42,.06);height:100%;}
-            .kpi-card .small-title{font-size:.72rem;text-transform:uppercase;color:#6b7280;letter-spacing:.03em;}
+            .kpi-card{border:1px solid var(--rojex-border);border-radius:var(--rojex-radius);background:var(--rojex-surface);color:var(--rojex-text);box-shadow:var(--rojex-shadow);height:100%;}
+            .kpi-card .small-title{font-size:.72rem;text-transform:uppercase;color:var(--rojex-muted);letter-spacing:.03em;}
             .kpi-card .big-number{font-size:1.65rem;font-weight:800;line-height:1.1;}
             .table-relatorio th{font-size:.78rem;text-transform:uppercase;letter-spacing:.02em;}
             @media print{
@@ -1445,9 +1445,12 @@ if ($acao === 'bancos') {
                                 <i class="bi bi-arrow-left"></i> Voltar à Listagem
                             </a>
                         <?php else: ?>
-                            <button onclick="imprimirRelatorio('cp')" class="btn btn-outline-secondary no-print">
-                                <i class="bi bi-printer"></i> Imprimir / Salvar PDF
-                            </button>
+                            <a href="modules/relatorios/financeiro.php?aba=cp" target="_blank" rel="noopener" class="btn btn-outline-secondary no-print">
+                                <i class="bi bi-printer"></i> Relatório / Salvar PDF
+                            </a>
+                            <a href="modules/relatorios/financeiro_excel.php?aba=cp" class="btn btn-outline-success no-print">
+                                <i class="bi bi-file-earmark-excel"></i> Exportar Excel
+                            </a>
                             <a href="?mod=financeiro&aba=cp&acao=lixeira" class="btn btn-outline-danger no-print">
                                 <i class="bi bi-trash"></i> Ver Lixeira
                             </a>
@@ -1767,9 +1770,12 @@ if ($acao === 'bancos') {
                                 <i class="bi bi-arrow-left"></i> Voltar à Listagem
                             </a>
                         <?php else: ?>
-                            <button onclick="imprimirRelatorio('cr')" class="btn btn-outline-secondary no-print">
-                                <i class="bi bi-printer"></i> Imprimir / Salvar PDF
-                            </button>
+                            <a href="modules/relatorios/financeiro.php?aba=cr" target="_blank" rel="noopener" class="btn btn-outline-secondary no-print">
+                                <i class="bi bi-printer"></i> Relatório / Salvar PDF
+                            </a>
+                            <a href="modules/relatorios/financeiro_excel.php?aba=cr" class="btn btn-outline-success no-print">
+                                <i class="bi bi-file-earmark-excel"></i> Exportar Excel
+                            </a>
                             <a href="?mod=financeiro&aba=cr&acao=lixeira" class="btn btn-outline-danger no-print">
                                 <i class="bi bi-trash"></i> Ver Lixeira
                             </a>

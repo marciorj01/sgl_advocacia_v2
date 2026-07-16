@@ -13,8 +13,33 @@ $erro = '';
 
 if ($chave === '') {
     $erro = 'Chave de validação não informada.';
+} elseif (!preg_match('/^[a-f0-9]{64}$/i', $chave)) {
+    $erro = 'Formato de chave de validação inválido.';
 } else {
-    $stmt = $conn->prepare("SELECT numero, nome_cliente, cpf_cnpj, processo_numero, data_emissao, data_pagamento, referente, forma_pagamento, valor, status, chave_validacao FROM recibos WHERE chave_validacao=? AND COALESCE(deletado,0)=0 LIMIT 1");
+    $stmt = $conn->prepare(
+        "SELECT
+            r.numero,
+            r.nome_cliente,
+            r.cpf_cnpj,
+            r.processo_numero,
+            r.data_emissao,
+            r.data_pagamento,
+            r.referente,
+            r.forma_pagamento,
+            r.valor,
+            r.status,
+            r.chave_validacao,
+            r.tenant_id,
+            r.escritorio_id,
+            COALESCE(NULLIF(e.nome_fantasia,''), NULLIF(e.razao_social,''), 'Escritório responsável') AS escritorio_nome
+         FROM recibos r
+         LEFT JOIN escritorios_saas e
+           ON e.id = r.escritorio_id
+          AND e.tenant_id = r.tenant_id
+         WHERE r.chave_validacao=?
+           AND COALESCE(r.deletado,0)=0
+         LIMIT 1"
+    );
     $stmt->bind_param('s', $chave);
     $stmt->execute();
     $res = $stmt->get_result();
@@ -24,13 +49,14 @@ if ($chave === '') {
         $erro = 'Recibo não encontrado ou chave inválida.';
     }
 }
+$conn->close();
 ?>
 <!doctype html>
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Validação de Recibo | SGL Advocacia</title>
+<title>Validação de Recibo | ROJEX.AI</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
 body{background:#f4f6f8;font-family:Arial, Helvetica, sans-serif}.card-validacao{max-width:760px;margin:40px auto;border:0;border-radius:14px;box-shadow:0 10px 30px rgba(15,23,42,.12)}.selo{width:72px;height:72px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:34px;margin:auto}.ok{background:#dcfce7;color:#15803d}.erro{background:#fee2e2;color:#b91c1c}.titulo{color:#0d3b66;font-weight:800}
@@ -43,7 +69,8 @@ body{background:#f4f6f8;font-family:Arial, Helvetica, sans-serif}.card-validacao
       <?php if ($recibo): ?>
         <div class="selo ok mb-3">✓</div>
         <h1 class="h3 titulo">Recibo válido</h1>
-        <p class="text-muted">Este recibo foi localizado na base do SGL Advocacia.</p>
+        <p class="text-muted">Este recibo foi localizado e validado na plataforma ROJEX.AI.</p>
+        <p class="fw-semibold mb-0"><?= hVal($recibo['escritorio_nome'] ?? 'Escritório responsável') ?></p>
         <div class="table-responsive mt-4 text-start">
           <table class="table table-bordered align-middle">
             <tr><th style="width:220px">Número</th><td><?= hVal($recibo['numero']) ?></td></tr>

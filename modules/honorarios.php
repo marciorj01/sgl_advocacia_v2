@@ -2,6 +2,107 @@
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
 sgl_integracao_garantir_financeiro($conn);
+
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    $conn->close();
+    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Honorários.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? trim((string)rojexTenantId())
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    $conn->close();
+    throw new RuntimeException('Tenant ou escritório não identificado para o módulo Honorários.');
+}
+
+function honorariosTenantId(): string
+{
+    return function_exists('rojexTenantId')
+        ? trim((string)rojexTenantId())
+        : trim((string)($_SESSION['tenant_id'] ?? ''));
+}
+
+function honorariosEscritorioId(): int
+{
+    return function_exists('rojexEscritorioId')
+        ? (int)rojexEscritorioId()
+        : (int)($_SESSION['escritorio_id'] ?? 0);
+}
+
+function honorariosColunaExiste(mysqli $conn, string $tabela, string $coluna): bool
+{
+    $tabela = $conn->real_escape_string($tabela);
+    $coluna = $conn->real_escape_string($coluna);
+    $res = $conn->query("SHOW COLUMNS FROM `{$tabela}` LIKE '{$coluna}'");
+    return $res && $res->num_rows > 0;
+}
+
+function honorariosAdicionarColuna(mysqli $conn, string $tabela, string $coluna, string $definicao): void
+{
+    if (!honorariosColunaExiste($conn, $tabela, $coluna)) {
+        if (!$conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}")) {
+            throw new RuntimeException("Não foi possível adicionar {$coluna} em {$tabela}: " . $conn->error);
+        }
+    }
+}
+
+function honorariosGarantirEstruturaTenant(mysqli $conn): void
+{
+    honorariosAdicionarColuna($conn, 'honorarios', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    honorariosAdicionarColuna($conn, 'honorarios', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+    honorariosAdicionarColuna($conn, 'honorarios_parcelas', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    honorariosAdicionarColuna($conn, 'honorarios_parcelas', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+
+    $tenantLegado = '';
+    $escritorioLegado = 0;
+    $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave = 'tenant_id' LIMIT 1");
+    if ($stmtCfg) {
+        $stmtCfg->execute();
+        $rowCfg = $stmtCfg->get_result()->fetch_assoc();
+        $stmtCfg->close();
+        $tenantLegado = trim((string)($rowCfg['valor'] ?? ''));
+    }
+    if ($tenantLegado !== '') {
+        $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
+        if ($stmtEsc) {
+            $stmtEsc->bind_param('s', $tenantLegado);
+            $stmtEsc->execute();
+            $rowEsc = $stmtEsc->get_result()->fetch_assoc();
+            $stmtEsc->close();
+            $escritorioLegado = (int)($rowEsc['id'] ?? 0);
+        }
+    }
+    if ($tenantLegado !== '' && $escritorioLegado > 0) {
+        foreach (['honorarios', 'honorarios_parcelas'] as $tabela) {
+            $stmt = $conn->prepare("UPDATE `{$tabela}` SET tenant_id = ?, escritorio_id = ? WHERE tenant_id IS NULL OR tenant_id = '' OR escritorio_id IS NULL OR escritorio_id = 0");
+            if ($stmt) {
+                $stmt->bind_param('si', $tenantLegado, $escritorioLegado);
+                $stmt->execute();
+                $stmt->close();
+            }
+        }
+    }
+
+    foreach (['honorarios', 'honorarios_parcelas'] as $tabela) {
+        $indice = 'idx_' . $tabela . '_tenant_escritorio';
+        $existe = false;
+        $res = $conn->query("SHOW INDEX FROM `{$tabela}` WHERE Key_name = '" . $conn->real_escape_string($indice) . "'");
+        if ($res && $res->num_rows > 0) $existe = true;
+        if (!$existe) {
+            $conn->query("ALTER TABLE `{$tabela}` ADD INDEX `{$indice}` (tenant_id, escritorio_id)");
+        }
+    }
+}
+
+honorariosGarantirEstruturaTenant($conn);
+$tenantSql = $conn->real_escape_string($tenantId);
+$escritorioSql = (int)$escritorioId;
+
 $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
 
@@ -97,7 +198,10 @@ function gerarParcelasHonorario(mysqli $conn, array $honorario, bool $gerar30dia
 
     $valor_parcela_base = round($valor_total / $qtd_parcelas, 2);
 
-    $conn->query("DELETE FROM honorarios_parcelas WHERE honorario_id = '$honorario_id'");
+    $tenant = $conn->real_escape_string(honorariosTenantId());
+    $escritorio = honorariosEscritorioId();
+    $honorarioSeguro = $conn->real_escape_string($honorario_id);
+    $conn->query("DELETE FROM honorarios_parcelas WHERE tenant_id = '{$tenant}' AND escritorio_id = {$escritorio} AND honorario_id = '{$honorarioSeguro}'");
 
     $data_atual = new DateTime($data_vencimento);
 
@@ -131,13 +235,17 @@ function gerarParcelasHonorario(mysqli $conn, array $honorario, bool $gerar30dia
         $data_venc_parcela = $data_atual->format('Y-m-d');
 
         $stmt = $conn->prepare("INSERT INTO honorarios_parcelas
-            (id, honorario_id, cliente_id, nome_cliente, numero_processo,
+            (id, tenant_id, escritorio_id, honorario_id, cliente_id, nome_cliente, numero_processo,
              parcela_numero, valor_parcela, data_vencimento, forma_pagamento,
              status_pagamento, valor_pago, saldo_devedor, observacoes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
-        $stmt->bind_param("ssssidsssddds",
+        $tenantParcela = honorariosTenantId();
+        $escritorioParcela = honorariosEscritorioId();
+        $stmt->bind_param("ssissssidsssdds",
             $id_parcela,
+            $tenantParcela,
+            $escritorioParcela,
             $honorario_id,
             $cliente_id,
             $nome_cliente,
@@ -165,7 +273,10 @@ function gerarParcelasHonorario(mysqli $conn, array $honorario, bool $gerar30dia
 function getParcelasHonorario(mysqli $conn, string $honorario_id): array
 {
     $parcelas = [];
-    $res = $conn->query("SELECT * FROM honorarios_parcelas WHERE honorario_id = '$honorario_id' ORDER BY parcela_numero ASC");
+    $tenant = $conn->real_escape_string(honorariosTenantId());
+    $escritorio = honorariosEscritorioId();
+    $honorarioSeguro = $conn->real_escape_string($honorario_id);
+    $res = $conn->query("SELECT * FROM honorarios_parcelas WHERE tenant_id = '{$tenant}' AND escritorio_id = {$escritorio} AND honorario_id = '{$honorarioSeguro}' ORDER BY parcela_numero ASC");
     if ($res) {
         while ($row = $res->fetch_assoc()) {
             $parcelas[] = $row;
@@ -178,7 +289,9 @@ function getParcelasHonorario(mysqli $conn, string $honorario_id): array
 function buscarHonorarioAuditoria(mysqli $conn, string $id): ?array
 {
     $idSeguro = $conn->real_escape_string($id);
-    $res = $conn->query("SELECT * FROM honorarios WHERE id = '{$idSeguro}' LIMIT 1");
+    $tenant = $conn->real_escape_string(honorariosTenantId());
+    $escritorio = honorariosEscritorioId();
+    $res = $conn->query("SELECT * FROM honorarios WHERE tenant_id = '{$tenant}' AND escritorio_id = {$escritorio} AND id = '{$idSeguro}' LIMIT 1");
     if (!$res || $res->num_rows === 0) {
         return null;
     }
@@ -220,19 +333,25 @@ function registrarLogHonorario(
 
 function recalcHonorario(mysqli $conn, string $honorario_id)
 {
+    $tenant = $conn->real_escape_string(honorariosTenantId());
+    $escritorio = honorariosEscritorioId();
+    $honorarioSeguro = $conn->real_escape_string($honorario_id);
+
     $res = $conn->query("
         SELECT
             COALESCE(SUM(valor_parcela), 0) AS total_parcelas,
             COALESCE(SUM(valor_pago), 0) AS total_pago,
             COALESCE(SUM(saldo_devedor), 0) AS total_saldo
         FROM honorarios_parcelas
-        WHERE honorario_id = '$honorario_id'
+        WHERE tenant_id = '{$tenant}'
+          AND escritorio_id = {$escritorio}
+          AND honorario_id = '{$honorarioSeguro}'
     ");
+    if (!$res) return;
     $totais = $res->fetch_assoc();
 
-    $total_pago_hon = $totais['total_pago'];
-    $total_saldo_hon = $totais['total_saldo'];
-    $total_parcelas_hon = $totais['total_parcelas'];
+    $total_pago_hon = (float)($totais['total_pago'] ?? 0);
+    $total_saldo_hon = (float)($totais['total_saldo'] ?? 0);
 
     $status_hon = 'Pendente';
     if ($total_saldo_hon <= 0.01) {
@@ -241,13 +360,12 @@ function recalcHonorario(mysqli $conn, string $honorario_id)
         $status_hon = 'Parcial';
     }
 
-    $conn->query("
-        UPDATE honorarios SET
-            valor_pago = '$total_pago_hon',
-            valor_pendente = '$total_saldo_hon',
-            status = '$status_hon'
-        WHERE id = '$honorario_id'
-    ");
+    $stmt = $conn->prepare("UPDATE honorarios SET valor_pago = ?, valor_pendente = ?, status = ? WHERE tenant_id = ? AND escritorio_id = ? AND id = ?");
+    if ($stmt) {
+        $stmt->bind_param('ddssis', $total_pago_hon, $total_saldo_hon, $status_hon, $tenant, $escritorio, $honorarioSeguro);
+        $stmt->execute();
+        $stmt->close();
+    }
 
     if (function_exists('sgl_sincronizar_honorario_financeiro')) {
         sgl_sincronizar_honorario_financeiro($conn, $honorario_id);
@@ -294,7 +412,7 @@ if (isset($_GET['excluir'])) {
     } else {
         $dadosAnteriores = buscarHonorarioAuditoria($conn, $id);
         $idSeguro = $conn->real_escape_string($id);
-        $ok = $conn->query("UPDATE honorarios SET deletado = 1 WHERE id = '{$idSeguro}'");
+        $ok = $conn->query("UPDATE honorarios SET deletado = 1 WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioSql} AND id = '{$idSeguro}'");
 
         if ($ok && $conn->affected_rows > 0) {
             registrarLogHonorario(
@@ -352,7 +470,7 @@ if (isset($_GET['restaurar'])) {
     } else {
         $dadosAnteriores = buscarHonorarioAuditoria($conn, $id);
         $idSeguro = $conn->real_escape_string($id);
-        $ok = $conn->query("UPDATE honorarios SET deletado = 0 WHERE id = '{$idSeguro}'");
+        $ok = $conn->query("UPDATE honorarios SET deletado = 0 WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioSql} AND id = '{$idSeguro}'");
 
         if ($ok && $conn->affected_rows > 0) {
             registrarLogHonorario(
@@ -412,8 +530,8 @@ if (isset($_GET['excluir_permanente'])) {
 
         $conn->begin_transaction();
         try {
-            $conn->query("DELETE FROM honorarios_parcelas WHERE honorario_id = '{$idSeguro}'");
-            $ok = $conn->query("DELETE FROM honorarios WHERE id = '{$idSeguro}' AND deletado = 1");
+            $conn->query("DELETE FROM honorarios_parcelas WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioSql} AND honorario_id = '{$idSeguro}'");
+            $ok = $conn->query("DELETE FROM honorarios WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioSql} AND id = '{$idSeguro}' AND deletado = 1");
 
             if (!$ok || $conn->affected_rows < 1) {
                 throw new RuntimeException('Honorário não encontrado na lixeira.');
@@ -481,8 +599,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_honorario'])) 
     $observacoes     = $conn->real_escape_string(trim($_POST['observacoes'] ?? ''));
     $gerar30dias     = isset($_POST['gerar_30_dias']) ? true : false;
 
+    $clienteValido = false;
+    if ($cliente_id !== '') {
+        $stmtCliente = $conn->prepare("SELECT id, nome FROM clientes WHERE tenant_id = ? AND escritorio_id = ? AND id = ? AND deletado = 0 LIMIT 1");
+        if ($stmtCliente) {
+            $clienteIdValidacao = trim((string)$cliente_id);
+            $stmtCliente->bind_param('sis', $tenantId, $escritorioId, $clienteIdValidacao);
+            $stmtCliente->execute();
+            $clienteRow = $stmtCliente->get_result()->fetch_assoc();
+            $stmtCliente->close();
+            if ($clienteRow) {
+                $clienteValido = true;
+                $nome_cliente = $conn->real_escape_string((string)$clienteRow['nome']);
+            }
+        }
+    }
+
     if ($cliente_id === '') {
         $msg = '<div class="alert alert-danger">❌ Selecione um cliente.</div>';
+        $acao = 'novo';
+    } elseif (!$clienteValido) {
+        $msg = '<div class="alert alert-danger">❌ Cliente não pertence a este escritório.</div>';
         $acao = 'novo';
     } elseif ($valor_total <= 0) {
         $msg = '<div class="alert alert-danger">❌ Informe o valor total.</div>';
@@ -496,11 +633,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_honorario'])) 
         $valor_pendente = max($valor_total - $valor_pago, 0);
 
         $sql = "INSERT INTO honorarios
-                (id, cliente_id, nome_cliente, numero_processo, tipo_honorario,
+                (id, tenant_id, escritorio_id, cliente_id, nome_cliente, numero_processo, tipo_honorario,
                  valor_total, qtd_parcelas, valor_parcela, data_vencimento,
                  forma_pagamento, status, valor_pago, valor_pendente, observacoes, deletado)
                 VALUES
-                ('$id', '$cliente_id', '$nome_cliente', '$numero_proc', '$tipo_honorario',
+                ('$id', '$tenantSql', '$escritorioSql', '$cliente_id', '$nome_cliente', '$numero_proc', '$tipo_honorario',
                  '$valor_total', '$qtd_parcelas', '$valor_parcela', '$data_vencimento',
                  '$forma_pagamento', '$status', '$valor_pago', '$valor_pendente', '$observacoes', 0)";
 
@@ -575,10 +712,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_honorario']
     $observacoes     = $conn->real_escape_string(trim($_POST['observacoes'] ?? ''));
     $gerar30dias     = isset($_POST['gerar_30_dias']) ? true : false;
 
+    $clienteValido = false;
+    if ($cliente_id !== '') {
+        $stmtCliente = $conn->prepare("SELECT id, nome FROM clientes WHERE tenant_id = ? AND escritorio_id = ? AND id = ? AND deletado = 0 LIMIT 1");
+        if ($stmtCliente) {
+            $clienteIdValidacao = trim((string)$cliente_id);
+            $stmtCliente->bind_param('sis', $tenantId, $escritorioId, $clienteIdValidacao);
+            $stmtCliente->execute();
+            $clienteRow = $stmtCliente->get_result()->fetch_assoc();
+            $stmtCliente->close();
+            if ($clienteRow) {
+                $clienteValido = true;
+                $nome_cliente = $conn->real_escape_string((string)$clienteRow['nome']);
+            }
+        }
+    }
+
     if ($id === '') {
         $msg = '<div class="alert alert-danger">❌ Honorário inválido.</div>';
         $acao = 'listar';
+    } elseif (!$clienteValido) {
+        $msg = '<div class="alert alert-danger">❌ Cliente não pertence a este escritório.</div>';
+        $acao = 'editar';
     } else {
+        $stmtHonorario = $conn->prepare("SELECT id FROM honorarios WHERE tenant_id = ? AND escritorio_id = ? AND id = ? LIMIT 1");
+        $honorarioValido = false;
+        if ($stmtHonorario) {
+            $idValidacao = trim((string)$id);
+            $stmtHonorario->bind_param('sis', $tenantId, $escritorioId, $idValidacao);
+            $stmtHonorario->execute();
+            $honorarioValido = (bool)$stmtHonorario->get_result()->fetch_assoc();
+            $stmtHonorario->close();
+        }
+        if (!$honorarioValido) {
+            $msg = '<div class="alert alert-danger">Honorário não encontrado neste escritório.</div>';
+            $acao = 'listar';
+        } else {
         $valor_parcela  = round($valor_total / $qtd_parcelas, 2);
         $valor_pendente = max($valor_total - $valor_pago, 0);
         $dadosAnteriores = buscarHonorarioAuditoria($conn, $id);
@@ -597,10 +766,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_honorario']
                     valor_pago      = '$valor_pago',
                     valor_pendente  = '$valor_pendente',
                     observacoes     = '$observacoes'
-                WHERE id = '$id'";
+                WHERE tenant_id = '$tenantSql' AND escritorio_id = $escritorioSql AND id = '$id'";
 
         if ($conn->query($sql)) {
-            $resTemParcelas = $conn->query("SELECT COUNT(*) FROM honorarios_parcelas WHERE honorario_id = '$id'")->fetch_row()[0];
+            $resTemParcelas = $conn->query("SELECT COUNT(*) FROM honorarios_parcelas WHERE tenant_id = '$tenantSql' AND escritorio_id = $escritorioSql AND honorario_id = '$id'")->fetch_row()[0];
             if ($gerar30dias || $resTemParcelas == 0) {
                 gerarParcelasHonorario($conn, [
                     'id' => $id,
@@ -650,6 +819,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_honorario']
             $msg = "<div class='alert alert-danger'>❌ Erro: " . htmlspecialchars($conn->error) . "</div>";
             $acao = 'editar';
         }
+        }
     }
     }
 }
@@ -660,7 +830,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['atualizar_honorario']
 $hon_editar = null;
 if ($acao === 'editar' && isset($_GET['id'])) {
     $id_editar = $conn->real_escape_string($_GET['id']);
-    $res = $conn->query("SELECT * FROM honorarios WHERE id = '$id_editar'");
+    $res = $conn->query("SELECT * FROM honorarios WHERE tenant_id = '$tenantSql' AND escritorio_id = $escritorioSql AND id = '$id_editar'");
     if ($res && $res->num_rows > 0) {
         $hon_editar = $res->fetch_assoc();
     } else {
@@ -678,7 +848,7 @@ $filtro_tipo = $conn->real_escape_string(trim($_GET['tipo'] ?? ''));
 $filtro_vencimento = $conn->real_escape_string(trim($_GET['vencimento'] ?? ''));
 $filtro_deletado = ($acao === 'lixeira') ? 1 : 0;
 
-$where = "WHERE h.deletado = $filtro_deletado";
+$where = "WHERE h.tenant_id = '$tenantSql' AND h.escritorio_id = $escritorioSql AND h.deletado = $filtro_deletado";
 
 if ($filtro_status !== '') {
     $where .= " AND h.status = '$filtro_status'";
@@ -710,16 +880,16 @@ if ($busca !== '') {
 $lista = $conn->query("
     SELECT
         h.*,
-        (SELECT COALESCE(SUM(valor_pago), 0) FROM honorarios_parcelas hp WHERE hp.honorario_id = h.id) AS total_pago_parcelas,
-        (SELECT COALESCE(SUM(saldo_devedor), 0) FROM honorarios_parcelas hp WHERE hp.honorario_id = h.id) AS total_saldo_parcelas,
-        (SELECT COUNT(*) FROM honorarios_parcelas hp WHERE hp.honorario_id = h.id) AS parcelas_geradas
+        (SELECT COALESCE(SUM(valor_pago), 0) FROM honorarios_parcelas hp WHERE hp.tenant_id = h.tenant_id AND hp.escritorio_id = h.escritorio_id AND hp.honorario_id = h.id) AS total_pago_parcelas,
+        (SELECT COALESCE(SUM(saldo_devedor), 0) FROM honorarios_parcelas hp WHERE hp.tenant_id = h.tenant_id AND hp.escritorio_id = h.escritorio_id AND hp.honorario_id = h.id) AS total_saldo_parcelas,
+        (SELECT COUNT(*) FROM honorarios_parcelas hp WHERE hp.tenant_id = h.tenant_id AND hp.escritorio_id = h.escritorio_id AND hp.honorario_id = h.id) AS parcelas_geradas
     FROM honorarios h
     $where
     ORDER BY CAST(SUBSTRING(h.id, 4) AS UNSIGNED) DESC
     LIMIT 200
 ");
 
-$clientes = $conn->query("SELECT id, nome FROM clientes WHERE deletado = 0 ORDER BY nome");
+$clientes = $conn->query("SELECT id, nome FROM clientes WHERE tenant_id = '$tenantSql' AND escritorio_id = $escritorioSql AND deletado = 0 ORDER BY nome");
 
 $coluna_processos = descobrirColunaProcessosCliente($conn);
 $processosPorCliente = [];
@@ -728,7 +898,9 @@ if ($coluna_processos !== '') {
     $resProc = $conn->query("
         SELECT DISTINCT $coluna_processos AS chave, numero_processo
         FROM processos
-        WHERE $coluna_processos IS NOT NULL
+        WHERE tenant_id = '$tenantSql'
+          AND escritorio_id = $escritorioSql
+          AND $coluna_processos IS NOT NULL
           AND $coluna_processos <> ''
           AND numero_processo IS NOT NULL
           AND numero_processo <> ''
@@ -772,7 +944,7 @@ $resStats = $conn->query("
         COALESCE(SUM(valor_pendente),0) AS saldo_aberto,
         COALESCE(SUM(CASE WHEN data_vencimento < CURDATE() AND status NOT IN ('Pago','Quitada','Cancelado') THEN 1 ELSE 0 END),0) AS vencidos
     FROM honorarios
-    WHERE deletado = 0
+    WHERE tenant_id = '$tenantSql' AND escritorio_id = $escritorioSql AND deletado = 0
 ");
 if ($resStats) {
     $statsHonorarios = array_merge($statsHonorarios, $resStats->fetch_assoc());

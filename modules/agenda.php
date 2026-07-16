@@ -7,6 +7,24 @@
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
 
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    $conn->close();
+    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Agenda.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? (string)rojexTenantId()
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    $conn->close();
+    throw new RuntimeException('Tenant ou escritório não identificado para o módulo Agenda.');
+}
+
 /* -----------------------------------------------------------
    AUTO-CORREÇÃO DE ESTRUTURA DA AGENDA
    Compatível com versões do MySQL/MariaDB que não aceitam
@@ -33,6 +51,8 @@ if (!function_exists('sgl_adicionar_coluna')) {
     }
 }
 
+sgl_adicionar_coluna($conn, 'agenda', 'tenant_id', "VARCHAR(80) NULL AFTER `id`");
+sgl_adicionar_coluna($conn, 'agenda', 'escritorio_id', "INT NULL AFTER `tenant_id`");
 sgl_adicionar_coluna($conn, 'agenda', 'tipo_compromisso', "VARCHAR(80) NULL AFTER `horario`");
 sgl_adicionar_coluna($conn, 'agenda', 'cliente_id', "VARCHAR(10) NULL AFTER `tipo_compromisso`");
 sgl_adicionar_coluna($conn, 'agenda', 'nome_cliente', "VARCHAR(120) NULL AFTER `cliente_id`");
@@ -45,6 +65,82 @@ sgl_adicionar_coluna($conn, 'agenda', 'observacoes', "TEXT NULL AFTER `prazo_fat
 sgl_adicionar_coluna($conn, 'agenda', 'deletado', "TINYINT(1) NOT NULL DEFAULT 0 AFTER `observacoes`");
 sgl_adicionar_coluna($conn, 'agenda', 'criado_em', "TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER `deletado`");
 sgl_adicionar_coluna($conn, 'agenda', 'atualizado_em', "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER `criado_em`");
+
+try {
+    $tenantLegado = '';
+    $escritorioLegado = 0;
+
+    $stmtCfg = $conn->prepare(
+        "SELECT valor
+           FROM configuracoes
+          WHERE chave = 'tenant_id'
+          LIMIT 1"
+    );
+
+    if ($stmtCfg) {
+        $stmtCfg->execute();
+        $rowCfg = $stmtCfg->get_result()->fetch_assoc();
+        $stmtCfg->close();
+        $tenantLegado = trim((string)($rowCfg['valor'] ?? ''));
+    }
+
+    if ($tenantLegado !== '') {
+        $stmtEsc = $conn->prepare(
+            "SELECT id
+               FROM escritorios_saas
+              WHERE tenant_id = ?
+              LIMIT 1"
+        );
+
+        if ($stmtEsc) {
+            $stmtEsc->bind_param('s', $tenantLegado);
+            $stmtEsc->execute();
+            $rowEsc = $stmtEsc->get_result()->fetch_assoc();
+            $stmtEsc->close();
+            $escritorioLegado = (int)($rowEsc['id'] ?? 0);
+        }
+    }
+
+    if ($tenantLegado !== '' && $escritorioLegado > 0) {
+        $stmtBackfill = $conn->prepare(
+            "UPDATE agenda
+                SET tenant_id = ?,
+                    escritorio_id = ?
+              WHERE tenant_id IS NULL
+                 OR tenant_id = ''
+                 OR escritorio_id IS NULL
+                 OR escritorio_id = 0"
+        );
+
+        if ($stmtBackfill) {
+            $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
+            $stmtBackfill->execute();
+            $stmtBackfill->close();
+        }
+    }
+
+    $indicesAgenda = [];
+    $resIndicesAgenda = $conn->query("SHOW INDEX FROM agenda");
+
+    if ($resIndicesAgenda) {
+        while ($idx = $resIndicesAgenda->fetch_assoc()) {
+            $indicesAgenda[(string)$idx['Key_name']] = true;
+        }
+    }
+
+    if (!isset($indicesAgenda['idx_agenda_tenant'])) {
+        $conn->query("ALTER TABLE agenda ADD INDEX idx_agenda_tenant (tenant_id)");
+    }
+    if (!isset($indicesAgenda['idx_agenda_escritorio'])) {
+        $conn->query("ALTER TABLE agenda ADD INDEX idx_agenda_escritorio (escritorio_id)");
+    }
+    if (!isset($indicesAgenda['idx_agenda_tenant_data'])) {
+        $conn->query("ALTER TABLE agenda ADD INDEX idx_agenda_tenant_data (tenant_id, data_evento)");
+    }
+} catch (Throwable $e) {
+    error_log('[ROJEX AGENDA MULTI-TENANT] ' . $e->getMessage());
+    throw new RuntimeException('Não foi possível preparar o isolamento Multi-Tenant da Agenda.', 0, $e);
+}
 
 $agendaTemDeletado = sgl_coluna_existe($conn, 'agenda', 'deletado');
 $clientesTemDeletado = sgl_coluna_existe($conn, 'clientes', 'deletado');
@@ -112,19 +208,81 @@ function validarAgenda(array $c): array {
     return $erros;
 }
 
-function buscarAgendaAuditoria(mysqli $conn, string $id): ?array {
-    $stmt = $conn->prepare("SELECT * FROM agenda WHERE id = ? LIMIT 1");
+function buscarAgendaAuditoria(mysqli $conn, string $tenantId, string $id): ?array {
+    $stmt = $conn->prepare(
+        "SELECT *
+           FROM agenda
+          WHERE tenant_id = ?
+            AND id = ?
+          LIMIT 1"
+    );
+
     if (!$stmt) {
         return null;
     }
 
-    $stmt->bind_param("s", $id);
+    $stmt->bind_param("ss", $tenantId, $id);
     $stmt->execute();
     $res = $stmt->get_result();
     $evento = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
     $stmt->close();
 
     return $evento;
+}
+
+function agendaClientePertenceTenant(mysqli $conn, string $tenantId, ?string $clienteId): bool {
+    if ($clienteId === null || $clienteId === '') {
+        return true;
+    }
+
+    $stmt = $conn->prepare(
+        "SELECT id
+           FROM clientes
+          WHERE tenant_id = ?
+            AND id = ?
+            AND deletado = 0
+          LIMIT 1"
+    );
+
+    if (!$stmt) {
+        return false;
+    }
+
+    $stmt->bind_param('ss', $tenantId, $clienteId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $ok = $res && $res->num_rows > 0;
+    $stmt->close();
+
+    return $ok;
+}
+
+function agendaAdvogadoPertenceTenant(mysqli $conn, string $tenantId, ?string $advogadoId): bool {
+    if ($advogadoId === null || $advogadoId === '') {
+        return true;
+    }
+
+    $stmt = $conn->prepare(
+        "SELECT id
+           FROM advogados
+          WHERE tenant_id = ?
+            AND id = ?
+            AND deletado = 0
+            AND status = 'Ativo'
+          LIMIT 1"
+    );
+
+    if (!$stmt) {
+        return false;
+    }
+
+    $stmt->bind_param('ss', $tenantId, $advogadoId);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $ok = $res && $res->num_rows > 0;
+    $stmt->close();
+
+    return $ok;
 }
 
 function registrarLogAgenda(
@@ -190,11 +348,17 @@ if (isset($_GET['excluir'])) {
         redirecionarAgenda('&msg_erro=' . urlencode('Ação bloqueada por segurança.'));
     }
 
-    $dadosAnteriores = buscarAgendaAuditoria($conn, $id);
+    $dadosAnteriores = buscarAgendaAuditoria($conn, $tenantId, $id);
 
     try {
-        $stmt = $conn->prepare("UPDATE agenda SET deletado = 1 WHERE id = ?");
-        $stmt->bind_param("s", $id);
+        $stmt = $conn->prepare(
+            "UPDATE agenda
+                SET deletado = 1
+              WHERE tenant_id = ?
+                AND id = ?
+                AND deletado = 0"
+        );
+        $stmt->bind_param("ss", $tenantId, $id);
         $ok = $stmt->execute();
         $afetadas = $stmt->affected_rows;
         $stmt->close();
@@ -213,7 +377,7 @@ if (isset($_GET['excluir'])) {
                 'origem' => 'Lista da agenda',
                 'nivel' => 'AVISO',
                 'dados_anteriores' => $dadosAnteriores,
-                'dados_novos' => buscarAgendaAuditoria($conn, $id),
+                'dados_novos' => buscarAgendaAuditoria($conn, $tenantId, $id),
             ]
         );
 
@@ -255,11 +419,17 @@ if (isset($_GET['restaurar'])) {
         redirecionarAgenda('&acao=lixeira&msg_erro=' . urlencode('Ação bloqueada por segurança.'));
     }
 
-    $dadosAnteriores = buscarAgendaAuditoria($conn, $id);
+    $dadosAnteriores = buscarAgendaAuditoria($conn, $tenantId, $id);
 
     try {
-        $stmt = $conn->prepare("UPDATE agenda SET deletado = 0 WHERE id = ?");
-        $stmt->bind_param("s", $id);
+        $stmt = $conn->prepare(
+            "UPDATE agenda
+                SET deletado = 0
+              WHERE tenant_id = ?
+                AND id = ?
+                AND deletado = 1"
+        );
+        $stmt->bind_param("ss", $tenantId, $id);
         $ok = $stmt->execute();
         $afetadas = $stmt->affected_rows;
         $stmt->close();
@@ -277,7 +447,7 @@ if (isset($_GET['restaurar'])) {
                 'tipo_acao' => 'RESTAURACAO',
                 'origem' => 'Lixeira da agenda',
                 'dados_anteriores' => $dadosAnteriores,
-                'dados_novos' => buscarAgendaAuditoria($conn, $id),
+                'dados_novos' => buscarAgendaAuditoria($conn, $tenantId, $id),
             ]
         );
 
@@ -319,11 +489,16 @@ if (isset($_GET['excluir_permanente'])) {
         redirecionarAgenda('&acao=lixeira&msg_erro=' . urlencode('Ação bloqueada por segurança.'));
     }
 
-    $dadosAnteriores = buscarAgendaAuditoria($conn, $id);
+    $dadosAnteriores = buscarAgendaAuditoria($conn, $tenantId, $id);
 
     try {
-        $stmt = $conn->prepare("DELETE FROM agenda WHERE id = ? AND deletado = 1");
-        $stmt->bind_param("s", $id);
+        $stmt = $conn->prepare(
+            "DELETE FROM agenda
+              WHERE tenant_id = ?
+                AND id = ?
+                AND deletado = 1"
+        );
+        $stmt->bind_param("ss", $tenantId, $id);
         $ok = $stmt->execute();
         $afetadas = $stmt->affected_rows;
         $stmt->close();
@@ -382,16 +557,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $advogadoId = $dados['advogado_id'] === '' ? null : $dados['advogado_id'];
             $horario = $dados['horario'] === '' ? null : $dados['horario'];
 
-            try {
+            if (!agendaClientePertenceTenant($conn, $tenantId, $clienteId)) {
+                $msg = '<div class="alert alert-danger">❌ O cliente selecionado não pertence ao escritório ativo.</div>';
+                $acao = isset($_POST['atualizar_evento']) ? 'editar' : 'novo';
+            } elseif (!agendaAdvogadoPertenceTenant($conn, $tenantId, $advogadoId)) {
+                $msg = '<div class="alert alert-danger">❌ O advogado selecionado não pertence ao escritório ativo.</div>';
+                $acao = isset($_POST['atualizar_evento']) ? 'editar' : 'novo';
+            } else try {
                 if (isset($_POST['salvar_evento'])) {
                     $id = gerarIdAgenda($conn);
                     $sql = "INSERT INTO agenda
-                            (id, data_evento, horario, tipo_compromisso, cliente_id, nome_cliente, numero_processo, `local`, advogado_id, status, prazo_fatal, observacoes, deletado)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)";
+                            (
+                                id, tenant_id, escritorio_id, data_evento, horario,
+                                tipo_compromisso, cliente_id, nome_cliente, numero_processo,
+                                `local`, advogado_id, status, prazo_fatal, observacoes, deletado
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)";
                     $stmt = $conn->prepare($sql);
                     $stmt->bind_param(
-                        "ssssssssssss",
+                        "ssisssssssssss",
                         $id,
+                        $tenantId,
+                        $escritorioId,
                         $dados['data_evento'],
                         $horario,
                         $dados['tipo_compromisso'],
@@ -415,7 +602,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         [
                             'tipo_acao' => 'INCLUSAO',
                             'origem' => 'Cadastro da agenda',
-                            'dados_novos' => buscarAgendaAuditoria($conn, $id),
+                            'dados_novos' => buscarAgendaAuditoria($conn, $tenantId, $id),
                         ]
                     );
 
@@ -424,15 +611,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 if (isset($_POST['atualizar_evento'])) {
                     $id = trim($_POST['id'] ?? '');
-                    $dadosAnteriores = buscarAgendaAuditoria($conn, $id);
+                    $dadosAnteriores = buscarAgendaAuditoria($conn, $tenantId, $id);
 
                     $sql = "UPDATE agenda SET
                                 data_evento = ?, horario = ?, tipo_compromisso = ?, cliente_id = ?, nome_cliente = ?,
                                 numero_processo = ?, `local` = ?, advogado_id = ?, status = ?, prazo_fatal = ?, observacoes = ?
-                            WHERE id = ?";
+                            WHERE tenant_id = ?
+                              AND id = ?
+                              AND deletado = 0";
                     $stmt = $conn->prepare($sql);
                     $stmt->bind_param(
-                        "ssssssssssss",
+                        "sssssssssssss",
                         $dados['data_evento'],
                         $horario,
                         $dados['tipo_compromisso'],
@@ -444,6 +633,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $dados['status'],
                         $dados['prazo_fatal'],
                         $dados['observacoes'],
+                        $tenantId,
                         $id
                     );
                     $stmt->execute();
@@ -458,7 +648,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             'tipo_acao' => 'EDICAO',
                             'origem' => 'Edição da agenda',
                             'dados_anteriores' => $dadosAnteriores,
-                            'dados_novos' => buscarAgendaAuditoria($conn, $id),
+                            'dados_novos' => buscarAgendaAuditoria($conn, $tenantId, $id),
                         ]
                     );
 
@@ -476,8 +666,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 $evento_editar = null;
 if ($acao === 'editar' && isset($_GET['id'])) {
     $id_editar = trim($_GET['id']);
-    $stmt = $conn->prepare("SELECT * FROM agenda WHERE id = ?");
-    $stmt->bind_param("s", $id_editar);
+    $stmt = $conn->prepare(
+        "SELECT *
+           FROM agenda
+          WHERE tenant_id = ?
+            AND id = ?
+          LIMIT 1"
+    );
+    $stmt->bind_param("ss", $tenantId, $id_editar);
     $stmt->execute();
     $res = $stmt->get_result();
     $evento_editar = $res && $res->num_rows ? $res->fetch_assoc() : null;
@@ -492,14 +688,43 @@ $f = camposAgenda($evento_editar ?? []);
 $tipos = ['Audiência','Reunião','Prazo','Atendimento','Perícia','Sustentação Oral','Lembrete','Outro'];
 $statuses = ['Pendente','Confirmado','Realizado','Cancelado'];
 
-$whereClientesAtivos = $clientesTemDeletado ? 'WHERE deletado = 0' : '';
-$clientes  = $conn->query("SELECT id, nome FROM clientes {$whereClientesAtivos} ORDER BY nome");
-$whereAdvogadosAtivos = $advogadosTemDeletado ? "WHERE deletado = 0 AND status='Ativo'" : "WHERE status='Ativo'";
-$advogados = $conn->query("SELECT id, nome FROM advogados {$whereAdvogadosAtivos} ORDER BY nome");
+$stmtClientes = $conn->prepare(
+    "SELECT id, nome
+       FROM clientes
+      WHERE tenant_id = ?
+        AND deletado = 0
+      ORDER BY nome"
+);
+$stmtClientes->bind_param('s', $tenantId);
+$stmtClientes->execute();
+$clientes = $stmtClientes->get_result();
+
+$stmtAdvogados = $conn->prepare(
+    "SELECT id, nome
+       FROM advogados
+      WHERE tenant_id = ?
+        AND deletado = 0
+        AND status = 'Ativo'
+      ORDER BY nome"
+);
+$stmtAdvogados->bind_param('s', $tenantId);
+$stmtAdvogados->execute();
+$advogados = $stmtAdvogados->get_result();
 
 $processos_por_cliente = [];
-$whereProcessosAtivos = $processosTemDeletado ? "WHERE deletado = 0 AND cliente_id <> '' AND numero_processo <> ''" : "WHERE cliente_id <> '' AND numero_processo <> ''";
-$resProc = $conn->query("SELECT DISTINCT cliente_id, numero_processo FROM processos {$whereProcessosAtivos} ORDER BY cliente_id, numero_processo");
+$stmtProc = $conn->prepare(
+    "SELECT DISTINCT cliente_id, numero_processo
+       FROM processos
+      WHERE tenant_id = ?
+        AND cliente_id <> ''
+        AND numero_processo <> ''
+        AND status != 'Excluído'
+      ORDER BY cliente_id, numero_processo"
+);
+$stmtProc->bind_param('s', $tenantId);
+$stmtProc->execute();
+$resProc = $stmtProc->get_result();
+
 if ($resProc) {
     while ($p = $resProc->fetch_assoc()) {
         $processos_por_cliente[$p['cliente_id']][] = $p['numero_processo'];
@@ -509,14 +734,28 @@ if ($resProc) {
 /* Indicadores */
 $hoje = date('Y-m-d');
 $em7 = date('Y-m-d', strtotime('+7 days'));
-$whereAgendaAtiva = $agendaTemDeletado ? 'WHERE deletado = 0' : '';
-$totalAgenda = (int)($conn->query("SELECT COUNT(*) AS total FROM agenda {$whereAgendaAtiva}")->fetch_assoc()['total'] ?? 0);
-$agendaHojeWhere = $agendaTemDeletado ? "WHERE deletado = 0 AND data_evento='{$hoje}'" : "WHERE data_evento='{$hoje}'";
-$agendaHoje = (int)($conn->query("SELECT COUNT(*) AS total FROM agenda {$agendaHojeWhere}")->fetch_assoc()['total'] ?? 0);
-$agenda7Where = $agendaTemDeletado ? "WHERE deletado = 0 AND data_evento BETWEEN '{$hoje}' AND '{$em7}'" : "WHERE data_evento BETWEEN '{$hoje}' AND '{$em7}'";
-$agenda7 = (int)($conn->query("SELECT COUNT(*) AS total FROM agenda {$agenda7Where}")->fetch_assoc()['total'] ?? 0);
-$prazosWhere = $agendaTemDeletado ? "WHERE deletado = 0 AND prazo_fatal='Sim' AND status IN ('Pendente','Confirmado')" : "WHERE prazo_fatal='Sim' AND status IN ('Pendente','Confirmado')";
-$prazosFatais = (int)($conn->query("SELECT COUNT(*) AS total FROM agenda {$prazosWhere}")->fetch_assoc()['total'] ?? 0);
+$stmtIndicadores = $conn->prepare(
+    "SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(data_evento = ?), 0) AS hoje,
+        COALESCE(SUM(data_evento BETWEEN ? AND ?), 0) AS proximos_7,
+        COALESCE(SUM(
+            prazo_fatal = 'Sim'
+            AND status IN ('Pendente','Confirmado')
+        ), 0) AS prazos_fatais
+     FROM agenda
+     WHERE tenant_id = ?
+       AND deletado = 0"
+);
+$stmtIndicadores->bind_param('ssss', $hoje, $hoje, $em7, $tenantId);
+$stmtIndicadores->execute();
+$indicadoresAgenda = $stmtIndicadores->get_result()->fetch_assoc() ?: [];
+$stmtIndicadores->close();
+
+$totalAgenda = (int)($indicadoresAgenda['total'] ?? 0);
+$agendaHoje = (int)($indicadoresAgenda['hoje'] ?? 0);
+$agenda7 = (int)($indicadoresAgenda['proximos_7'] ?? 0);
+$prazosFatais = (int)($indicadoresAgenda['prazos_fatais'] ?? 0);
 ?>
 
 <div class="d-flex justify-content-between align-items-start mb-4">
@@ -611,9 +850,9 @@ $filtroTipo = trim($_GET['tipo'] ?? '');
 $filtroPeriodo = trim($_GET['periodo'] ?? '');
 $filtro_deletado = ($acao === 'lixeira') ? 1 : 0;
 
-$where = [];
-$params = [];
-$types = '';
+$where = ['a.tenant_id = ?'];
+$params = [$tenantId];
+$types = 's';
 if ($agendaTemDeletado) {
     $where[] = 'a.deletado = ?';
     $params[] = $filtro_deletado;
@@ -636,7 +875,9 @@ if ($filtroPeriodo === 'fatal') { $where[] = "a.prazo_fatal = 'Sim'"; }
 
 $sqlLista = "SELECT a.id, a.data_evento, a.horario, a.tipo_compromisso, a.cliente_id, a.nome_cliente, a.numero_processo, a.`local`, adv.nome AS advogado_nome, a.status, a.prazo_fatal
              FROM agenda a
-             LEFT JOIN advogados adv ON adv.id = a.advogado_id
+             LEFT JOIN advogados adv
+                    ON adv.id = a.advogado_id
+                   AND adv.tenant_id = a.tenant_id
              " . (count($where) ? "WHERE " . implode(' AND ', $where) : "") . "
              ORDER BY a.data_evento ASC, a.horario ASC
              LIMIT 300";
@@ -709,3 +950,15 @@ $totalEncontrado = $lista ? $lista->num_rows : 0;
 </div>
 <?php if (isset($stmtLista)) { $stmtLista->close(); } ?>
 <?php endif; ?>
+<?php
+if (isset($stmtClientes) && $stmtClientes instanceof mysqli_stmt) {
+    $stmtClientes->close();
+}
+if (isset($stmtAdvogados) && $stmtAdvogados instanceof mysqli_stmt) {
+    $stmtAdvogados->close();
+}
+if (isset($stmtProc) && $stmtProc instanceof mysqli_stmt) {
+    $stmtProc->close();
+}
+$conn->close();
+?>

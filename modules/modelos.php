@@ -5,6 +5,25 @@
  */
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
+
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    $conn->close();
+    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Modelos Jurídicos.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? trim((string)rojexTenantId())
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    $conn->close();
+    throw new RuntimeException('Tenant ou escritório não identificado para o módulo Modelos Jurídicos.');
+}
+
 $csrf = gerarTokenCsrf();
 
 function sgl_mod_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool {
@@ -22,9 +41,30 @@ function sgl_mod_garantir_coluna(mysqli $conn, string $tabela, string $coluna, s
         }
     }
 }
+
+function sgl_mod_tenant_id(): string {
+    return function_exists('rojexTenantId')
+        ? trim((string)rojexTenantId())
+        : trim((string)($_SESSION['tenant_id'] ?? ''));
+}
+
+function sgl_mod_escritorio_id(): int {
+    return function_exists('rojexEscritorioId')
+        ? (int)rojexEscritorioId()
+        : (int)($_SESSION['escritorio_id'] ?? 0);
+}
+
+function sgl_mod_indice_existe(mysqli $conn, string $tabela, string $indice): bool {
+    $tabela = preg_replace('/[^a-zA-Z0-9_]/', '', $tabela);
+    $indiceEsc = $conn->real_escape_string($indice);
+    $res = $conn->query("SHOW INDEX FROM `{$tabela}` WHERE Key_name = '{$indiceEsc}'");
+    return $res && $res->num_rows > 0;
+}
 function sgl_modelos_garantir_tabelas(mysqli $conn): void {
     $conn->query("CREATE TABLE IF NOT EXISTS modelos_documentos (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         codigo VARCHAR(20) NOT NULL UNIQUE,
         titulo VARCHAR(180) NOT NULL,
         categoria VARCHAR(80) NOT NULL DEFAULT 'Outros',
@@ -42,6 +82,8 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
         INDEX idx_modelos_deletado (deletado)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
     // Compatibilidade completa com bancos antigos/restaurados: garante as colunas usadas pelo módulo principal.
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'codigo', "codigo VARCHAR(20) NULL AFTER id");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'titulo', "titulo VARCHAR(180) NOT NULL DEFAULT 'Modelo sem título' AFTER codigo");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos', 'categoria', "categoria VARCHAR(80) NOT NULL DEFAULT 'Outros' AFTER titulo");
@@ -60,6 +102,8 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
 
     $conn->query("CREATE TABLE IF NOT EXISTS modelos_documentos_versoes (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         modelo_id INT NOT NULL,
         versao INT NOT NULL,
         titulo VARCHAR(180) NOT NULL,
@@ -73,6 +117,8 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
     // Compatibilidade com bancos antigos/restaurados: garante a estrutura completa do versionamento.
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'modelo_id', "modelo_id INT NOT NULL DEFAULT 0 AFTER id");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'versao', "versao INT NOT NULL DEFAULT 1 AFTER modelo_id");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_versoes', 'titulo', "titulo VARCHAR(180) NOT NULL DEFAULT 'Modelo sem título' AFTER versao");
@@ -85,6 +131,8 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
 
     $conn->query("CREATE TABLE IF NOT EXISTS modelos_documentos_gerados (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         modelo_id INT NOT NULL,
         cliente_id INT NULL,
         processo_id INT NULL,
@@ -98,6 +146,8 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
     // Compatibilidade com bancos restaurados/antigos: garante colunas usadas abaixo.
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'modelo_id', "modelo_id INT NOT NULL DEFAULT 0 AFTER id");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'cliente_id', "cliente_id INT NULL AFTER modelo_id");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'processo_id', "processo_id INT NULL AFTER cliente_id");
@@ -105,11 +155,69 @@ function sgl_modelos_garantir_tabelas(mysqli $conn): void {
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'conteudo_final', "conteudo_final LONGTEXT NULL AFTER titulo");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'gerado_por', "gerado_por INT NULL AFTER conteudo_final");
     sgl_mod_garantir_coluna($conn, 'modelos_documentos_gerados', 'gerado_em', "gerado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP AFTER gerado_por");
+
+    $tenantLegado = '';
+    $escritorioLegado = 0;
+
+    $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave = 'tenant_id' LIMIT 1");
+    if ($stmtCfg) {
+        $stmtCfg->execute();
+        $rowCfg = $stmtCfg->get_result()->fetch_assoc();
+        $stmtCfg->close();
+        $tenantLegado = trim((string)($rowCfg['valor'] ?? ''));
+    }
+
+    if ($tenantLegado !== '') {
+        $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
+        if ($stmtEsc) {
+            $stmtEsc->bind_param('s', $tenantLegado);
+            $stmtEsc->execute();
+            $rowEsc = $stmtEsc->get_result()->fetch_assoc();
+            $stmtEsc->close();
+            $escritorioLegado = (int)($rowEsc['id'] ?? 0);
+        }
+    }
+
+    if ($tenantLegado !== '' && $escritorioLegado > 0) {
+        foreach (['modelos_documentos', 'modelos_documentos_versoes', 'modelos_documentos_gerados'] as $tabelaTenant) {
+            $stmtBackfill = $conn->prepare(
+                "UPDATE `{$tabelaTenant}`
+                 SET tenant_id = ?, escritorio_id = ?
+                 WHERE tenant_id IS NULL OR tenant_id = ''
+                    OR escritorio_id IS NULL OR escritorio_id = 0"
+            );
+            if ($stmtBackfill) {
+                $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
+                $stmtBackfill->execute();
+                $stmtBackfill->close();
+            }
+        }
+    }
+
+    foreach (['modelos_documentos', 'modelos_documentos_versoes', 'modelos_documentos_gerados'] as $tabelaTenant) {
+        $indice = 'idx_' . $tabelaTenant . '_tenant';
+        if (!sgl_mod_indice_existe($conn, $tabelaTenant, $indice)) {
+            $conn->query("ALTER TABLE `{$tabelaTenant}` ADD INDEX `{$indice}` (tenant_id, escritorio_id)");
+        }
+    }
 }
 function sgl_modelos_codigo(mysqli $conn): string {
-    $res = $conn->query("SELECT codigo FROM modelos_documentos WHERE codigo LIKE 'MOD%' ORDER BY CAST(SUBSTRING(codigo,4) AS UNSIGNED) DESC LIMIT 1");
-    if (!$res || $res->num_rows === 0) return 'MOD001';
+    $tenant = sgl_mod_tenant_id();
+    $escritorio = sgl_mod_escritorio_id();
+    $stmt = $conn->prepare(
+        "SELECT codigo FROM modelos_documentos
+         WHERE tenant_id = ? AND escritorio_id = ? AND codigo LIKE 'MOD%'
+         ORDER BY CAST(SUBSTRING(codigo,4) AS UNSIGNED) DESC LIMIT 1"
+    );
+    $stmt->bind_param('si', $tenant, $escritorio);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    if (!$res || $res->num_rows === 0) {
+        $stmt->close();
+        return 'MOD001';
+    }
     $num = (int)substr((string)$res->fetch_assoc()['codigo'], 3) + 1;
+    $stmt->close();
     return 'MOD' . str_pad((string)$num, 3, '0', STR_PAD_LEFT);
 }
 function sgl_modelos_categorias(): array { return ['Contrato','Petição','Procuração','Declaração','Termo','Notificação','Requerimento','Recurso','Manifestação','Parecer','Documento administrativo','Outros']; }
@@ -117,10 +225,16 @@ function sgl_modelos_areas(): array { return ['Previdenciário','Trabalhista','C
 
 
 function sgl_modelos_buscar_auditoria(mysqli $conn, int $id): ?array {
-    $stmt = $conn->prepare("SELECT * FROM modelos_documentos WHERE id = ? LIMIT 1");
+    $stmt = $conn->prepare(
+        "SELECT * FROM modelos_documentos
+         WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
+         LIMIT 1"
+    );
     if (!$stmt) return null;
 
-    $stmt->bind_param('i', $id);
+    $tenant = sgl_mod_tenant_id();
+    $escritorio = sgl_mod_escritorio_id();
+    $stmt->bind_param('sii', $tenant, $escritorio, $id);
     $stmt->execute();
     $res = $stmt->get_result();
     $modelo = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
@@ -130,10 +244,16 @@ function sgl_modelos_buscar_auditoria(mysqli $conn, int $id): ?array {
 }
 
 function sgl_modelos_buscar_gerado_auditoria(mysqli $conn, int $id): ?array {
-    $stmt = $conn->prepare("SELECT * FROM modelos_documentos_gerados WHERE id = ? LIMIT 1");
+    $stmt = $conn->prepare(
+        "SELECT * FROM modelos_documentos_gerados
+         WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
+         LIMIT 1"
+    );
     if (!$stmt) return null;
 
-    $stmt->bind_param('i', $id);
+    $tenant = sgl_mod_tenant_id();
+    $escritorio = sgl_mod_escritorio_id();
+    $stmt->bind_param('sii', $tenant, $escritorio, $id);
     $stmt->execute();
     $res = $stmt->get_result();
     $gerado = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
@@ -190,14 +310,24 @@ function sgl_modelos_importar_padrao(mysqli $conn, ?int $uid): int {
     $importados = 0;
     foreach (sgl_modelos_templates_padrao() as $tpl) {
         [$titulo,$categoria,$area,$conteudo] = $tpl;
-        $stmt = $conn->prepare("SELECT id FROM modelos_documentos WHERE titulo=? AND deletado=0 LIMIT 1");
-        $stmt->bind_param('s', $titulo); $stmt->execute(); $existe = $stmt->get_result()->fetch_assoc(); $stmt->close();
+        $tenant = sgl_mod_tenant_id();
+        $escritorio = sgl_mod_escritorio_id();
+        $stmt = $conn->prepare(
+            "SELECT id FROM modelos_documentos
+             WHERE tenant_id=? AND escritorio_id=? AND titulo=? AND deletado=0
+             LIMIT 1"
+        );
+        $stmt->bind_param('sis', $tenant, $escritorio, $titulo); $stmt->execute(); $existe = $stmt->get_result()->fetch_assoc(); $stmt->close();
         if ($existe) continue;
         $codigo = sgl_modelos_codigo($conn);
         $obs = 'Modelo padrão importado pela Biblioteca Jurídica Profissional.';
         $status = 'Ativo'; $fav = 0;
-        $stmt = $conn->prepare("INSERT INTO modelos_documentos (codigo,titulo,categoria,area_direito,conteudo,observacoes,status,favorito,criado_por,atualizado_por) VALUES (?,?,?,?,?,?,?,?,?,?)");
-        $stmt->bind_param('sssssssiii', $codigo, $titulo, $categoria, $area, $conteudo, $obs, $status, $fav, $uid, $uid);
+        $stmt = $conn->prepare(
+            "INSERT INTO modelos_documentos
+             (tenant_id,escritorio_id,codigo,titulo,categoria,area_direito,conteudo,observacoes,status,favorito,criado_por,atualizado_por)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+        );
+        $stmt->bind_param('sissssssiiii', $tenant, $escritorio, $codigo, $titulo, $categoria, $area, $conteudo, $obs, $status, $fav, $uid, $uid);
         $stmt->execute(); $stmt->close(); $importados++;
     }
     return $importados;
@@ -236,8 +366,14 @@ function sgl_modelos_aplicar_variaveis(string $texto, array $vars): string {
 }
 function sgl_modelos_registrar_versao(mysqli $conn, array $modelo, ?int $uid): void {
     $versao = (int)($modelo['versao_atual'] ?? 1);
-    $stmt = $conn->prepare("INSERT INTO modelos_documentos_versoes (modelo_id,versao,titulo,categoria,area_direito,conteudo,observacoes,criado_por) VALUES (?,?,?,?,?,?,?,?)");
-    $stmt->bind_param('iisssssi', $modelo['id'], $versao, $modelo['titulo'], $modelo['categoria'], $modelo['area_direito'], $modelo['conteudo'], $modelo['observacoes'], $uid);
+    $tenant = sgl_mod_tenant_id();
+    $escritorio = sgl_mod_escritorio_id();
+    $stmt = $conn->prepare(
+        "INSERT INTO modelos_documentos_versoes
+         (tenant_id,escritorio_id,modelo_id,versao,titulo,categoria,area_direito,conteudo,observacoes,criado_por)
+         VALUES (?,?,?,?,?,?,?,?,?,?)"
+    );
+    $stmt->bind_param('siiisssssi', $tenant, $escritorio, $modelo['id'], $versao, $modelo['titulo'], $modelo['categoria'], $modelo['area_direito'], $modelo['conteudo'], $modelo['observacoes'], $uid);
     $stmt->execute(); $stmt->close();
 }
 function sgl_modelos_vars_contexto(array $cliente = null, array $processo = null): array {
@@ -254,7 +390,7 @@ function sgl_modelos_vars_contexto(array $cliente = null, array $processo = null
         'processo_comarca' => $processo['comarca'] ?? 'COMARCA',
         'processo_fase' => $processo['fase_atual'] ?? 'FASE ATUAL',
         'processo_valor' => isset($processo['valor_causa']) ? 'R$ ' . number_format((float)$processo['valor_causa'],2,',','.') : 'VALOR DA CAUSA',
-        'escritorio_nome' => 'SGL Advocacia',
+        'escritorio_nome' => (string)($_SESSION['empresa_nome'] ?? $_SESSION['escritorio_nome'] ?? 'ROJEX.AI'),
         'data_atual' => date('d/m/Y'),
         'mes_extenso' => sgl_modelos_mes_extenso(),
         'ano_atual' => date('Y'),
@@ -330,8 +466,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     sgl_modelos_registrar_versao($conn, $modeloAntigo, $uid);
                     $novaVersao = ((int)($modeloAntigo['versao_atual'] ?? 1)) + 1;
 
-                    $stmt = $conn->prepare("UPDATE modelos_documentos SET titulo=?, categoria=?, area_direito=?, conteudo=?, observacoes=?, status=?, favorito=?, versao_atual=?, atualizado_por=? WHERE id=?");
-                    $stmt->bind_param('ssssssiiii', $titulo, $categoria, $area, $conteudo, $observacoes, $status, $favorito, $novaVersao, $uid, $id);
+                    $stmt = $conn->prepare(
+                        "UPDATE modelos_documentos
+                         SET titulo=?, categoria=?, area_direito=?, conteudo=?, observacoes=?, status=?,
+                             favorito=?, versao_atual=?, atualizado_por=?
+                         WHERE tenant_id=? AND escritorio_id=? AND id=?"
+                    );
+                    $stmt->bind_param('ssssssiiisii', $titulo, $categoria, $area, $conteudo, $observacoes, $status, $favorito, $novaVersao, $uid, $tenantId, $escritorioId, $id);
                     $ok = $stmt->execute();
                     $stmt->close();
 
@@ -369,8 +510,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             } else {
                 $codigo = sgl_modelos_codigo($conn);
-                $stmt = $conn->prepare("INSERT INTO modelos_documentos (codigo,titulo,categoria,area_direito,conteudo,observacoes,status,favorito,criado_por,atualizado_por) VALUES (?,?,?,?,?,?,?,?,?,?)");
-                $stmt->bind_param('sssssssiii', $codigo, $titulo, $categoria, $area, $conteudo, $observacoes, $status, $favorito, $uid, $uid);
+                $stmt = $conn->prepare(
+                    "INSERT INTO modelos_documentos
+                     (tenant_id,escritorio_id,codigo,titulo,categoria,area_direito,conteudo,observacoes,status,favorito,criado_por,atualizado_por)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+                );
+                $stmt->bind_param('sissssssiiii', $tenantId, $escritorioId, $codigo, $titulo, $categoria, $area, $conteudo, $observacoes, $status, $favorito, $uid, $uid);
                 $ok = $stmt->execute();
                 $novoId = $stmt->insert_id;
                 $stmt->close();
@@ -418,8 +563,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $id = (int)($_POST['id'] ?? 0);
             $dadosAnteriores = sgl_modelos_buscar_auditoria($conn, $id);
 
-            $stmt = $conn->prepare("UPDATE modelos_documentos SET deletado=1 WHERE id=? AND deletado=0");
-            $stmt->bind_param('i', $id);
+            $stmt = $conn->prepare(
+                "UPDATE modelos_documentos SET deletado=1
+                 WHERE tenant_id=? AND escritorio_id=? AND id=? AND deletado=0"
+            );
+            $stmt->bind_param('sii', $tenantId, $escritorioId, $id);
             $ok = $stmt->execute();
             $afetadas = $stmt->affected_rows;
             $stmt->close();
@@ -464,9 +612,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($modelo) {
                 $codigo = sgl_modelos_codigo($conn);
                 $titulo = 'Cópia de ' . $modelo['titulo'];
-                $stmt = $conn->prepare("INSERT INTO modelos_documentos (codigo,titulo,categoria,area_direito,conteudo,observacoes,status,favorito,criado_por,atualizado_por) VALUES (?,?,?,?,?,?,?,?,?,?)");
+                $stmt = $conn->prepare(
+                    "INSERT INTO modelos_documentos
+                     (tenant_id,escritorio_id,codigo,titulo,categoria,area_direito,conteudo,observacoes,status,favorito,criado_por,atualizado_por)
+                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+                );
                 $fav = 0;
-                $stmt->bind_param('sssssssiii', $codigo, $titulo, $modelo['categoria'], $modelo['area_direito'], $modelo['conteudo'], $modelo['observacoes'], $modelo['status'], $fav, $uid, $uid);
+                $stmt->bind_param('sissssssiiii', $tenantId, $escritorioId, $codigo, $titulo, $modelo['categoria'], $modelo['area_direito'], $modelo['conteudo'], $modelo['observacoes'], $modelo['status'], $fav, $uid, $uid);
                 $ok = $stmt->execute();
                 $novoId = $stmt->insert_id;
                 $stmt->close();
@@ -496,9 +648,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($acao === 'favorito') {
             $id = (int)($_POST['id'] ?? 0);
             $dadosAnteriores = sgl_modelos_buscar_auditoria($conn, $id);
-            $ok = $conn->query("UPDATE modelos_documentos SET favorito = IF(COALESCE(favorito,0)=1,0,1) WHERE id=" . $id);
+            $stmtFav = $conn->prepare(
+                "UPDATE modelos_documentos
+                 SET favorito = IF(COALESCE(favorito,0)=1,0,1)
+                 WHERE tenant_id=? AND escritorio_id=? AND id=?"
+            );
+            $stmtFav->bind_param('sii', $tenantId, $escritorioId, $id);
+            $ok = $stmtFav->execute();
+            $afetadasFav = $stmtFav->affected_rows;
+            $stmtFav->close();
 
-            if ($ok && $conn->affected_rows > 0) {
+            if ($ok && $afetadasFav > 0) {
                 $dadosNovos = sgl_modelos_buscar_auditoria($conn, $id);
                 $ativado = !empty($dadosNovos['favorito']);
 
@@ -545,14 +705,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $tituloGerado = trim($_POST['titulo_gerado'] ?? 'Documento gerado');
             $conteudoFinal = trim($_POST['conteudo_final'] ?? '');
             if ($modeloId && $conteudoFinal !== '') {
-                $stmt = $conn->prepare("INSERT INTO modelos_documentos_gerados (modelo_id,cliente_id,processo_id,titulo,conteudo_final,gerado_por) VALUES (?,?,?,?,?,?)");
-                $stmt->bind_param('iiissi', $modeloId, $clienteId, $processoId, $tituloGerado, $conteudoFinal, $uid);
+                $modeloValido = sgl_modelos_buscar_auditoria($conn, $modeloId);
+                if (!$modeloValido) {
+                    $erro = 'Modelo não encontrado neste escritório.';
+                }
+
+                if (!$erro && $clienteId !== null) {
+                    $stmtCliVal = $conn->prepare(
+                        "SELECT id FROM clientes
+                         WHERE tenant_id=? AND escritorio_id=? AND id=? AND COALESCE(deletado,0)=0
+                         LIMIT 1"
+                    );
+                    $stmtCliVal->bind_param('sii', $tenantId, $escritorioId, $clienteId);
+                    $stmtCliVal->execute();
+                    $cliValido = $stmtCliVal->get_result()->fetch_assoc();
+                    $stmtCliVal->close();
+                    if (!$cliValido) $erro = 'Cliente não encontrado neste escritório.';
+                }
+
+                if (!$erro && $processoId !== null) {
+                    $stmtProcVal = $conn->prepare(
+                        "SELECT id, cliente_id FROM processos
+                         WHERE tenant_id=? AND escritorio_id=? AND id=?
+                         LIMIT 1"
+                    );
+                    $stmtProcVal->bind_param('sii', $tenantId, $escritorioId, $processoId);
+                    $stmtProcVal->execute();
+                    $procValido = $stmtProcVal->get_result()->fetch_assoc();
+                    $stmtProcVal->close();
+                    if (!$procValido) {
+                        $erro = 'Processo não encontrado neste escritório.';
+                    } elseif ($clienteId !== null && (int)($procValido['cliente_id'] ?? 0) > 0 && (int)$procValido['cliente_id'] !== $clienteId) {
+                        $erro = 'O processo não pertence ao cliente selecionado.';
+                    }
+                }
+
+                if (!$erro) {
+                $stmt = $conn->prepare(
+                    "INSERT INTO modelos_documentos_gerados
+                     (tenant_id,escritorio_id,modelo_id,cliente_id,processo_id,titulo,conteudo_final,gerado_por)
+                     VALUES (?,?,?,?,?,?,?,?)"
+                );
+                $stmt->bind_param('siiiissi', $tenantId, $escritorioId, $modeloId, $clienteId, $processoId, $tituloGerado, $conteudoFinal, $uid);
                 $ok = $stmt->execute();
                 $geradoId = $stmt->insert_id;
                 $stmt->close();
 
                 if ($ok && $geradoId > 0) {
-                    $conn->query("UPDATE modelos_documentos SET ultimo_uso_em=NOW() WHERE id=".(int)$modeloId);
+                    $stmtUso = $conn->prepare(
+                        "UPDATE modelos_documentos SET ultimo_uso_em=NOW()
+                         WHERE tenant_id=? AND escritorio_id=? AND id=?"
+                    );
+                    $stmtUso->bind_param('sii', $tenantId, $escritorioId, $modeloId);
+                    $stmtUso->execute();
+                    $stmtUso->close();
 
                     sgl_modelos_registrar_log(
                         $conn,
@@ -588,25 +794,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
                     $erro = 'Não foi possível salvar o documento gerado.';
                 }
+                }
             }
         }
     }
 }
 
 $clientes = [];
-$res = $conn->query("SELECT id, nome, cpf_cnpj, telefone, whatsapp, email, logradouro, numero, complemento, bairro, cidade, estado FROM clientes WHERE COALESCE(deletado,0)=0 ORDER BY nome LIMIT 500");
+$stmtClientes = $conn->prepare(
+    "SELECT id, nome, cpf_cnpj, telefone, whatsapp, email, logradouro, numero, complemento, bairro, cidade, estado
+     FROM clientes
+     WHERE tenant_id=? AND escritorio_id=? AND COALESCE(deletado,0)=0
+     ORDER BY nome LIMIT 500"
+);
+$stmtClientes->bind_param('si', $tenantId, $escritorioId);
+$stmtClientes->execute();
+$res = $stmtClientes->get_result();
 if ($res) while ($r = $res->fetch_assoc()) $clientes[] = $r;
+$stmtClientes->close();
+
 $processos = [];
-$res = $conn->query("SELECT p.id, p.numero_processo, p.cliente_id, p.tipo_processo, p.comarca, p.fase_atual, p.valor_causa, COALESCE(c.nome,'') AS cliente_nome FROM processos p LEFT JOIN clientes c ON c.id=p.cliente_id ORDER BY p.numero_processo LIMIT 500");
+$stmtProcessos = $conn->prepare(
+    "SELECT p.id, p.numero_processo, p.cliente_id, p.tipo_processo, p.comarca, p.fase_atual, p.valor_causa,
+            COALESCE(c.nome,'') AS cliente_nome
+     FROM processos p
+     LEFT JOIN clientes c
+       ON c.id=p.cliente_id AND c.tenant_id=p.tenant_id AND c.escritorio_id=p.escritorio_id
+     WHERE p.tenant_id=? AND p.escritorio_id=?
+     ORDER BY p.numero_processo LIMIT 500"
+);
+$stmtProcessos->bind_param('si', $tenantId, $escritorioId);
+$stmtProcessos->execute();
+$res = $stmtProcessos->get_result();
 if ($res) while ($r = $res->fetch_assoc()) $processos[] = $r;
+$stmtProcessos->close();
 
 $editar = null; $editarId = isset($_GET['editar']) ? (int)$_GET['editar'] : 0;
-if ($editarId > 0) { $stmt=$conn->prepare("SELECT * FROM modelos_documentos WHERE id=? AND deletado=0 LIMIT 1"); $stmt->bind_param('i',$editarId); $stmt->execute(); $editar=$stmt->get_result()->fetch_assoc(); $stmt->close(); }
+if ($editarId > 0) {
+    $stmt=$conn->prepare("SELECT * FROM modelos_documentos WHERE tenant_id=? AND escritorio_id=? AND id=? AND deletado=0 LIMIT 1");
+    $stmt->bind_param('sii',$tenantId,$escritorioId,$editarId);
+    $stmt->execute();
+    $editar=$stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$editar) $erro = 'Modelo não encontrado neste escritório.';
+}
 $visualizar = null; $visualizarId = isset($_GET['visualizar']) ? (int)$_GET['visualizar'] : 0;
-if ($visualizarId > 0) { $stmt=$conn->prepare("SELECT * FROM modelos_documentos WHERE id=? AND deletado=0 LIMIT 1"); $stmt->bind_param('i',$visualizarId); $stmt->execute(); $visualizar=$stmt->get_result()->fetch_assoc(); $stmt->close(); }
+if ($visualizarId > 0) {
+    $stmt=$conn->prepare("SELECT * FROM modelos_documentos WHERE tenant_id=? AND escritorio_id=? AND id=? AND deletado=0 LIMIT 1");
+    $stmt->bind_param('sii',$tenantId,$escritorioId,$visualizarId);
+    $stmt->execute();
+    $visualizar=$stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$visualizar) $erro = 'Modelo não encontrado neste escritório.';
+}
 
 $q=trim($_GET['q'] ?? ''); $fcategoria=trim($_GET['categoria'] ?? ''); $farea=trim($_GET['area_direito'] ?? ''); $fstatus=trim($_GET['status'] ?? ''); $ffav=trim($_GET['favorito'] ?? '');
-$where=['deletado=0']; $params=[]; $types='';
+$where=['tenant_id=?','escritorio_id=?','deletado=0']; $params=[$tenantId,$escritorioId]; $types='si';
 if ($q !== '') { $like='%'.$q.'%'; $where[]='(codigo LIKE ? OR titulo LIKE ? OR conteudo LIKE ? OR observacoes LIKE ?)'; array_push($params,$like,$like,$like,$like); $types.='ssss'; }
 if ($fcategoria !== '') { $where[]='categoria=?'; $params[]=$fcategoria; $types.='s'; }
 if ($farea !== '') { $where[]='area_direito=?'; $params[]=$farea; $types.='s'; }
@@ -614,15 +857,53 @@ if ($fstatus !== '') { $where[]='status=?'; $params[]=$fstatus; $types.='s'; }
 if ($ffav === '1') { $where[]='favorito=1'; }
 $sql="SELECT * FROM modelos_documentos WHERE ".implode(' AND ',$where)." ORDER BY favorito DESC, atualizado_em DESC LIMIT 200";
 $stmt=$conn->prepare($sql); if($params) $stmt->bind_param($types,...$params); $stmt->execute(); $modelos=$stmt->get_result()->fetch_all(MYSQLI_ASSOC); $stmt->close();
-$total=(int)($conn->query("SELECT COUNT(*) total FROM modelos_documentos WHERE deletado=0")->fetch_assoc()['total'] ?? 0);
-$ativos=(int)($conn->query("SELECT COUNT(*) total FROM modelos_documentos WHERE deletado=0 AND status='Ativo'")->fetch_assoc()['total'] ?? 0);
-$peticoes=(int)($conn->query("SELECT COUNT(*) total FROM modelos_documentos WHERE deletado=0 AND categoria='Petição'")->fetch_assoc()['total'] ?? 0);
-$contratos=(int)($conn->query("SELECT COUNT(*) total FROM modelos_documentos WHERE deletado=0 AND categoria='Contrato'")->fetch_assoc()['total'] ?? 0);
-$favoritos=(int)($conn->query("SELECT COUNT(*) total FROM modelos_documentos WHERE deletado=0 AND favorito=1")->fetch_assoc()['total'] ?? 0);
-$gerados=(int)($conn->query("SELECT COUNT(*) total FROM modelos_documentos_gerados")->fetch_assoc()['total'] ?? 0);
+$stmtStats=$conn->prepare(
+    "SELECT
+        COUNT(*) total,
+        COALESCE(SUM(status='Ativo'),0) ativos,
+        COALESCE(SUM(categoria='Petição'),0) peticoes,
+        COALESCE(SUM(categoria='Contrato'),0) contratos,
+        COALESCE(SUM(favorito=1),0) favoritos
+     FROM modelos_documentos
+     WHERE tenant_id=? AND escritorio_id=? AND deletado=0"
+);
+$stmtStats->bind_param('si',$tenantId,$escritorioId);
+$stmtStats->execute();
+$stats=$stmtStats->get_result()->fetch_assoc() ?: [];
+$stmtStats->close();
+$total=(int)($stats['total'] ?? 0);
+$ativos=(int)($stats['ativos'] ?? 0);
+$peticoes=(int)($stats['peticoes'] ?? 0);
+$contratos=(int)($stats['contratos'] ?? 0);
+$favoritos=(int)($stats['favoritos'] ?? 0);
+
+$stmtGerados=$conn->prepare(
+    "SELECT COUNT(*) total FROM modelos_documentos_gerados
+     WHERE tenant_id=? AND escritorio_id=?"
+);
+$stmtGerados->bind_param('si',$tenantId,$escritorioId);
+$stmtGerados->execute();
+$gerados=(int)($stmtGerados->get_result()->fetch_assoc()['total'] ?? 0);
+$stmtGerados->close();
+
 $docsGerados = [];
-$res = $conn->query("SELECT g.*, m.codigo, c.nome AS cliente_nome, p.numero_processo FROM modelos_documentos_gerados g LEFT JOIN modelos_documentos m ON m.id=g.modelo_id LEFT JOIN clientes c ON c.id=g.cliente_id LEFT JOIN processos p ON p.id=g.processo_id ORDER BY g.gerado_em DESC LIMIT 8");
+$stmtDocsGerados=$conn->prepare(
+    "SELECT g.*, m.codigo, c.nome AS cliente_nome, p.numero_processo
+     FROM modelos_documentos_gerados g
+     LEFT JOIN modelos_documentos m
+       ON m.id=g.modelo_id AND m.tenant_id=g.tenant_id AND m.escritorio_id=g.escritorio_id
+     LEFT JOIN clientes c
+       ON c.id=g.cliente_id AND c.tenant_id=g.tenant_id AND c.escritorio_id=g.escritorio_id
+     LEFT JOIN processos p
+       ON p.id=g.processo_id AND p.tenant_id=g.tenant_id AND p.escritorio_id=g.escritorio_id
+     WHERE g.tenant_id=? AND g.escritorio_id=?
+     ORDER BY g.gerado_em DESC LIMIT 8"
+);
+$stmtDocsGerados->bind_param('si',$tenantId,$escritorioId);
+$stmtDocsGerados->execute();
+$res=$stmtDocsGerados->get_result();
 if ($res) while ($r = $res->fetch_assoc()) $docsGerados[] = $r;
+$stmtDocsGerados->close();
 
 
 if ($visualizar) {

@@ -136,6 +136,30 @@ try {
         ]);
     }
 
+    if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+        ajaxParcelaResponder(403, [
+            'ok' => false,
+            'erro' => 'Contexto do escritório inválido. Entre novamente no sistema.',
+            'codigo' => $codigoCorrelacao,
+        ]);
+    }
+
+    $tenantId = function_exists('rojexTenantId')
+        ? trim((string)rojexTenantId())
+        : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+    $escritorioId = function_exists('rojexEscritorioId')
+        ? (int)rojexEscritorioId()
+        : (int)($_SESSION['escritorio_id'] ?? 0);
+
+    if ($tenantId === '' || $escritorioId <= 0) {
+        ajaxParcelaResponder(403, [
+            'ok' => false,
+            'erro' => 'Tenant ou escritório não identificado.',
+            'codigo' => $codigoCorrelacao,
+        ]);
+    }
+
     if (!validarTokenCsrf($_POST['csrf_token'] ?? null)) {
         if (function_exists('sgl_registrar_log')) {
             sgl_registrar_log(
@@ -152,6 +176,8 @@ try {
                     'nivel' => 'AVISO',
                     'dados_novos' => [
                         'codigo_correlacao' => $codigoCorrelacao,
+                        'tenant_id' => $tenantId,
+                        'escritorio_id' => $escritorioId,
                     ],
                 ]
             );
@@ -222,8 +248,15 @@ try {
             h.status AS honorario_status,
             h.deletado AS honorario_deletado
          FROM honorarios_parcelas hp
-         INNER JOIN honorarios h ON h.id = hp.honorario_id
+         INNER JOIN honorarios h
+                 ON h.id = hp.honorario_id
+                AND h.tenant_id = hp.tenant_id
+                AND h.escritorio_id = hp.escritorio_id
          WHERE hp.id = ?
+           AND hp.tenant_id = ?
+           AND hp.escritorio_id = ?
+           AND h.tenant_id = ?
+           AND h.escritorio_id = ?
          LIMIT 1
          FOR UPDATE"
     );
@@ -232,7 +265,7 @@ try {
         throw new RuntimeException('Falha ao preparar a consulta da parcela.');
     }
 
-    $stmtParcela->bind_param('s', $parcelaId);
+    $stmtParcela->bind_param('ssisi', $parcelaId, $tenantId, $escritorioId, $tenantId, $escritorioId);
 
     if (!$stmtParcela->execute()) {
         throw new RuntimeException('Falha ao consultar a parcela.');
@@ -309,7 +342,9 @@ try {
              saldo_devedor = ?,
              status_pagamento = ?,
              data_pagamento = ?
-         WHERE id = ?"
+         WHERE id = ?
+           AND tenant_id = ?
+           AND escritorio_id = ?"
     );
 
     if (!$stmtAtualizaParcela) {
@@ -317,12 +352,14 @@ try {
     }
 
     $stmtAtualizaParcela->bind_param(
-        'ddsss',
+        'ddssssi',
         $valorPago,
         $saldoDevedor,
         $statusParcela,
         $dataPagamento,
-        $parcelaId
+        $parcelaId,
+        $tenantId,
+        $escritorioId
     );
 
     if (!$stmtAtualizaParcela->execute() || $stmtAtualizaParcela->affected_rows < 0) {
@@ -336,14 +373,16 @@ try {
             COALESCE(SUM(valor_pago), 0) AS total_pago,
             COALESCE(SUM(saldo_devedor), 0) AS total_saldo
          FROM honorarios_parcelas
-         WHERE honorario_id = ?"
+         WHERE honorario_id = ?
+           AND tenant_id = ?
+           AND escritorio_id = ?"
     );
 
     if (!$stmtTotais) {
         throw new RuntimeException('Falha ao preparar o recálculo do honorário.');
     }
 
-    $stmtTotais->bind_param('s', $honorarioId);
+    $stmtTotais->bind_param('ssi', $honorarioId, $tenantId, $escritorioId);
 
     if (!$stmtTotais->execute()) {
         throw new RuntimeException('Falha ao recalcular o honorário.');
@@ -374,6 +413,8 @@ try {
              valor_pendente = ?,
              status = ?
          WHERE id = ?
+           AND tenant_id = ?
+           AND escritorio_id = ?
            AND deletado = 0"
     );
 
@@ -382,11 +423,13 @@ try {
     }
 
     $stmtAtualizaHonorario->bind_param(
-        'ddss',
+        'ddsssi',
         $totalPagoHonorario,
         $totalSaldoHonorario,
         $statusHonorario,
-        $honorarioId
+        $honorarioId,
+        $tenantId,
+        $escritorioId
     );
 
     if (!$stmtAtualizaHonorario->execute()) {

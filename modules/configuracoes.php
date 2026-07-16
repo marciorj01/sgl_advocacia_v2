@@ -222,6 +222,95 @@ $conn->query("CREATE TABLE IF NOT EXISTS manutencoes_sistema (
     INDEX idx_manutencoes_criado (criado_em)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
+
+// Complementos não destrutivos da Sprint 4.5 — Etapa 3.3.
+// Mantêm compatibilidade com o banco homologado e preparam o catálogo comercial.
+if (sgl_tabela_existe($conn, 'modulos_saas')) {
+    foreach ([
+        'status_lancamento' => "VARCHAR(30) NOT NULL DEFAULT 'producao'",
+        'requer_api' => "TINYINT(1) NOT NULL DEFAULT 0",
+        'exibir_portal' => "TINYINT(1) NOT NULL DEFAULT 0",
+        'exibir_menu' => "TINYINT(1) NOT NULL DEFAULT 1",
+        'exibir_venda' => "TINYINT(1) NOT NULL DEFAULT 1",
+    ] as $colunaModulo => $definicaoModulo) {
+        if (!sgl_coluna_existe($conn, 'modulos_saas', $colunaModulo)) {
+            try {
+                $conn->query("ALTER TABLE modulos_saas ADD COLUMN `$colunaModulo` $definicaoModulo");
+            } catch (Throwable $e) {
+                // A tela continua funcional em hospedagens sem permissão de ALTER.
+            }
+        }
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// Base não destrutiva do Provisionamento Enterprise — Sprint 4.5 / Etapa 3.4.4
+// As tabelas abaixo isolam contrato, módulos, vínculo do administrador e
+// configurações iniciais por tenant sem alterar as configurações globais atuais.
+// -----------------------------------------------------------------------------
+$conn->query("CREATE TABLE IF NOT EXISTS assinaturas_saas (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    escritorio_id BIGINT NOT NULL,
+    plano_id BIGINT UNSIGNED NOT NULL,
+    periodicidade VARCHAR(20) NOT NULL DEFAULT 'mensal',
+    valor_base DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    desconto_modulos DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    valor_extras DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    ajuste_comercial DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    valor_contratado DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(30) NOT NULL DEFAULT 'trial',
+    trial_inicio DATE NULL,
+    trial_fim DATE NULL,
+    inicio_vigencia DATE NULL,
+    proximo_vencimento DATE NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_assinaturas_escritorio (escritorio_id),
+    INDEX idx_assinaturas_plano (plano_id),
+    INDEX idx_assinaturas_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$conn->query("CREATE TABLE IF NOT EXISTS escritorios_modulos_saas (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    escritorio_id BIGINT NOT NULL,
+    modulo_id BIGINT UNSIGNED NOT NULL,
+    origem VARCHAR(30) NOT NULL DEFAULT 'plano',
+    ativo TINYINT(1) NOT NULL DEFAULT 1,
+    valor_ajuste DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_escritorio_modulo (escritorio_id, modulo_id),
+    INDEX idx_emod_modulo (modulo_id),
+    INDEX idx_emod_ativo (ativo)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$conn->query("CREATE TABLE IF NOT EXISTS usuarios_escritorios_saas (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    escritorio_id BIGINT NOT NULL,
+    tenant_id VARCHAR(80) NOT NULL,
+    papel VARCHAR(40) NOT NULL DEFAULT 'administrador',
+    principal TINYINT(1) NOT NULL DEFAULT 1,
+    ativo TINYINT(1) NOT NULL DEFAULT 1,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_usuario_escritorio (usuario_id, escritorio_id),
+    INDEX idx_ues_escritorio (escritorio_id),
+    INDEX idx_ues_tenant (tenant_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+$conn->query("CREATE TABLE IF NOT EXISTS escritorios_configuracoes_saas (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    escritorio_id BIGINT NOT NULL,
+    tenant_id VARCHAR(80) NOT NULL,
+    chave VARCHAR(80) NOT NULL,
+    valor TEXT NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_ecfg_tenant_chave (tenant_id, chave),
+    INDEX idx_ecfg_escritorio (escritorio_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
 // -----------------------------------------------------------------------------
 // Funções utilitárias
 // -----------------------------------------------------------------------------
@@ -428,6 +517,100 @@ function sgl_redirect_cfg(string $tab, string $tipo, string $msg): void {
 
     echo '<script>window.location.href = ' . $urlJs . ';</script>';
     exit;
+}
+
+function rojex_redirect_assistente(int $etapa, string $tipo, string $msg): void {
+    $etapa = max(1, min(6, $etapa));
+    $url = '?mod=configuracoes&tab=novo_escritorio&etapa=' . $etapa . '&msg_' . rawurlencode($tipo) . '=' . rawurlencode($msg);
+    $urlJs = json_encode($url, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT);
+    echo '<script>window.location.href = ' . $urlJs . ';</script>';
+    exit;
+}
+
+
+/**
+ * Calcula a composição comercial temporária do Assistente Novo Escritório.
+ *
+ * A função não grava no banco e utiliza apenas os valores administrativos já
+ * cadastrados no plano e na composição dos módulos. Valores ainda não
+ * definidos permanecem zerados, preservando a flexibilidade comercial.
+ */
+function rojex_motor_comercial_calcular(
+    array $plano,
+    string $periodicidade,
+    array $modulosPlano,
+    array $modulosSelecionados,
+    float $ajusteManual = 0.0
+): array {
+    $periodicidade = $periodicidade === 'anual' ? 'anual' : 'mensal';
+    $selecionados = array_values(array_unique(array_map('intval', $modulosSelecionados)));
+
+    $valorMensal = round(max(0, (float)($plano['valor_mensal'] ?? 0)), 2);
+    $valorAnual = round(max(0, (float)($plano['valor_anual'] ?? 0)), 2);
+    $valorBase = $periodicidade === 'anual' ? $valorAnual : $valorMensal;
+
+    $removidos = [];
+    $incluidos = [];
+    $obrigatorios = [];
+    $opcionais = [];
+    $descontoModulos = 0.0;
+
+    foreach ($modulosPlano as $modulo) {
+        $id = (int)($modulo['id'] ?? 0);
+        if ($id <= 0) continue;
+
+        $obrigatorio = !empty($modulo['obrigatorio']) || !empty($modulo['modulo_essencial']);
+        $permiteRemocao = !$obrigatorio && !empty($modulo['permite_remocao']);
+        $selecionado = $obrigatorio || in_array($id, $selecionados, true);
+        $desconto = $periodicidade === 'anual'
+            ? round(max(0, (float)($modulo['desconto_remocao_anual'] ?? 0)), 2)
+            : round(max(0, (float)($modulo['desconto_remocao_mensal'] ?? 0)), 2);
+
+        $item = [
+            'id' => $id,
+            'nome' => (string)($modulo['nome'] ?? 'Módulo'),
+            'obrigatorio' => $obrigatorio,
+            'permite_remocao' => $permiteRemocao,
+            'valor_ajuste' => $desconto,
+        ];
+
+        if ($obrigatorio) $obrigatorios[] = $item;
+        elseif ($permiteRemocao) $opcionais[] = $item;
+
+        if ($selecionado) {
+            $incluidos[] = $item;
+        } elseif ($permiteRemocao) {
+            $removidos[] = $item;
+            $descontoModulos += $desconto;
+        }
+    }
+
+    $descontoModulos = round($descontoModulos, 2);
+    $ajusteManual = round($ajusteManual, 2);
+    $valorFinal = round(max(0, $valorBase - $descontoModulos + $ajusteManual), 2);
+    $economia = round(max(0, $valorBase - $valorFinal), 2);
+
+    return [
+        'periodicidade' => $periodicidade,
+        'valor_base' => $valorBase,
+        'valor_mensal_plano' => $valorMensal,
+        'valor_anual_plano' => $valorAnual,
+        'desconto_anual_percentual' => round(max(0, (float)($plano['desconto_anual_percentual'] ?? 0)), 2),
+        'desconto_modulos' => $descontoModulos,
+        'extras' => [],
+        'valor_extras' => 0.0,
+        'ajuste_manual' => $ajusteManual,
+        'valor_final' => $valorFinal,
+        'economia' => $economia,
+        'modulos_incluidos' => $incluidos,
+        'modulos_removidos' => $removidos,
+        'modulos_obrigatorios' => $obrigatorios,
+        'modulos_opcionais' => $opcionais,
+        'quantidade_incluidos' => count($incluidos),
+        'quantidade_removidos' => count($removidos),
+        'gerado_em' => date('Y-m-d H:i:s'),
+        'observacao' => 'Composição temporária. Valores podem ser alterados pelo MASTER antes do provisionamento definitivo.',
+    ];
 }
 
 function sgl_select_count(mysqli $conn, string $sql): int {
@@ -1287,7 +1470,13 @@ $acoesExclusivasMaster = [
     'salvar_licenca_saas',
     'alterar_status_licenca_saas',
     'salvar_escritorio_saas',
+    'assistente_novo_escritorio_salvar',
+    'assistente_novo_escritorio_reiniciar',
+    'assistente_novo_escritorio_provisionar',
     'alterar_status_escritorio_saas',
+    'salvar_plano_saas',
+    'alterar_status_plano_saas',
+    'excluir_plano_saas',
     'simular_manutencao',
     'executar_manutencao',
     'simular_backup',
@@ -1302,7 +1491,7 @@ if ($acao_cfg !== '' && in_array($acao_cfg, $acoesExclusivasMaster, true) && !$e
     sgl_redirect_cfg('escritorio', 'erro', 'Ação permitida somente ao usuário MASTER.');
 }
 
-if (in_array($tab_ativa, ['usuarios', 'sistema', 'administracao', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes', 'logs'], true) && !$ehUsuarioMaster) {
+if (in_array($tab_ativa, ['usuarios', 'sistema', 'administracao', 'novo_escritorio', 'planos', 'modulos', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes', 'logs'], true) && !$ehUsuarioMaster) {
     sgl_redirect_cfg('escritorio', 'erro', 'Área restrita ao usuário MASTER.');
 }
 
@@ -2017,6 +2206,839 @@ if ($acao_cfg === 'executar_manutencao') {
             ? 'Manutenção concluída com avisos. Consulte o resultado detalhado.'
             : 'Manutenção concluída com sucesso.'
     );
+}
+
+// -----------------------------------------------------------------------------
+// Painel de Planos SaaS — Sprint 4.5 / Etapa 3.2
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'salvar_plano_saas') {
+    $planoId = max(0, (int)($_POST['plano_saas_id'] ?? 0));
+    $codigoPlano = strtolower(preg_replace('/[^a-zA-Z0-9_-]/', '', (string)($_POST['codigo_plano_saas'] ?? '')));
+    $nomePlano = sgl_limpar_texto((string)($_POST['nome_plano_saas'] ?? ''), 100);
+    $descricaoPlano = sgl_limpar_texto((string)($_POST['descricao_plano_saas'] ?? ''), 3000);
+    $valorMensalPlano = round(max(0, (float)str_replace(',', '.', (string)($_POST['valor_mensal_plano_saas'] ?? '0'))), 2);
+    $valorAnualPlano = round(max(0, (float)str_replace(',', '.', (string)($_POST['valor_anual_plano_saas'] ?? '0'))), 2);
+    $trialPadraoPlano = (int)($_POST['trial_padrao_plano_saas'] ?? 15);
+    $trialMinimoPlano = (int)($_POST['trial_minimo_plano_saas'] ?? 7);
+    $trialMaximoPlano = (int)($_POST['trial_maximo_plano_saas'] ?? 30);
+    $limiteUsuariosPlano = max(1, min(100000, (int)($_POST['limite_usuarios_plano_saas'] ?? 5)));
+    $armazenamentoPlano = max(1, min(1000000, (int)($_POST['armazenamento_plano_saas'] ?? 10)));
+    $suporteInclusoPlano = !empty($_POST['suporte_incluso_plano_saas']) ? 1 : 0;
+    $nivelSuportePlano = (string)($_POST['nivel_suporte_plano_saas'] ?? 'padrao');
+    $ordemPlano = max(0, min(100000, (int)($_POST['ordem_plano_saas'] ?? 0)));
+    $destaquePlano = !empty($_POST['destaque_plano_saas']) ? 1 : 0;
+    $ativoPlano = !empty($_POST['ativo_plano_saas']) ? 1 : 0;
+    $motivoPrecoPlano = sgl_limpar_texto((string)($_POST['motivo_preco_plano_saas'] ?? ''), 255);
+
+    if ($codigoPlano === '' || strlen($codigoPlano) < 2 || $nomePlano === '') {
+        sgl_redirect_cfg('planos', 'erro', 'Informe um código interno válido e o nome do plano.');
+    }
+    if ($trialMinimoPlano < 7 || $trialMaximoPlano > 30 || $trialMinimoPlano > $trialMaximoPlano) {
+        sgl_redirect_cfg('planos', 'erro', 'O período de Trial deve permanecer entre 7 e 30 dias.');
+    }
+    if ($trialPadraoPlano < $trialMinimoPlano || $trialPadraoPlano > $trialMaximoPlano) {
+        sgl_redirect_cfg('planos', 'erro', 'O Trial padrão deve estar entre o mínimo e o máximo definidos.');
+    }
+    if (!in_array($nivelSuportePlano, ['padrao','prioritario','premium'], true)) {
+        $nivelSuportePlano = 'padrao';
+    }
+
+    $descontoAnualPlano = 0.00;
+    if ($valorMensalPlano > 0) {
+        $totalDozeMeses = $valorMensalPlano * 12;
+        $descontoAnualPlano = max(0, min(100, round((1 - ($valorAnualPlano / $totalDozeMeses)) * 100, 2)));
+    }
+
+    try {
+        $stmtDup = $conn->prepare("SELECT id FROM planos_saas WHERE codigo = ? AND id <> ? LIMIT 1");
+        $stmtDup->bind_param('si', $codigoPlano, $planoId);
+        $stmtDup->execute();
+        $duplicadoPlano = $stmtDup->get_result()->fetch_assoc();
+        $stmtDup->close();
+        if ($duplicadoPlano) {
+            sgl_redirect_cfg('planos', 'erro', 'Já existe um plano com este código interno.');
+        }
+
+        $conn->begin_transaction();
+        $precoAnteriorPlano = null;
+        if ($planoId > 0) {
+            $stmtAnterior = $conn->prepare("SELECT valor_mensal, valor_anual FROM planos_saas WHERE id = ? LIMIT 1 FOR UPDATE");
+            $stmtAnterior->bind_param('i', $planoId);
+            $stmtAnterior->execute();
+            $precoAnteriorPlano = $stmtAnterior->get_result()->fetch_assoc();
+            $stmtAnterior->close();
+            if (!$precoAnteriorPlano) {
+                throw new RuntimeException('Plano não encontrado.');
+            }
+        }
+
+        if ($destaquePlano === 1) {
+            $stmtDestaque = $conn->prepare("UPDATE planos_saas SET destaque = 0 WHERE id <> ?");
+            $stmtDestaque->bind_param('i', $planoId);
+            $stmtDestaque->execute();
+            $stmtDestaque->close();
+        }
+
+        if ($planoId > 0) {
+            $stmt = $conn->prepare(
+                "UPDATE planos_saas SET codigo=?, nome=?, descricao=?, valor_mensal=?, valor_anual=?,
+                    desconto_anual_percentual=?, trial_dias_padrao=?, trial_dias_minimo=?, trial_dias_maximo=?,
+                    limite_usuarios_padrao=?, limite_armazenamento_gb_padrao=?, suporte_incluso=?, nivel_suporte=?,
+                    ordem_exibicao=?, destaque=?, ativo=? WHERE id=?"
+            );
+            $stmt->bind_param(
+                'sssdddiiiiiisiiii',
+                $codigoPlano, $nomePlano, $descricaoPlano, $valorMensalPlano, $valorAnualPlano,
+                $descontoAnualPlano, $trialPadraoPlano, $trialMinimoPlano, $trialMaximoPlano,
+                $limiteUsuariosPlano, $armazenamentoPlano, $suporteInclusoPlano, $nivelSuportePlano,
+                $ordemPlano, $destaquePlano, $ativoPlano, $planoId
+            );
+            $stmt->execute();
+            $stmt->close();
+            $registroPlano = $planoId;
+            $acaoPlanoLog = 'Atualizou plano SaaS';
+            $mensagemPlano = 'Plano atualizado com sucesso.';
+        } else {
+            $stmt = $conn->prepare(
+                "INSERT INTO planos_saas
+                    (codigo,nome,descricao,valor_mensal,valor_anual,desconto_anual_percentual,
+                     trial_dias_padrao,trial_dias_minimo,trial_dias_maximo,limite_usuarios_padrao,
+                     limite_armazenamento_gb_padrao,suporte_incluso,nivel_suporte,ordem_exibicao,destaque,ativo)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            );
+            $stmt->bind_param(
+                'sssdddiiiiiisiii',
+                $codigoPlano, $nomePlano, $descricaoPlano, $valorMensalPlano, $valorAnualPlano,
+                $descontoAnualPlano, $trialPadraoPlano, $trialMinimoPlano, $trialMaximoPlano,
+                $limiteUsuariosPlano, $armazenamentoPlano, $suporteInclusoPlano, $nivelSuportePlano,
+                $ordemPlano, $destaquePlano, $ativoPlano
+            );
+            $stmt->execute();
+            $registroPlano = (int)$stmt->insert_id;
+            $stmt->close();
+            $acaoPlanoLog = 'Criou plano SaaS';
+            $mensagemPlano = 'Plano cadastrado com sucesso.';
+        }
+
+        $precoMudou = $precoAnteriorPlano === null
+            || abs((float)$precoAnteriorPlano['valor_mensal'] - $valorMensalPlano) > 0.001
+            || abs((float)$precoAnteriorPlano['valor_anual'] - $valorAnualPlano) > 0.001;
+        if ($precoMudou && sgl_tabela_existe($conn, 'planos_precos_historico')) {
+            $valorMensalAnterior = $precoAnteriorPlano !== null ? (float)$precoAnteriorPlano['valor_mensal'] : null;
+            $valorAnualAnterior = $precoAnteriorPlano !== null ? (float)$precoAnteriorPlano['valor_anual'] : null;
+            $alteradoPor = $usuarioSessaoId > 0 ? $usuarioSessaoId : null;
+            $alteradoPorNome = (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Sistema');
+            $motivoHistorico = $motivoPrecoPlano !== '' ? $motivoPrecoPlano : ($precoAnteriorPlano === null ? 'Preço inicial do plano.' : 'Alteração realizada pelo Painel de Planos SaaS.');
+            $stmtHistorico = $conn->prepare(
+                "INSERT INTO planos_precos_historico
+                    (plano_id,valor_mensal_anterior,valor_mensal_novo,valor_anual_anterior,valor_anual_novo,motivo,alterado_por,alterado_por_nome)
+                 VALUES (?,?,?,?,?,?,?,?)"
+            );
+            $stmtHistorico->bind_param(
+                'iddddsis',
+                $registroPlano, $valorMensalAnterior, $valorMensalPlano, $valorAnualAnterior,
+                $valorAnualPlano, $motivoHistorico, $alteradoPor, $alteradoPorNome
+            );
+            $stmtHistorico->execute();
+            $stmtHistorico->close();
+        }
+
+        $conn->commit();
+        sgl_log($conn, $acaoPlanoLog, 'planos_saas', (string)$registroPlano, "Plano: {$nomePlano}; Mensal: {$valorMensalPlano}; Anual: {$valorAnualPlano}; Trial: {$trialPadraoPlano} dias; Ativo: {$ativoPlano}");
+        sgl_redirect_cfg('planos', 'sucesso', $mensagemPlano);
+    } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        sgl_redirect_cfg('planos', 'erro', 'Não foi possível salvar o plano. Verifique os dados informados.');
+    }
+}
+
+if ($acao_cfg === 'alterar_status_plano_saas') {
+    $planoId = max(0, (int)($_POST['plano_saas_id'] ?? 0));
+    $novoStatusPlano = (int)($_POST['novo_status_plano_saas'] ?? -1);
+    if ($planoId <= 0 || !in_array($novoStatusPlano, [0,1], true)) {
+        sgl_redirect_cfg('planos', 'erro', 'Plano ou status inválido.');
+    }
+    try {
+        $stmt = $conn->prepare("UPDATE planos_saas SET ativo = ? WHERE id = ?");
+        $stmt->bind_param('ii', $novoStatusPlano, $planoId);
+        $stmt->execute();
+        $stmt->close();
+        sgl_log($conn, $novoStatusPlano ? 'Ativou plano SaaS' : 'Inativou plano SaaS', 'planos_saas', (string)$planoId, 'Novo status: ' . ($novoStatusPlano ? 'ativo' : 'inativo'));
+        sgl_redirect_cfg('planos', 'sucesso', $novoStatusPlano ? 'Plano ativado com sucesso.' : 'Plano inativado com sucesso.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('planos', 'erro', 'Não foi possível alterar o status do plano.');
+    }
+}
+
+
+if ($acao_cfg === 'excluir_plano_saas') {
+    $planoId = max(0, (int)($_POST['plano_saas_id'] ?? 0));
+    if ($planoId <= 0) {
+        sgl_redirect_cfg('planos', 'erro', 'Plano inválido para exclusão.');
+    }
+
+    try {
+        $conn->begin_transaction();
+
+        $stmtPlano = $conn->prepare(
+            "SELECT id, codigo, nome, ativo, valor_mensal, valor_anual
+               FROM planos_saas
+              WHERE id = ?
+              LIMIT 1
+              FOR UPDATE"
+        );
+        $stmtPlano->bind_param('i', $planoId);
+        $stmtPlano->execute();
+        $planoExcluir = $stmtPlano->get_result()->fetch_assoc();
+        $stmtPlano->close();
+
+        if (!$planoExcluir) {
+            throw new RuntimeException('Plano não encontrado.');
+        }
+
+        $codigoPlanoExcluir = (string)$planoExcluir['codigo'];
+        $vinculosEscritorios = 0;
+        $vinculosLicencas = 0;
+
+        if (sgl_tabela_existe($conn, 'escritorios_saas') && sgl_coluna_existe($conn, 'escritorios_saas', 'plano')) {
+            $stmtVinculo = $conn->prepare("SELECT COUNT(*) AS total FROM escritorios_saas WHERE plano = ?");
+            $stmtVinculo->bind_param('s', $codigoPlanoExcluir);
+            $stmtVinculo->execute();
+            $vinculosEscritorios = (int)($stmtVinculo->get_result()->fetch_assoc()['total'] ?? 0);
+            $stmtVinculo->close();
+        }
+
+        if (sgl_tabela_existe($conn, 'licencas_saas') && sgl_coluna_existe($conn, 'licencas_saas', 'plano')) {
+            $stmtVinculo = $conn->prepare("SELECT COUNT(*) AS total FROM licencas_saas WHERE plano = ?");
+            $stmtVinculo->bind_param('s', $codigoPlanoExcluir);
+            $stmtVinculo->execute();
+            $vinculosLicencas = (int)($stmtVinculo->get_result()->fetch_assoc()['total'] ?? 0);
+            $stmtVinculo->close();
+        }
+
+        if ($vinculosEscritorios > 0 || $vinculosLicencas > 0) {
+            $conn->rollback();
+            $detalhesVinculo = [];
+            if ($vinculosEscritorios > 0) $detalhesVinculo[] = $vinculosEscritorios . ' escritório(s)';
+            if ($vinculosLicencas > 0) $detalhesVinculo[] = $vinculosLicencas . ' licença(s)';
+            sgl_redirect_cfg(
+                'planos',
+                'aviso',
+                'Não é possível excluir este plano porque existem ' . implode(' e ', $detalhesVinculo) . ' vinculados. Utilize Inativar.'
+            );
+        }
+
+        // planos_modulos_saas e planos_precos_historico possuem FK ON DELETE CASCADE.
+        // Assim, somente os vínculos internos do plano são removidos junto com ele.
+        $stmtExcluir = $conn->prepare("DELETE FROM planos_saas WHERE id = ? LIMIT 1");
+        $stmtExcluir->bind_param('i', $planoId);
+        $stmtExcluir->execute();
+        $afetadasPlano = $stmtExcluir->affected_rows;
+        $stmtExcluir->close();
+
+        if ($afetadasPlano !== 1) {
+            throw new RuntimeException('O plano não foi excluído.');
+        }
+
+        $conn->commit();
+
+        sgl_log(
+            $conn,
+            'Excluiu plano SaaS',
+            'planos_saas',
+            (string)$planoId,
+            'Plano excluído definitivamente: ' . (string)$planoExcluir['nome'] .
+            ' | Código: ' . $codigoPlanoExcluir .
+            ' | Mensal: ' . (string)$planoExcluir['valor_mensal'] .
+            ' | Anual: ' . (string)$planoExcluir['valor_anual']
+        );
+        sgl_redirect_cfg('planos', 'sucesso', 'Plano excluído definitivamente com sucesso.');
+    } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        sgl_redirect_cfg('planos', 'erro', 'Não foi possível excluir o plano. Verifique se existem vínculos e tente novamente.');
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// Cadastro e Configurador de Módulos SaaS — Sprint 4.5 / Etapa 3.3
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'salvar_modulo_saas') {
+    $moduloId = max(0, (int)($_POST['modulo_saas_id'] ?? 0));
+    $codigoModulo = strtolower(preg_replace('/[^a-zA-Z0-9_-]/', '', (string)($_POST['codigo_modulo_saas'] ?? '')));
+    $nomeModulo = sgl_limpar_texto((string)($_POST['nome_modulo_saas'] ?? ''), 120);
+    $descricaoModulo = sgl_limpar_texto((string)($_POST['descricao_modulo_saas'] ?? ''), 3000);
+    $categoriaModulo = strtolower(preg_replace('/[^a-zA-Z0-9_-]/', '', (string)($_POST['categoria_modulo_saas'] ?? 'operacional')));
+    $iconeModulo = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)($_POST['icone_modulo_saas'] ?? 'bi-box'));
+    $ordemModulo = max(0, min(100000, (int)($_POST['ordem_modulo_saas'] ?? 0)));
+    $essencialModulo = !empty($_POST['essencial_modulo_saas']) ? 1 : 0;
+    $permiteDesativacaoModulo = !empty($_POST['permite_desativacao_modulo_saas']) ? 1 : 0;
+    $exigeIaModulo = !empty($_POST['exige_ia_modulo_saas']) ? 1 : 0;
+    $requerApiModulo = !empty($_POST['requer_api_modulo_saas']) ? 1 : 0;
+    $exibirPortalModulo = !empty($_POST['exibir_portal_modulo_saas']) ? 1 : 0;
+    $exibirMenuModulo = !empty($_POST['exibir_menu_modulo_saas']) ? 1 : 0;
+    $exibirVendaModulo = !empty($_POST['exibir_venda_modulo_saas']) ? 1 : 0;
+    $ativoModulo = !empty($_POST['ativo_modulo_saas']) ? 1 : 0;
+    $statusLancamentoModulo = (string)($_POST['status_lancamento_modulo_saas'] ?? 'producao');
+    if (!in_array($statusLancamentoModulo, ['producao','beta','desenvolvimento','descontinuado'], true)) $statusLancamentoModulo = 'producao';
+
+    if ($codigoModulo === '' || strlen($codigoModulo) < 2 || $nomeModulo === '') {
+        sgl_redirect_cfg('modulos', 'erro', 'Informe o código interno e o nome do módulo.');
+    }
+    if ($essencialModulo) $permiteDesativacaoModulo = 0;
+
+    try {
+        $stmtDup = $conn->prepare("SELECT id FROM modulos_saas WHERE codigo=? AND id<>? LIMIT 1");
+        $stmtDup->bind_param('si', $codigoModulo, $moduloId);
+        $stmtDup->execute();
+        $duplicado = $stmtDup->get_result()->fetch_assoc();
+        $stmtDup->close();
+        if ($duplicado) sgl_redirect_cfg('modulos', 'erro', 'Já existe um módulo com este código interno.');
+
+        $conn->begin_transaction();
+        $camposExtras = [];
+        $valoresExtras = [];
+        $tiposExtras = '';
+        foreach ([
+            'status_lancamento'=>[$statusLancamentoModulo,'s'],
+            'requer_api'=>[$requerApiModulo,'i'],
+            'exibir_portal'=>[$exibirPortalModulo,'i'],
+            'exibir_menu'=>[$exibirMenuModulo,'i'],
+            'exibir_venda'=>[$exibirVendaModulo,'i'],
+        ] as $campoExtra=>$dadosExtra) {
+            if (sgl_coluna_existe($conn, 'modulos_saas', $campoExtra)) {
+                $camposExtras[$campoExtra] = $dadosExtra[0];
+                $valoresExtras[] = $dadosExtra[0];
+                $tiposExtras .= $dadosExtra[1];
+            }
+        }
+
+        if ($moduloId > 0) {
+            $sets = ['codigo=?','nome=?','descricao=?','categoria=?','icone=?','modulo_essencial=?','permite_desativacao=?','exige_ia_externa=?','ordem_exibicao=?','ativo=?'];
+            $tipos = 'sssssiiiii';
+            $valores = [$codigoModulo,$nomeModulo,$descricaoModulo,$categoriaModulo,$iconeModulo,$essencialModulo,$permiteDesativacaoModulo,$exigeIaModulo,$ordemModulo,$ativoModulo];
+            foreach ($camposExtras as $campo=>$valor) { $sets[] = "`$campo`=?"; }
+            $tipos .= $tiposExtras . 'i';
+            $valores = array_merge($valores,$valoresExtras,[$moduloId]);
+            $stmt=$conn->prepare("UPDATE modulos_saas SET ".implode(',',$sets)." WHERE id=?");
+            $stmt->bind_param($tipos,...$valores);
+            $stmt->execute(); $stmt->close();
+            $acaoLog='Atualizou módulo SaaS'; $mensagem='Módulo atualizado com sucesso.'; $registro=$moduloId;
+        } else {
+            $colunas=['codigo','nome','descricao','categoria','icone','modulo_essencial','permite_desativacao','exige_ia_externa','ordem_exibicao','ativo'];
+            $tipos='sssssiiiii';
+            $valores=[$codigoModulo,$nomeModulo,$descricaoModulo,$categoriaModulo,$iconeModulo,$essencialModulo,$permiteDesativacaoModulo,$exigeIaModulo,$ordemModulo,$ativoModulo];
+            foreach ($camposExtras as $campo=>$valor) $colunas[]=$campo;
+            $tipos.=$tiposExtras; $valores=array_merge($valores,$valoresExtras);
+            $stmt=$conn->prepare("INSERT INTO modulos_saas (`".implode('`,`',$colunas)."`) VALUES (".implode(',',array_fill(0,count($colunas),'?')).")");
+            $stmt->bind_param($tipos,...$valores); $stmt->execute(); $registro=(int)$stmt->insert_id; $stmt->close();
+            $acaoLog='Criou módulo SaaS'; $mensagem='Módulo cadastrado com sucesso.';
+        }
+        $conn->commit();
+        sgl_log($conn,$acaoLog,'modulos_saas',(string)$registro,"Módulo: {$nomeModulo}; Código: {$codigoModulo}; Categoria: {$categoriaModulo}; Status: {$statusLancamentoModulo}");
+        sgl_redirect_cfg('modulos','sucesso',$mensagem);
+    } catch (Throwable $e) {
+        try{$conn->rollback();}catch(Throwable $ignorado){}
+        sgl_redirect_cfg('modulos','erro','Não foi possível salvar o módulo. Verifique os dados informados.');
+    }
+}
+
+if ($acao_cfg === 'alterar_status_modulo_saas') {
+    $moduloId=max(0,(int)($_POST['modulo_saas_id']??0));
+    $novoStatus=(int)($_POST['novo_status_modulo_saas']??-1);
+    if($moduloId<=0 || !in_array($novoStatus,[0,1],true)) sgl_redirect_cfg('modulos','erro','Módulo ou status inválido.');
+    try {
+        $stmt=$conn->prepare("SELECT nome,modulo_essencial FROM modulos_saas WHERE id=? LIMIT 1"); $stmt->bind_param('i',$moduloId); $stmt->execute(); $mod=$stmt->get_result()->fetch_assoc(); $stmt->close();
+        if(!$mod) sgl_redirect_cfg('modulos','erro','Módulo não encontrado.');
+        if(!$novoStatus && !empty($mod['modulo_essencial'])) sgl_redirect_cfg('modulos','aviso','Módulos essenciais não podem ser inativados.');
+        $stmt=$conn->prepare("UPDATE modulos_saas SET ativo=? WHERE id=?"); $stmt->bind_param('ii',$novoStatus,$moduloId); $stmt->execute(); $stmt->close();
+        sgl_log($conn,$novoStatus?'Ativou módulo SaaS':'Inativou módulo SaaS','modulos_saas',(string)$moduloId,'Módulo: '.$mod['nome']);
+        sgl_redirect_cfg('modulos','sucesso',$novoStatus?'Módulo ativado com sucesso.':'Módulo inativado com sucesso.');
+    } catch(Throwable $e){ sgl_redirect_cfg('modulos','erro','Não foi possível alterar o status do módulo.'); }
+}
+
+if ($acao_cfg === 'excluir_modulo_saas') {
+    $moduloId=max(0,(int)($_POST['modulo_saas_id']??0));
+    if($moduloId<=0) sgl_redirect_cfg('modulos','erro','Módulo inválido para exclusão.');
+    try {
+        $conn->begin_transaction();
+        $stmt=$conn->prepare("SELECT * FROM modulos_saas WHERE id=? LIMIT 1 FOR UPDATE"); $stmt->bind_param('i',$moduloId); $stmt->execute(); $mod=$stmt->get_result()->fetch_assoc(); $stmt->close();
+        if(!$mod) throw new RuntimeException('Módulo não encontrado.');
+        if(!empty($mod['modulo_essencial'])) { $conn->rollback(); sgl_redirect_cfg('modulos','aviso','Módulos essenciais não podem ser excluídos. Utilize a edição para revisar sua configuração.'); }
+        $vinculos=0;
+        if(sgl_tabela_existe($conn,'planos_modulos_saas')) { $stmt=$conn->prepare("SELECT COUNT(*) total FROM planos_modulos_saas WHERE modulo_id=?"); $stmt->bind_param('i',$moduloId); $stmt->execute(); $vinculos=(int)($stmt->get_result()->fetch_assoc()['total']??0); $stmt->close(); }
+        if($vinculos>0){ $conn->rollback(); sgl_redirect_cfg('modulos','aviso','Não é possível excluir este módulo porque ele está vinculado a '.$vinculos.' plano(s). Remova os vínculos ou utilize Inativar.'); }
+        $stmt=$conn->prepare("DELETE FROM modulos_saas WHERE id=? LIMIT 1"); $stmt->bind_param('i',$moduloId); $stmt->execute(); $afetadas=$stmt->affected_rows; $stmt->close();
+        if($afetadas!==1) throw new RuntimeException('Exclusão não realizada.');
+        $conn->commit();
+        sgl_log($conn,'Excluiu módulo SaaS','modulos_saas',(string)$moduloId,'Módulo excluído: '.$mod['nome'].' | Código: '.$mod['codigo']);
+        sgl_redirect_cfg('modulos','sucesso','Módulo excluído definitivamente com sucesso.');
+    } catch(Throwable $e){ try{$conn->rollback();}catch(Throwable $ignorado){} sgl_redirect_cfg('modulos','erro','Não foi possível excluir o módulo. Verifique os vínculos existentes.'); }
+}
+
+if ($acao_cfg === 'salvar_configuracao_plano_modulos') {
+    $planoId=max(0,(int)($_POST['plano_configurador_id']??0));
+    if($planoId<=0) sgl_redirect_cfg('modulos','erro','Selecione um plano válido.');
+    $modulosPost=$_POST['modulos_plano']??[];
+    try {
+        $conn->begin_transaction();
+        $stmt=$conn->prepare("SELECT id,nome FROM planos_saas WHERE id=? LIMIT 1 FOR UPDATE"); $stmt->bind_param('i',$planoId); $stmt->execute(); $plano=$stmt->get_result()->fetch_assoc(); $stmt->close();
+        if(!$plano) throw new RuntimeException('Plano não encontrado.');
+        $res=$conn->query("SELECT id,nome,modulo_essencial,permite_desativacao FROM modulos_saas ORDER BY id");
+        $salvos=0;
+        while($res && ($mod=$res->fetch_assoc())){
+            $mid=(int)$mod['id']; $dados=is_array($modulosPost[$mid]??null)?$modulosPost[$mid]:[];
+            $incluido=!empty($dados['incluido'])?1:0;
+            $obrigatorio=!empty($dados['obrigatorio'])?1:0;
+            $permiteRemocao=!empty($dados['permite_remocao'])?1:0;
+            if(!empty($mod['modulo_essencial'])) { $incluido=1; $obrigatorio=1; $permiteRemocao=0; }
+            if(empty($mod['permite_desativacao'])) $permiteRemocao=0;
+            if(!$incluido){ $obrigatorio=0; $permiteRemocao=0; }
+            $descMensal=round(max(0,(float)str_replace(',','.',(string)($dados['desconto_mensal']??'0'))),2);
+            $descAnual=round(max(0,(float)str_replace(',','.',(string)($dados['desconto_anual']??'0'))),2);
+            if(!$permiteRemocao){$descMensal=0;$descAnual=0;}
+            $ativo=$incluido?1:0;
+            $stmtUp=$conn->prepare("INSERT INTO planos_modulos_saas (plano_id,modulo_id,incluido_padrao,obrigatorio,permite_remocao,desconto_remocao_mensal,desconto_remocao_anual,ativo) VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE incluido_padrao=VALUES(incluido_padrao),obrigatorio=VALUES(obrigatorio),permite_remocao=VALUES(permite_remocao),desconto_remocao_mensal=VALUES(desconto_remocao_mensal),desconto_remocao_anual=VALUES(desconto_remocao_anual),ativo=VALUES(ativo)");
+            $stmtUp->bind_param('iiiiiddi',$planoId,$mid,$incluido,$obrigatorio,$permiteRemocao,$descMensal,$descAnual,$ativo); $stmtUp->execute(); $stmtUp->close(); $salvos++;
+        }
+        $conn->commit();
+        sgl_log($conn,'Configurou módulos do plano SaaS','planos_modulos_saas',(string)$planoId,'Plano: '.$plano['nome'].'; Módulos processados: '.$salvos);
+        sgl_redirect_cfg('modulos','sucesso','Configuração de módulos do plano salva com sucesso.');
+    } catch(Throwable $e){ try{$conn->rollback();}catch(Throwable $ignorado){} sgl_redirect_cfg('modulos','erro','Não foi possível salvar a configuração dos módulos do plano.'); }
+}
+
+// -----------------------------------------------------------------------------
+// Assistente Enterprise "Novo Escritório" — Sprint 4.5 / Etapa 3.4.2
+// Nesta etapa os dados permanecem somente em sessão. Nenhum tenant é provisionado.
+// -----------------------------------------------------------------------------
+if (!isset($_SESSION['rojex_novo_escritorio']) || !is_array($_SESSION['rojex_novo_escritorio'])) {
+    $_SESSION['rojex_novo_escritorio'] = [];
+}
+
+if ($acao_cfg === 'assistente_novo_escritorio_reiniciar') {
+    unset($_SESSION['rojex_novo_escritorio']);
+    sgl_redirect_cfg('novo_escritorio', 'sucesso', 'Assistente reiniciado com segurança. Nenhum registro foi criado.');
+}
+
+if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
+    $etapaAssistente = max(1, min(6, (int)($_POST['etapa_assistente'] ?? 1)));
+    $dadosAssistente = $_SESSION['rojex_novo_escritorio'] ?? [];
+
+    if ($etapaAssistente === 1) {
+        $nomeFantasia = sgl_limpar_texto((string)($_POST['assistente_nome_fantasia'] ?? ''), 180);
+        $razaoSocial = sgl_limpar_texto((string)($_POST['assistente_razao_social'] ?? ''), 180);
+        $documento = preg_replace('/\D+/', '', (string)($_POST['assistente_documento'] ?? ''));
+        $responsavel = sgl_limpar_texto((string)($_POST['assistente_responsavel'] ?? ''), 140);
+        $email = strtolower(sgl_limpar_texto((string)($_POST['assistente_email'] ?? ''), 140));
+        $telefone = sgl_limpar_texto((string)($_POST['assistente_telefone'] ?? ''), 40);
+        $cidade = sgl_limpar_texto((string)($_POST['assistente_cidade'] ?? ''), 100);
+        $uf = strtoupper(sgl_limpar_texto((string)($_POST['assistente_uf'] ?? ''), 2));
+        $tenant = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($_POST['assistente_tenant'] ?? '')));
+        $subdominio = strtolower(preg_replace('/[^a-z0-9-]/i', '', (string)($_POST['assistente_subdominio'] ?? '')));
+
+        if ($nomeFantasia === '' || $razaoSocial === '' || $documento === '' || $responsavel === '' || $email === '') {
+            rojex_redirect_assistente(1, 'erro', 'Preencha os campos obrigatórios do escritório.');
+        }
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            rojex_redirect_assistente(1, 'erro', 'Informe um e-mail válido.');
+        }
+        if (!in_array(strlen($documento), [11,14], true)) {
+            rojex_redirect_assistente(1, 'erro', 'Informe um CPF ou CNPJ válido em quantidade de dígitos.');
+        }
+        if ($tenant === '') {
+            $baseTenant = preg_replace('/[^A-Z0-9]+/', '-', strtoupper(iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $nomeFantasia) ?: $nomeFantasia));
+            $tenant = trim(substr($baseTenant, 0, 48), '-') . '-' . strtoupper(substr(hash('sha256', $documento), 0, 8));
+        }
+        if ($subdominio === '') {
+            $baseSub = strtolower(iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $nomeFantasia) ?: $nomeFantasia);
+            $subdominio = trim(preg_replace('/[^a-z0-9]+/', '-', $baseSub), '-');
+            $subdominio = substr($subdominio, 0, 50);
+        }
+
+        try {
+            $stmt = $conn->prepare("SELECT id,nome FROM escritorios_saas WHERE (REPLACE(REPLACE(REPLACE(documento,'.',''),'/',''),'-','')=? OR LOWER(email)=? OR tenant_id=? OR LOWER(subdominio)=?) LIMIT 1");
+            $stmt->bind_param('ssss', $documento, $email, $tenant, $subdominio);
+            $stmt->execute();
+            $duplicado = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if ($duplicado) {
+                rojex_redirect_assistente(1, 'erro', 'Já existe um escritório com documento, e-mail, Tenant ID ou subdomínio informado.');
+            }
+        } catch (Throwable $e) {
+            rojex_redirect_assistente(1, 'erro', 'Não foi possível concluir a validação de duplicidade.');
+        }
+
+        $dadosAssistente['escritorio'] = compact('nomeFantasia','razaoSocial','documento','responsavel','email','telefone','cidade','uf','tenant','subdominio');
+        $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
+        rojex_redirect_assistente(2, 'sucesso', 'Dados do escritório validados.');
+    }
+
+    if ($etapaAssistente === 2) {
+        $planoId = max(0, (int)($_POST['assistente_plano_id'] ?? 0));
+        $periodicidade = (string)($_POST['assistente_periodicidade'] ?? 'mensal');
+        if (!in_array($periodicidade, ['mensal','anual'], true)) $periodicidade = 'mensal';
+        try {
+            $stmt = $conn->prepare("SELECT * FROM planos_saas WHERE id=? AND ativo=1 LIMIT 1");
+            $stmt->bind_param('i', $planoId);
+            $stmt->execute();
+            $plano = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            if (!$plano) rojex_redirect_assistente(2, 'erro', 'Selecione um plano comercial ativo.');
+            $dadosAssistente['plano'] = ['id'=>$planoId,'periodicidade'=>$periodicidade,'snapshot'=>$plano];
+            $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
+            rojex_redirect_assistente(3, 'sucesso', 'Plano comercial selecionado.');
+        } catch (Throwable $e) {
+            rojex_redirect_assistente(2, 'erro', 'Não foi possível carregar o plano selecionado.');
+        }
+    }
+
+    if ($etapaAssistente === 3) {
+        $planoIdAssistente = (int)($dadosAssistente['plano']['id'] ?? 0);
+        if ($planoIdAssistente <= 0) rojex_redirect_assistente(2, 'erro', 'Selecione primeiro o plano comercial.');
+
+        $selecionados = array_values(array_unique(array_map('intval', (array)($_POST['assistente_modulos'] ?? []))));
+
+        try {
+            $stmt = $conn->prepare(
+                "SELECT m.*, pm.incluido_padrao, pm.obrigatorio, pm.permite_remocao,
+                        pm.desconto_remocao_mensal, pm.desconto_remocao_anual
+                   FROM planos_modulos_saas pm
+                   INNER JOIN modulos_saas m ON m.id = pm.modulo_id
+                  WHERE pm.plano_id = ? AND pm.ativo = 1 AND m.ativo = 1
+                  ORDER BY m.ordem_exibicao, m.nome"
+            );
+            $stmt->bind_param('i', $planoIdAssistente);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            $modulosComerciais = [];
+            $idsPermitidos = [];
+            $idsObrigatorios = [];
+
+            while ($modulo = $res->fetch_assoc()) {
+                $modulosComerciais[] = $modulo;
+                $idModulo = (int)$modulo['id'];
+                $idsPermitidos[] = $idModulo;
+                if (!empty($modulo['obrigatorio']) || !empty($modulo['modulo_essencial'])) {
+                    $idsObrigatorios[] = $idModulo;
+                }
+            }
+            $stmt->close();
+
+            // Impede que IDs de módulos externos ao plano sejam enviados pelo navegador.
+            $selecionados = array_values(array_intersect($selecionados, $idsPermitidos));
+            $selecionados = array_values(array_unique(array_merge($selecionados, $idsObrigatorios)));
+
+            $planoSnapshot = (array)($dadosAssistente['plano']['snapshot'] ?? []);
+            $periodicidade = (string)($dadosAssistente['plano']['periodicidade'] ?? 'mensal');
+            $motorComercial = rojex_motor_comercial_calcular(
+                $planoSnapshot,
+                $periodicidade,
+                $modulosComerciais,
+                $selecionados,
+                0.0
+            );
+
+            $dadosAssistente['modulos'] = $selecionados;
+            $dadosAssistente['comercial'] = $motorComercial;
+            $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
+            rojex_redirect_assistente(4, 'sucesso', 'Personalização e composição comercial armazenadas.');
+        } catch (Throwable $e) {
+            rojex_redirect_assistente(3, 'erro', 'Não foi possível calcular a composição comercial dos módulos.');
+        }
+    }
+
+    if ($etapaAssistente === 4) {
+        $trialDias = max(7, min(30, (int)($_POST['assistente_trial_dias'] ?? 15)));
+        $inicio = date('Y-m-d');
+        $fimTrial = date('Y-m-d', strtotime('+' . $trialDias . ' days'));
+        try { $chave = 'ROJEX-' . strtoupper(bin2hex(random_bytes(12))); }
+        catch (Throwable $e) { $chave = 'ROJEX-' . strtoupper(substr(hash('sha256', uniqid('', true)), 0, 24)); }
+        $dadosAssistente['licenca'] = ['chave'=>$chave,'trial_dias'=>$trialDias,'inicio'=>$inicio,'fim_trial'=>$fimTrial];
+        $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
+        rojex_redirect_assistente(5, 'sucesso', 'Prévia da licença gerada.');
+    }
+
+    if ($etapaAssistente === 5) {
+        $adminNome = sgl_limpar_texto((string)($_POST['assistente_admin_nome'] ?? ''), 140);
+        $adminLogin = strtolower(preg_replace('/[^a-z0-9._-]/i', '', (string)($_POST['assistente_admin_login'] ?? '')));
+        $adminEmail = strtolower(sgl_limpar_texto((string)($_POST['assistente_admin_email'] ?? ''), 140));
+        $adminSenha = (string)($_POST['assistente_admin_senha'] ?? '');
+        $adminIdioma = in_array((string)($_POST['assistente_admin_idioma'] ?? 'pt-BR'), ['pt-BR','en-US','es-ES'], true) ? (string)$_POST['assistente_admin_idioma'] : 'pt-BR';
+        $adminFuso = sgl_limpar_texto((string)($_POST['assistente_admin_fuso'] ?? 'America/Sao_Paulo'), 80);
+        if ($adminNome === '' || $adminLogin === '' || !filter_var($adminEmail, FILTER_VALIDATE_EMAIL) || strlen($adminSenha) < 6) {
+            rojex_redirect_assistente(5, 'erro', 'Informe nome, login, e-mail válido e senha inicial com pelo menos 6 caracteres.');
+        }
+        try {
+            // A tabela oficial de usuários do ROJEX.AI utiliza a coluna `usuario`
+            // para o login. A validação permanece compatível com bancos antigos
+            // que eventualmente utilizem `username`.
+            $colunaLoginUsuario = sgl_coluna_existe($conn, 'usuarios', 'usuario')
+                ? 'usuario'
+                : (sgl_coluna_existe($conn, 'usuarios', 'username') ? 'username' : '');
+
+            if ($colunaLoginUsuario === '') {
+                rojex_redirect_assistente(5, 'erro', 'A estrutura da tabela de usuários não possui uma coluna de login compatível.');
+            }
+
+            if (sgl_coluna_existe($conn, 'usuarios', 'email')) {
+                $stmt = $conn->prepare(
+                    "SELECT id FROM usuarios
+                      WHERE LOWER(`{$colunaLoginUsuario}`) = LOWER(?)
+                         OR LOWER(email) = LOWER(?)
+                      LIMIT 1"
+                );
+                $stmt->bind_param('ss', $adminLogin, $adminEmail);
+            } else {
+                $stmt = $conn->prepare(
+                    "SELECT id FROM usuarios
+                      WHERE LOWER(`{$colunaLoginUsuario}`) = LOWER(?)
+                      LIMIT 1"
+                );
+                $stmt->bind_param('s', $adminLogin);
+            }
+
+            $stmt->execute();
+            $duplicado = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if ($duplicado) {
+                rojex_redirect_assistente(5, 'erro', 'O login ou e-mail do administrador já está em uso.');
+            }
+        } catch (Throwable $e) {
+            rojex_redirect_assistente(5, 'erro', 'Não foi possível validar o administrador.');
+        }
+        $dadosAssistente['administrador'] = ['nome'=>$adminNome,'login'=>$adminLogin,'email'=>$adminEmail,'senha_hash'=>password_hash($adminSenha, PASSWORD_DEFAULT),'senha_definida'=>true,'idioma'=>$adminIdioma,'fuso'=>$adminFuso];
+        $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
+        rojex_redirect_assistente(6, 'sucesso', 'Administrador validado. Revise os dados antes do provisionamento.');
+    }
+}
+
+
+// -----------------------------------------------------------------------------
+// Provisionamento Enterprise Transacional — Sprint 4.5 / Etapa 3.4.4
+// Revalida todos os dados e executa criação atômica com rollback completo.
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
+    $dadosAssistente = $_SESSION['rojex_novo_escritorio'] ?? [];
+    $escritorio = (array)($dadosAssistente['escritorio'] ?? []);
+    $planoSessao = (array)($dadosAssistente['plano'] ?? []);
+    $licencaSessao = (array)($dadosAssistente['licenca'] ?? []);
+    $administrador = (array)($dadosAssistente['administrador'] ?? []);
+    $modulosSelecionados = array_values(array_unique(array_map('intval', (array)($dadosAssistente['modulos'] ?? []))));
+
+    if (!$escritorio || !$planoSessao || !$licencaSessao || !$administrador || empty($administrador['senha_hash'])) {
+        rojex_redirect_assistente(1, 'erro', 'A sessão do assistente está incompleta. Revise o cadastro antes de provisionar.');
+    }
+
+    $nomeFantasia = sgl_limpar_texto((string)($escritorio['nomeFantasia'] ?? ''), 180);
+    $razaoSocial = sgl_limpar_texto((string)($escritorio['razaoSocial'] ?? ''), 180);
+    $documento = preg_replace('/\D+/', '', (string)($escritorio['documento'] ?? ''));
+    $responsavel = sgl_limpar_texto((string)($escritorio['responsavel'] ?? ''), 140);
+    $emailEscritorio = strtolower(sgl_limpar_texto((string)($escritorio['email'] ?? ''), 140));
+    $telefone = sgl_limpar_texto((string)($escritorio['telefone'] ?? ''), 40);
+    $cidade = sgl_limpar_texto((string)($escritorio['cidade'] ?? ''), 100);
+    $uf = strtoupper(sgl_limpar_texto((string)($escritorio['uf'] ?? ''), 2));
+    $tenant = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($escritorio['tenant'] ?? '')));
+    $subdominio = strtolower(preg_replace('/[^a-z0-9-]/i', '', (string)($escritorio['subdominio'] ?? '')));
+    $planoId = max(0, (int)($planoSessao['id'] ?? 0));
+    $periodicidade = (($planoSessao['periodicidade'] ?? '') === 'anual') ? 'anual' : 'mensal';
+    $trialDias = max(7, min(30, (int)($licencaSessao['trial_dias'] ?? 15)));
+    $adminNome = sgl_limpar_texto((string)($administrador['nome'] ?? ''), 150);
+    $adminLogin = strtolower(preg_replace('/[^a-z0-9._-]/i', '', (string)($administrador['login'] ?? '')));
+    $adminEmail = strtolower(sgl_limpar_texto((string)($administrador['email'] ?? ''), 120));
+    $adminSenhaHash = (string)($administrador['senha_hash'] ?? '');
+    $adminIdioma = in_array((string)($administrador['idioma'] ?? 'pt-BR'), ['pt-BR','en-US','es-ES'], true) ? (string)$administrador['idioma'] : 'pt-BR';
+    $adminFuso = sgl_limpar_texto((string)($administrador['fuso'] ?? 'America/Sao_Paulo'), 80);
+
+    if ($nomeFantasia === '' || $razaoSocial === '' || !in_array(strlen($documento), [11,14], true)
+        || !filter_var($emailEscritorio, FILTER_VALIDATE_EMAIL) || $tenant === '' || $subdominio === ''
+        || $planoId <= 0 || $adminNome === '' || $adminLogin === '' || !filter_var($adminEmail, FILTER_VALIDATE_EMAIL)
+        || !password_get_info($adminSenhaHash)['algo']) {
+        rojex_redirect_assistente(6, 'erro', 'Os dados finais não passaram na revalidação de segurança. Revise o assistente.');
+    }
+
+    try {
+        // Recarrega plano e módulos diretamente do banco para não confiar no snapshot da sessão.
+        $stmt = $conn->prepare("SELECT * FROM planos_saas WHERE id=? AND ativo=1 LIMIT 1");
+        $stmt->bind_param('i', $planoId);
+        $stmt->execute();
+        $planoAtual = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$planoAtual) {
+            rojex_redirect_assistente(2, 'erro', 'O plano selecionado foi inativado ou removido. Escolha outro plano.');
+        }
+
+        $stmt = $conn->prepare(
+            "SELECT m.*, pm.incluido_padrao, pm.obrigatorio, pm.permite_remocao,
+                    pm.desconto_remocao_mensal, pm.desconto_remocao_anual
+               FROM planos_modulos_saas pm
+               INNER JOIN modulos_saas m ON m.id=pm.modulo_id
+              WHERE pm.plano_id=? AND pm.ativo=1 AND m.ativo=1
+              ORDER BY m.ordem_exibicao, m.nome"
+        );
+        $stmt->bind_param('i', $planoId);
+        $stmt->execute();
+        $resModulos = $stmt->get_result();
+        $modulosPlanoAtual = [];
+        $idsPermitidos = [];
+        $idsObrigatorios = [];
+        while ($modulo = $resModulos->fetch_assoc()) {
+            $modulosPlanoAtual[] = $modulo;
+            $mid = (int)$modulo['id'];
+            $idsPermitidos[] = $mid;
+            if (!empty($modulo['obrigatorio']) || !empty($modulo['modulo_essencial'])) $idsObrigatorios[] = $mid;
+        }
+        $stmt->close();
+
+        $modulosSelecionados = array_values(array_intersect($modulosSelecionados, $idsPermitidos));
+        $modulosSelecionados = array_values(array_unique(array_merge($modulosSelecionados, $idsObrigatorios)));
+        $comercialFinal = rojex_motor_comercial_calcular($planoAtual, $periodicidade, $modulosPlanoAtual, $modulosSelecionados, 0.0);
+
+        $conn->begin_transaction();
+
+        // Bloqueios e revalidação contra concorrência imediatamente antes das inserções.
+        $stmt = $conn->prepare("SELECT id FROM escritorios_saas WHERE REPLACE(REPLACE(REPLACE(documento,'.',''),'/',''),'-','')=? OR LOWER(email)=? OR tenant_id=? OR LOWER(subdominio)=? LIMIT 1 FOR UPDATE");
+        $stmt->bind_param('ssss', $documento, $emailEscritorio, $tenant, $subdominio);
+        $stmt->execute();
+        $duplicadoEscritorio = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($duplicadoEscritorio) throw new RuntimeException('Já existe escritório com documento, e-mail, tenant ou subdomínio informado.');
+
+        $colunaLoginUsuario = sgl_coluna_existe($conn, 'usuarios', 'usuario') ? 'usuario' : (sgl_coluna_existe($conn, 'usuarios', 'username') ? 'username' : '');
+        if ($colunaLoginUsuario === '') throw new RuntimeException('A tabela usuarios não possui coluna de login compatível.');
+        $stmt = $conn->prepare("SELECT id FROM usuarios WHERE LOWER(`{$colunaLoginUsuario}`)=LOWER(?) OR LOWER(email)=LOWER(?) LIMIT 1 FOR UPDATE");
+        $stmt->bind_param('ss', $adminLogin, $adminEmail);
+        $stmt->execute();
+        $duplicadoAdmin = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($duplicadoAdmin) throw new RuntimeException('O login ou e-mail do administrador já está em uso.');
+
+        $codigoPlano = substr((string)($planoAtual['codigo'] ?? 'enterprise'), 0, 30);
+        $statusEscritorio = 'implantacao';
+        $observacoesEscritorio = 'Provisionado pelo Assistente Enterprise. Razão social: ' . $razaoSocial;
+        $stmt = $conn->prepare("INSERT INTO escritorios_saas (tenant_id,nome,documento,responsavel,email,subdominio,status,plano,telefone,cidade,uf,observacoes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
+        $stmt->bind_param('ssssssssssss', $tenant, $nomeFantasia, $documento, $responsavel, $emailEscritorio, $subdominio, $statusEscritorio, $codigoPlano, $telefone, $cidade, $uf, $observacoesEscritorio);
+        if (!$stmt->execute()) throw new RuntimeException('Falha ao criar o escritório.');
+        $escritorioId = (int)$stmt->insert_id;
+        $stmt->close();
+
+        $inicio = date('Y-m-d');
+        $fimTrial = date('Y-m-d', strtotime('+' . $trialDias . ' days'));
+        $proximoVencimento = $fimTrial;
+        $statusAssinatura = 'trial';
+        $valorBase = (float)$comercialFinal['valor_base'];
+        $descontoModulos = (float)$comercialFinal['desconto_modulos'];
+        $valorExtras = (float)$comercialFinal['valor_extras'];
+        $ajusteComercial = (float)$comercialFinal['ajuste_manual'];
+        $valorContratado = (float)$comercialFinal['valor_final'];
+        $stmt = $conn->prepare("INSERT INTO assinaturas_saas (escritorio_id,plano_id,periodicidade,valor_base,desconto_modulos,valor_extras,ajuste_comercial,valor_contratado,status,trial_inicio,trial_fim,inicio_vigencia,proximo_vencimento) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
+        $stmt->bind_param('iisdddddsssss', $escritorioId, $planoId, $periodicidade, $valorBase, $descontoModulos, $valorExtras, $ajusteComercial, $valorContratado, $statusAssinatura, $inicio, $fimTrial, $inicio, $proximoVencimento);
+        if (!$stmt->execute()) throw new RuntimeException('Falha ao criar a assinatura comercial.');
+        $assinaturaId = (int)$stmt->insert_id;
+        $stmt->close();
+
+        do {
+            try { $chaveLicenca = 'ROJEX-' . strtoupper(bin2hex(random_bytes(12))); }
+            catch (Throwable $e) { $chaveLicenca = 'ROJEX-' . strtoupper(substr(hash('sha256', uniqid('', true)), 0, 24)); }
+            $stmt = $conn->prepare("SELECT id FROM licencas_saas WHERE chave_licenca=? LIMIT 1");
+            $stmt->bind_param('s', $chaveLicenca);
+            $stmt->execute();
+            $existeChave = (bool)$stmt->get_result()->fetch_assoc();
+            $stmt->close();
+        } while ($existeChave);
+
+        $statusLicenca = 'teste';
+        $limiteUsuarios = max(1, (int)($planoAtual['limite_usuarios_padrao'] ?? 1));
+        $limiteArmazenamento = max(1, (int)($planoAtual['limite_armazenamento_gb_padrao'] ?? 1));
+        $observacoesLicenca = json_encode(['assinatura_id'=>$assinaturaId,'periodicidade'=>$periodicidade,'valor_contratado'=>$valorContratado,'trial_dias'=>$trialDias], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        $stmt = $conn->prepare("INSERT INTO licencas_saas (escritorio_id,chave_licenca,plano,status,limite_usuarios,limite_armazenamento_gb,ativada_em,renovacao_em,observacoes) VALUES (?,?,?,?,?,?,?,?,?)");
+        $stmt->bind_param('isssiisss', $escritorioId, $chaveLicenca, $codigoPlano, $statusLicenca, $limiteUsuarios, $limiteArmazenamento, $inicio, $fimTrial, $observacoesLicenca);
+        if (!$stmt->execute()) throw new RuntimeException('Falha ao criar a licença.');
+        $licencaId = (int)$stmt->insert_id;
+        $stmt->close();
+
+        $stmtModulo = $conn->prepare("INSERT INTO escritorios_modulos_saas (escritorio_id,modulo_id,origem,ativo,valor_ajuste) VALUES (?,?,'plano',1,0.00)");
+        foreach ($modulosSelecionados as $moduloId) {
+            $stmtModulo->bind_param('ii', $escritorioId, $moduloId);
+            if (!$stmtModulo->execute()) throw new RuntimeException('Falha ao vincular os módulos contratados.');
+        }
+        $stmtModulo->close();
+
+        $perfilAdmin = 'Administrador';
+        $nivelAdmin = 'Administrador';
+        $statusAdmin = 'Ativo';
+        $ativoAdmin = 1;
+        $cargoAdmin = 'Administrador do Escritório';
+        $departamentoAdmin = 'Administração';
+        $observacoesAdmin = 'Administrador provisionado automaticamente para o tenant ' . $tenant;
+        $vinculoStatus = 'ativo';
+        $stmt = $conn->prepare("INSERT INTO usuarios (nome,`{$colunaLoginUsuario}`,email,senha,perfil,nivel,status,ativo,cargo,departamento,observacoes,vinculo_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
+        $stmt->bind_param('sssssssissss', $adminNome, $adminLogin, $adminEmail, $adminSenhaHash, $perfilAdmin, $nivelAdmin, $statusAdmin, $ativoAdmin, $cargoAdmin, $departamentoAdmin, $observacoesAdmin, $vinculoStatus);
+        if (!$stmt->execute()) throw new RuntimeException('Falha ao criar o administrador.');
+        $usuarioAdminId = (int)$stmt->insert_id;
+        $stmt->close();
+
+        $papel = 'administrador';
+        $principal = 1;
+        $ativoVinculo = 1;
+        $stmt = $conn->prepare("INSERT INTO usuarios_escritorios_saas (usuario_id,escritorio_id,tenant_id,papel,principal,ativo) VALUES (?,?,?,?,?,?)");
+        $stmt->bind_param('iissii', $usuarioAdminId, $escritorioId, $tenant, $papel, $principal, $ativoVinculo);
+        if (!$stmt->execute()) throw new RuntimeException('Falha ao vincular o administrador ao tenant.');
+        $stmt->close();
+
+        $temaModo = 'claro';
+        $temaDensidade = 'confortavel';
+        $temaBordas = 'suaves';
+        $temaFonte = 100;
+        $stmt = $conn->prepare("INSERT INTO usuarios_preferencias (usuario_id,tema_modo,tema_densidade,tema_bordas,tema_fonte_percentual) VALUES (?,?,?,?,?)");
+        $stmt->bind_param('isssi', $usuarioAdminId, $temaModo, $temaDensidade, $temaBordas, $temaFonte);
+        if (!$stmt->execute()) throw new RuntimeException('Falha ao criar as preferências do administrador.');
+        $stmt->close();
+
+        // Reutiliza os padrões seguros fornecidos pelo núcleo Empresa sem alterar
+        // a configuração global do MASTER. Os valores são persistidos por tenant.
+        require_once __DIR__ . '/../core/Empresa.php';
+        $empresaBase = new Empresa($conn);
+        $configuracoesIniciais = [
+            'nome_escritorio' => $nomeFantasia,
+            'razao_social' => $razaoSocial,
+            'documento' => $documento,
+            'responsavel' => $responsavel,
+            'email' => $emailEscritorio,
+            'telefone' => $telefone,
+            'cidade' => $cidade,
+            'uf' => $uf,
+            'tenant_id' => $tenant,
+            'subdominio' => $subdominio,
+            'timezone' => $adminFuso !== '' ? $adminFuso : $empresaBase->timezone(),
+            'idioma' => $adminIdioma,
+            'cor_primaria' => $empresaBase->corPrimaria(),
+            'cor_secundaria' => $empresaBase->corSecundaria(),
+            'cor_accent' => $empresaBase->corAccent(),
+            'plano_codigo' => $codigoPlano,
+            'licenca_chave' => $chaveLicenca,
+        ];
+        $stmtCfg = $conn->prepare("INSERT INTO escritorios_configuracoes_saas (escritorio_id,tenant_id,chave,valor) VALUES (?,?,?,?)");
+        foreach ($configuracoesIniciais as $chaveCfg => $valorCfg) {
+            $valorCfg = (string)$valorCfg;
+            $stmtCfg->bind_param('isss', $escritorioId, $tenant, $chaveCfg, $valorCfg);
+            if (!$stmtCfg->execute()) throw new RuntimeException('Falha ao criar as configurações iniciais do tenant.');
+        }
+        $stmtCfg->close();
+
+        sgl_log($conn, 'Provisionou novo escritório SaaS', 'escritorios_saas', (string)$escritorioId,
+            'Tenant: ' . $tenant . '; Plano: ' . $codigoPlano . '; Assinatura: ' . $assinaturaId .
+            '; Licença: ' . $licencaId . '; Administrador: ' . $usuarioAdminId . '; Módulos: ' . count($modulosSelecionados) .
+            '; Valor contratado: R$ ' . number_format($valorContratado, 2, ',', '.'));
+
+        $conn->commit();
+        unset($_SESSION['rojex_novo_escritorio']);
+        sgl_redirect_cfg('administracao', 'sucesso', 'Escritório provisionado com sucesso. Tenant: ' . $tenant . ' | Licença: ' . $chaveLicenca);
+    } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        error_log('ROJEX Provisionamento Enterprise: ' . $e->getMessage());
+        rojex_redirect_assistente(6, 'erro', 'Provisionamento cancelado e revertido integralmente: ' . $e->getMessage());
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -3390,6 +4412,69 @@ if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'licencas_saas')) {
 }
 
 
+// Dados do Painel de Planos SaaS — Sprint 4.5 / Etapa 3.2.
+$planosSaas = [];
+$planoEditar = null;
+$historicoPrecosPlanos = [];
+if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'planos_saas')) {
+    try {
+        $resPlanos = $conn->query("SELECT * FROM planos_saas ORDER BY ordem_exibicao ASC, nome ASC, id ASC");
+        if ($resPlanos) {
+            while ($rowPlano = $resPlanos->fetch_assoc()) $planosSaas[] = $rowPlano;
+        }
+        $editarPlanoId = max(0, (int)($_GET['editar_plano'] ?? 0));
+        if ($editarPlanoId > 0) {
+            foreach ($planosSaas as $planoItem) {
+                if ((int)$planoItem['id'] === $editarPlanoId) { $planoEditar = $planoItem; break; }
+            }
+        }
+        if (sgl_tabela_existe($conn, 'planos_precos_historico')) {
+            $resHistoricoPlanos = $conn->query(
+                "SELECT h.*, p.nome AS plano_nome, p.codigo AS plano_codigo
+                   FROM planos_precos_historico h
+                   INNER JOIN planos_saas p ON p.id = h.plano_id
+                  ORDER BY h.id DESC LIMIT 30"
+            );
+            if ($resHistoricoPlanos) {
+                while ($rowHistoricoPlano = $resHistoricoPlanos->fetch_assoc()) $historicoPrecosPlanos[] = $rowHistoricoPlano;
+            }
+        }
+    } catch (Throwable $e) {
+        $planosSaas = [];
+        $planoEditar = null;
+        $historicoPrecosPlanos = [];
+    }
+}
+$totalPlanosSaas = count($planosSaas);
+$totalPlanosAtivos = 0;
+$totalPlanosInativos = 0;
+$totalPlanosDestaque = 0;
+foreach ($planosSaas as $planoContador) {
+    if (!empty($planoContador['ativo'])) $totalPlanosAtivos++; else $totalPlanosInativos++;
+    if (!empty($planoContador['destaque'])) $totalPlanosDestaque++;
+}
+
+
+// Dados do Cadastro de Módulos e Configurador Comercial — Sprint 4.5 / Etapa 3.3.
+$modulosSaas=[]; $moduloEditar=null; $configuradorPlanoId=max(0,(int)($_GET['configurar_plano']??0)); $vinculosPlanoModulo=[];
+if($ehUsuarioMaster && sgl_tabela_existe($conn,'modulos_saas')){
+    try{
+        $resMod=$conn->query("SELECT * FROM modulos_saas ORDER BY categoria ASC, ordem_exibicao ASC, nome ASC, id ASC");
+        while($resMod && ($rowMod=$resMod->fetch_assoc())) $modulosSaas[]=$rowMod;
+        $editarModuloId=max(0,(int)($_GET['editar_modulo']??0));
+        if($editarModuloId>0) foreach($modulosSaas as $modItem) if((int)$modItem['id']===$editarModuloId){$moduloEditar=$modItem;break;}
+        if($configuradorPlanoId<=0 && $planosSaas) $configuradorPlanoId=(int)$planosSaas[0]['id'];
+        if($configuradorPlanoId>0 && sgl_tabela_existe($conn,'planos_modulos_saas')){
+            $stmt=$conn->prepare("SELECT * FROM planos_modulos_saas WHERE plano_id=?"); $stmt->bind_param('i',$configuradorPlanoId); $stmt->execute(); $res=$stmt->get_result();
+            while($res && ($row=$res->fetch_assoc())) $vinculosPlanoModulo[(int)$row['modulo_id']]=$row;
+            $stmt->close();
+        }
+    }catch(Throwable $e){$modulosSaas=[];$moduloEditar=null;$vinculosPlanoModulo=[];}
+}
+$totalModulosSaas=count($modulosSaas); $totalModulosAtivos=0; $totalModulosIa=0; $totalModulosBeta=0;
+foreach($modulosSaas as $modCont){if(!empty($modCont['ativo']))$totalModulosAtivos++;if(!empty($modCont['exige_ia_externa']))$totalModulosIa++;if(($modCont['status_lancamento']??'producao')==='beta')$totalModulosBeta++;}
+
+
 // Histórico de usuários desligados — Sprint 4.1.3 / Etapa 4.
 $usuariosDesligados = [];
 $historicoUsuariosDesligados = [];
@@ -3861,7 +4946,7 @@ foreach ($atualizacoesLista as $atualizacaoContador) {
     if ($atualizacaoContador['status'] === 'instalada') $totalAtualizacoesInstaladas++;
 }
 
-$tabs_validas = ['escritorio','marca','tema','usuarios','sistema','administracao','desligados','relatorios','saude','manutencao','backup','atualizacoes','lixeira','logs'];
+$tabs_validas = ['escritorio','marca','tema','usuarios','sistema','administracao','novo_escritorio','planos','modulos','desligados','relatorios','saude','manutencao','backup','atualizacoes','lixeira','logs'];
 
 if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 ?>
@@ -3899,6 +4984,9 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         'usuarios' => ['Usuários','bi-people'],
         'sistema' => ['Sistema','bi-sliders'],
         'administracao' => ['Administração','bi-shield-lock-fill'],
+        'novo_escritorio' => ['Novo Escritório','bi-building-add'],
+        'planos' => ['Planos SaaS','bi-tags-fill'],
+        'modulos' => ['Módulos SaaS','bi-grid-3x3-gap-fill'],
         'desligados' => ['Desligados','bi-person-x-fill'],
         'relatorios' => ['Relatórios','bi-file-earmark-bar-graph-fill'],
         'saude' => ['Saúde','bi-heart-pulse-fill'],
@@ -3909,7 +4997,7 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         'logs' => ['Logs','bi-clock-history'],
     ];
     foreach ($tabDefs as $id => $tab) :
-        if (in_array($id, ['usuarios','sistema','administracao','desligados','relatorios','saude','manutencao','backup','atualizacoes','logs'], true) && !$ehUsuarioMaster) { continue; }
+        if (in_array($id, ['usuarios','sistema','administracao','novo_escritorio','planos','modulos','desligados','relatorios','saude','manutencao','backup','atualizacoes','logs'], true) && !$ehUsuarioMaster) { continue; }
         $active = $tab_ativa === $id ? 'active' : '';
         $badge = ($id === 'lixeira' && $totalLixeira > 0) ? '<span class="badge bg-danger ms-1">' . $totalLixeira . '</span>' : '';
     ?>
@@ -4654,6 +5742,226 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         </div>
     </div>
 </div>
+<?php endif; ?>
+
+
+<?php if ($tab_ativa === 'novo_escritorio'):
+$assistenteDados = $_SESSION['rojex_novo_escritorio'] ?? [];
+$assistenteEtapa = max(1, min(6, (int)($_GET['etapa'] ?? 1)));
+$assistenteEscritorio = $assistenteDados['escritorio'] ?? [];
+$assistentePlano = $assistenteDados['plano'] ?? [];
+$assistenteLicenca = $assistenteDados['licenca'] ?? [];
+$assistenteAdmin = $assistenteDados['administrador'] ?? [];
+$assistenteModulosSelecionados = array_map('intval', (array)($assistenteDados['modulos'] ?? []));
+$assistenteComercial = is_array($assistenteDados['comercial'] ?? null) ? $assistenteDados['comercial'] : [];
+$etapasAssistente = [1=>'Dados do Escritório',2=>'Plano Comercial',3=>'Personalização',4=>'Licença',5=>'Administrador',6=>'Resumo Final'];
+$planoSelecionadoId = (int)($assistentePlano['id'] ?? 0);
+$modulosDoPlanoAssistente = [];
+if ($planoSelecionadoId > 0 && sgl_tabela_existe($conn,'planos_modulos_saas')) {
+    try {
+        $stmt=$conn->prepare("SELECT m.*,pm.incluido_padrao,pm.obrigatorio,pm.permite_remocao,pm.desconto_remocao_mensal,pm.desconto_remocao_anual FROM planos_modulos_saas pm INNER JOIN modulos_saas m ON m.id=pm.modulo_id WHERE pm.plano_id=? AND pm.ativo=1 AND m.ativo=1 ORDER BY m.ordem_exibicao,m.nome");
+        $stmt->bind_param('i',$planoSelecionadoId); $stmt->execute(); $res=$stmt->get_result();
+        while($row=$res->fetch_assoc()) $modulosDoPlanoAssistente[]=$row;
+        $stmt->close();
+    } catch(Throwable $e) {}
+}
+if (!$assistenteModulosSelecionados && $modulosDoPlanoAssistente) {
+    foreach($modulosDoPlanoAssistente as $m) if(!empty($m['incluido_padrao']) || !empty($m['obrigatorio'])) $assistenteModulosSelecionados[]=(int)$m['id'];
+}
+if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
+    $assistenteComercial = rojex_motor_comercial_calcular(
+        (array)$assistentePlano['snapshot'],
+        (string)($assistentePlano['periodicidade'] ?? 'mensal'),
+        $modulosDoPlanoAssistente,
+        $assistenteModulosSelecionados,
+        (float)($assistenteComercial['ajuste_manual'] ?? 0)
+    );
+}
+?>
+<style>
+.rojex-wizard-step{min-width:150px}.rojex-wizard-line{height:3px;background:#dee2e6;flex:1;min-width:20px}.rojex-wizard-step.active .rounded-circle{box-shadow:0 0 0 .25rem rgba(13,110,253,.18)}
+</style>
+<div class="card shadow-sm border-0 mb-4">
+ <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center flex-wrap gap-2"><span><i class="bi bi-building-add me-1"></i> Assistente Enterprise — Novo Escritório</span><span class="badge bg-warning text-dark">Pré-provisionamento</span></div>
+ <div class="card-body">
+  <div class="alert alert-info border-0"><strong>Etapa 3.4.3:</strong> os dados e a composição comercial são validados e mantidos temporariamente na sessão. Nenhum tenant, licença ou usuário será criado até a ativação do provisionamento transacional.</div>
+  <div class="d-flex align-items-start overflow-auto pb-3 mb-3">
+   <?php foreach($etapasAssistente as $numero=>$rotulo): ?>
+    <div class="rojex-wizard-step text-center <?=$assistenteEtapa===$numero?'active':''?>"><div class="rounded-circle mx-auto d-flex align-items-center justify-content-center <?=$assistenteEtapa>=$numero?'bg-primary text-white':'bg-light text-muted border'?>" style="width:42px;height:42px"><?=$numero?></div><small class="d-block mt-2 fw-semibold"><?=htmlspecialchars($rotulo)?></small></div>
+    <?php if($numero<6): ?><div class="rojex-wizard-line mt-4"></div><?php endif; ?>
+   <?php endforeach; ?>
+  </div>
+
+  <?php if($assistenteEtapa===1): ?>
+  <form method="post" class="row g-3"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="1">
+   <div class="col-md-6"><label class="form-label">Nome Fantasia *</label><input name="assistente_nome_fantasia" class="form-control" required maxlength="180" value="<?=htmlspecialchars((string)($assistenteEscritorio['nomeFantasia']??''))?>"></div>
+   <div class="col-md-6"><label class="form-label">Razão Social *</label><input name="assistente_razao_social" class="form-control" required maxlength="180" value="<?=htmlspecialchars((string)($assistenteEscritorio['razaoSocial']??''))?>"></div>
+   <div class="col-md-4"><label class="form-label">CPF/CNPJ *</label><input name="assistente_documento" class="form-control" required maxlength="20" value="<?=htmlspecialchars((string)($assistenteEscritorio['documento']??''))?>"></div>
+   <div class="col-md-4"><label class="form-label">Responsável *</label><input name="assistente_responsavel" class="form-control" required value="<?=htmlspecialchars((string)($assistenteEscritorio['responsavel']??''))?>"></div>
+   <div class="col-md-4"><label class="form-label">E-mail *</label><input type="email" name="assistente_email" class="form-control" required value="<?=htmlspecialchars((string)($assistenteEscritorio['email']??''))?>"></div>
+   <div class="col-md-3"><label class="form-label">Telefone</label><input name="assistente_telefone" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['telefone']??''))?>"></div>
+   <div class="col-md-3"><label class="form-label">Cidade</label><input name="assistente_cidade" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['cidade']??''))?>"></div>
+   <div class="col-md-2"><label class="form-label">Estado</label><input name="assistente_uf" class="form-control text-uppercase" maxlength="2" value="<?=htmlspecialchars((string)($assistenteEscritorio['uf']??''))?>"></div>
+   <div class="col-md-2"><label class="form-label">Tenant ID</label><input name="assistente_tenant" class="form-control font-monospace" placeholder="Automático" value="<?=htmlspecialchars((string)($assistenteEscritorio['tenant']??''))?>"></div>
+   <div class="col-md-2"><label class="form-label">Subdomínio</label><div class="input-group"><input name="assistente_subdominio" class="form-control" placeholder="automático" value="<?=htmlspecialchars((string)($assistenteEscritorio['subdominio']??''))?>"><span class="input-group-text">.rojex.ai</span></div></div>
+   <div class="col-12 text-end"><button class="btn btn-primary">Validar e continuar <i class="bi bi-arrow-right ms-1"></i></button></div>
+  </form>
+  <?php elseif($assistenteEtapa===2): ?>
+  <form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="2">
+   <div class="row g-3"><?php foreach($planosSaas as $p): if(empty($p['ativo'])) continue; ?><div class="col-lg-4"><label class="card h-100 shadow-sm border-2 p-3" style="cursor:pointer"><div class="form-check"><input class="form-check-input" type="radio" name="assistente_plano_id" value="<?=(int)$p['id']?>" <?=$planoSelecionadoId===(int)$p['id']?'checked':''?> required><span class="fw-bold ms-1"><?=htmlspecialchars($p['nome'])?></span></div><hr><h4>R$ <?=number_format((float)$p['valor_mensal'],2,',','.')?><small class="fs-6 text-muted">/mês</small></h4><div>R$ <?=number_format((float)$p['valor_anual'],2,',','.')?>/ano</div><small class="text-success"><?=number_format((float)$p['desconto_anual_percentual'],2,',','.')?>% anual</small><ul class="small mt-3 mb-0"><li>Trial: <?=(int)$p['trial_dias_padrao']?> dias</li><li><?=(int)$p['limite_usuarios_padrao']?> usuários</li><li><?=(int)$p['limite_armazenamento_gb_padrao']?> GB</li><li>Suporte <?=!empty($p['suporte_incluso'])?'incluído':'não incluído'?></li></ul></label></div><?php endforeach; ?></div>
+   <div class="mt-4"><label class="form-label">Periodicidade</label><select name="assistente_periodicidade" class="form-select" style="max-width:300px"><option value="mensal" <?=($assistentePlano['periodicidade']??'mensal')==='mensal'?'selected':''?>>Mensal</option><option value="anual" <?=($assistentePlano['periodicidade']??'')==='anual'?'selected':''?>>Anual com desconto</option></select></div>
+   <div class="d-flex justify-content-between mt-4"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=1"><i class="bi bi-arrow-left"></i> Voltar</a><button class="btn btn-primary">Continuar <i class="bi bi-arrow-right"></i></button></div>
+  </form>
+  <?php elseif($assistenteEtapa===3): ?>
+  <form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="3">
+   <div class="row g-3"><?php if(!$modulosDoPlanoAssistente): ?><div class="col-12"><div class="alert alert-warning">O plano selecionado não possui módulos ativos configurados.</div></div><?php endif; foreach($modulosDoPlanoAssistente as $m): $obrig=!empty($m['obrigatorio'])||!empty($m['modulo_essencial']); $checked=$obrig||in_array((int)$m['id'],$assistenteModulosSelecionados,true); ?><div class="col-md-6"><div class="border rounded p-3 h-100"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="assistente_modulos[]" value="<?=(int)$m['id']?>" <?=$checked?'checked':''?> <?=$obrig?'disabled':''?>><label class="form-check-label fw-semibold"><i class="bi <?=htmlspecialchars($m['icone']?:'bi-box')?> me-1"></i><?=htmlspecialchars($m['nome'])?></label><?php if($obrig): ?><input type="hidden" name="assistente_modulos[]" value="<?=(int)$m['id']?>"><?php endif; ?></div><small class="text-muted"><?=htmlspecialchars((string)$m['descricao'])?></small><div class="mt-2"><?php if($obrig): ?><span class="badge bg-dark">Obrigatório</span><?php elseif(!empty($m['permite_remocao'])): $descModulo=($assistentePlano['periodicidade']??'mensal')==='anual'?(float)($m['desconto_remocao_anual']??0):(float)($m['desconto_remocao_mensal']??0); ?><span class="badge bg-info text-dark">Opcional</span> <span class="badge bg-light text-dark border">Desconto ao remover: R$ <?=number_format($descModulo,2,',','.')?></span><?php endif; ?></div></div></div><?php endforeach; ?></div>
+   <div class="d-flex justify-content-between mt-4"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=2"><i class="bi bi-arrow-left"></i> Voltar</a><button class="btn btn-primary">Continuar <i class="bi bi-arrow-right"></i></button></div>
+  </form>
+  <?php elseif($assistenteEtapa===4): $pSnap=$assistentePlano['snapshot']??[]; ?>
+  <form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="4">
+   <div class="row g-3"><div class="col-md-4"><label class="form-label">Trial</label><input type="number" name="assistente_trial_dias" class="form-control" min="<?=max(7,(int)($pSnap['trial_dias_minimo']??7))?>" max="<?=min(30,(int)($pSnap['trial_dias_maximo']??30))?>" value="<?=(int)($assistenteLicenca['trial_dias']??$pSnap['trial_dias_padrao']??15)?>"></div><div class="col-md-4"><label class="form-label">Limite de usuários</label><div class="form-control bg-light"><?=(int)($pSnap['limite_usuarios_padrao']??0)?></div></div><div class="col-md-4"><label class="form-label">Armazenamento</label><div class="form-control bg-light"><?=(int)($pSnap['limite_armazenamento_gb_padrao']??0)?> GB</div></div></div>
+   <?php if(!empty($assistenteLicenca['chave'])): ?><div class="alert alert-success mt-4"><strong>Prévia da chave:</strong> <code><?=htmlspecialchars($assistenteLicenca['chave'])?></code><br><small>Será recriada e confirmada dentro da transação definitiva.</small></div><?php endif; ?>
+   <div class="d-flex justify-content-between mt-4"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=3"><i class="bi bi-arrow-left"></i> Voltar</a><button class="btn btn-primary">Gerar prévia e continuar <i class="bi bi-arrow-right"></i></button></div>
+  </form>
+  <?php elseif($assistenteEtapa===5): ?>
+  <form method="post" class="row g-3"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="5">
+   <div class="col-md-6"><label class="form-label">Nome do administrador *</label><input name="assistente_admin_nome" class="form-control" required value="<?=htmlspecialchars((string)($assistenteAdmin['nome']??''))?>"></div><div class="col-md-3"><label class="form-label">Login *</label><input name="assistente_admin_login" class="form-control" required value="<?=htmlspecialchars((string)($assistenteAdmin['login']??''))?>"></div><div class="col-md-3"><label class="form-label">Senha inicial *</label><input type="password" name="assistente_admin_senha" class="form-control" minlength="6" required autocomplete="new-password"></div>
+   <div class="col-md-4"><label class="form-label">E-mail *</label><input type="email" name="assistente_admin_email" class="form-control" required value="<?=htmlspecialchars((string)($assistenteAdmin['email']??$assistenteEscritorio['email']??''))?>"></div><div class="col-md-4"><label class="form-label">Idioma</label><select name="assistente_admin_idioma" class="form-select"><option value="pt-BR">Português (Brasil)</option><option value="en-US">English</option><option value="es-ES">Español</option></select></div><div class="col-md-4"><label class="form-label">Fuso horário</label><input name="assistente_admin_fuso" class="form-control" value="<?=htmlspecialchars((string)($assistenteAdmin['fuso']??'America/Sao_Paulo'))?>"></div>
+   <div class="col-12 d-flex justify-content-between"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=4"><i class="bi bi-arrow-left"></i> Voltar</a><button class="btn btn-primary">Revisar cadastro <i class="bi bi-arrow-right"></i></button></div>
+  </form>
+  <?php else: $pSnap=$assistentePlano['snapshot']??[]; $valorBase=(float)($assistenteComercial['valor_base']??0); $valorFinal=(float)($assistenteComercial['valor_final']??$valorBase); $descontoModulos=(float)($assistenteComercial['desconto_modulos']??0); $economia=(float)($assistenteComercial['economia']??0); $modulosRemovidos=(array)($assistenteComercial['modulos_removidos']??[]); ?>
+  <div class="row g-3">
+   <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Escritório</h6><strong><?=htmlspecialchars((string)($assistenteEscritorio['nomeFantasia']??'-'))?></strong><br><?=htmlspecialchars((string)($assistenteEscritorio['razaoSocial']??'-'))?><br><small><?=htmlspecialchars((string)($assistenteEscritorio['documento']??'-'))?> · <?=htmlspecialchars((string)($assistenteEscritorio['email']??'-'))?></small><hr><code><?=htmlspecialchars((string)($assistenteEscritorio['tenant']??'-'))?></code><br><?=htmlspecialchars((string)($assistenteEscritorio['subdominio']??'-'))?>.rojex.ai</div></div></div>
+   <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Plano e licença</h6><strong><?=htmlspecialchars((string)($pSnap['nome']??'-'))?></strong> · <?=htmlspecialchars((string)($assistentePlano['periodicidade']??'-'))?><div class="table-responsive mt-3"><table class="table table-sm mb-2"><tbody><tr><td>Valor base</td><td class="text-end">R$ <?=number_format($valorBase,2,',','.')?></td></tr><tr><td>Desconto por módulos removidos</td><td class="text-end text-success">- R$ <?=number_format($descontoModulos,2,',','.')?></td></tr><tr><td>Módulos extras</td><td class="text-end">+ R$ <?=number_format((float)($assistenteComercial['valor_extras']??0),2,',','.')?></td></tr><tr><td>Ajuste comercial</td><td class="text-end">R$ <?=number_format((float)($assistenteComercial['ajuste_manual']??0),2,',','.')?></td></tr><tr class="fw-bold border-top"><td>Valor contratado</td><td class="text-end fs-5">R$ <?=number_format($valorFinal,2,',','.')?></td></tr></tbody></table></div><?php if($economia>0): ?><span class="badge bg-success">Economia: R$ <?=number_format($economia,2,',','.')?></span><?php endif; ?><div class="small mt-2">Trial: <?=(int)($assistenteLicenca['trial_dias']??0)?> dias · Usuários: <?=(int)($pSnap['limite_usuarios_padrao']??0)?> · Armazenamento: <?=(int)($pSnap['limite_armazenamento_gb_padrao']??0)?> GB</div><hr><code><?=htmlspecialchars((string)($assistenteLicenca['chave']??'-'))?></code></div></div></div>
+   <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Módulos contratados</h6><span class="badge bg-primary"><?=count($assistenteModulosSelecionados)?> incluído(s)</span> <span class="badge bg-secondary"><?=count($modulosRemovidos)?> removido(s)</span><div class="small mt-3"><?php foreach($modulosDoPlanoAssistente as $m) if(in_array((int)$m['id'],$assistenteModulosSelecionados,true)) echo '<span class="badge bg-white text-dark border me-1 mb-1">'.htmlspecialchars($m['nome']).'</span>'; ?></div><?php if($modulosRemovidos): ?><hr><small class="text-muted d-block mb-1">Removidos:</small><?php foreach($modulosRemovidos as $mr): ?><span class="badge bg-light text-muted border me-1 mb-1"><?=htmlspecialchars((string)($mr['nome']??'Módulo'))?><?php if((float)($mr['valor_ajuste']??0)>0): ?> · -R$ <?=number_format((float)$mr['valor_ajuste'],2,',','.')?><?php endif; ?></span><?php endforeach; ?><?php endif; ?></div></div></div>
+   <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Administrador</h6><strong><?=htmlspecialchars((string)($assistenteAdmin['nome']??'-'))?></strong><br><?=htmlspecialchars((string)($assistenteAdmin['login']??'-'))?><br><small><?=htmlspecialchars((string)($assistenteAdmin['email']??'-'))?> · <?=htmlspecialchars((string)($assistenteAdmin['fuso']??'-'))?></small><hr><small class="text-muted">A senha permanece protegida por hash na sessão e será gravada somente no provisionamento definitivo.</small></div></div></div>
+  </div>
+  <div class="alert alert-success mt-4"><i class="bi bi-shield-check me-1"></i><strong>Provisionamento transacional disponível.</strong> Todos os dados serão revalidados e criados em uma única transação. Qualquer falha executará rollback completo.</div>
+  <form method="post" class="d-flex justify-content-between" onsubmit="return confirm('Confirmar o provisionamento definitivo deste escritório? Esta ação criará o tenant, a licença e o administrador.');"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_provisionar"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=5"><i class="bi bi-arrow-left"></i> Corrigir administrador</a><button class="btn btn-success"><i class="bi bi-rocket-takeoff me-1"></i> Provisionar escritório</button></form>
+  <?php endif; ?>
+ </div>
+</div>
+<form method="post" class="text-end"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_reiniciar"><button class="btn btn-sm btn-outline-danger" onclick="return confirm('Reiniciar o assistente e apagar os dados temporários?')"><i class="bi bi-arrow-counterclockwise me-1"></i>Reiniciar assistente</button></form>
+<?php endif; ?>
+
+<?php if ($tab_ativa === 'planos'): ?>
+<div class="row g-3 mb-4">
+    <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><small class="text-muted">PLANOS CADASTRADOS</small><h3 class="mb-0"><?=$totalPlanosSaas?></h3></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><small class="text-muted">ATIVOS</small><h3 class="mb-0 text-success"><?=$totalPlanosAtivos?></h3></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><small class="text-muted">INATIVOS</small><h3 class="mb-0 text-secondary"><?=$totalPlanosInativos?></h3></div></div></div>
+    <div class="col-md-3"><div class="card shadow-sm border-0 h-100"><div class="card-body"><small class="text-muted">EM DESTAQUE</small><h3 class="mb-0 text-warning"><?=$totalPlanosDestaque?></h3></div></div></div>
+</div>
+
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white"><i class="bi bi-tags-fill me-1"></i> <?=$planoEditar?'Editar Plano SaaS':'Cadastrar Novo Plano SaaS'?></div>
+    <div class="card-body">
+        <div class="alert alert-info small border-0">
+            Os valores são administráveis pelo MASTER. O desconto anual é calculado automaticamente comparando o valor anual com doze mensalidades. A exclusão comercial é feita por inativação para preservar contratos e históricos.
+        </div>
+        <form method="post" class="row g-3" id="formPlanoSaas">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="salvar_plano_saas">
+            <input type="hidden" name="plano_saas_id" value="<?=(int)($planoEditar['id'] ?? 0)?>">
+            <div class="col-lg-3"><label class="form-label">Código interno *</label><input name="codigo_plano_saas" class="form-control font-monospace" maxlength="40" required pattern="[A-Za-z0-9_-]+" value="<?=htmlspecialchars((string)($planoEditar['codigo'] ?? ''))?>" placeholder="ex.: professional"></div>
+            <div class="col-lg-5"><label class="form-label">Nome do plano *</label><input name="nome_plano_saas" class="form-control" maxlength="100" required value="<?=htmlspecialchars((string)($planoEditar['nome'] ?? ''))?>"></div>
+            <div class="col-lg-2"><label class="form-label">Ordem</label><input type="number" name="ordem_plano_saas" class="form-control" min="0" max="100000" value="<?=(int)($planoEditar['ordem_exibicao'] ?? 0)?>"></div>
+            <div class="col-lg-2"><label class="form-label">Nível de suporte</label><select name="nivel_suporte_plano_saas" class="form-select"><?php foreach(['padrao'=>'Padrão','prioritario'=>'Prioritário','premium'=>'Premium'] as $v=>$n): ?><option value="<?=$v?>" <?=($planoEditar['nivel_suporte'] ?? 'padrao')===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
+            <div class="col-12"><label class="form-label">Descrição comercial</label><textarea name="descricao_plano_saas" class="form-control" rows="2" maxlength="3000"><?=htmlspecialchars((string)($planoEditar['descricao'] ?? ''))?></textarea></div>
+
+            <div class="col-md-3"><label class="form-label">Valor mensal (R$) *</label><input type="number" step="0.01" min="0" name="valor_mensal_plano_saas" id="valorMensalPlano" class="form-control" required value="<?=number_format((float)($planoEditar['valor_mensal'] ?? 0),2,'.','')?>"></div>
+            <div class="col-md-3"><label class="form-label">Valor anual (R$) *</label><input type="number" step="0.01" min="0" name="valor_anual_plano_saas" id="valorAnualPlano" class="form-control" required value="<?=number_format((float)($planoEditar['valor_anual'] ?? 0),2,'.','')?>"></div>
+            <div class="col-md-3"><label class="form-label">Desconto anual calculado</label><div class="form-control bg-light" id="descontoAnualCalculado"><?=number_format((float)($planoEditar['desconto_anual_percentual'] ?? 0),2,',','.')?>%</div></div>
+            <div class="col-md-3"><label class="form-label">Motivo da alteração de preço</label><input name="motivo_preco_plano_saas" class="form-control" maxlength="255" placeholder="Opcional; registrado no histórico"></div>
+
+            <div class="col-md-2"><label class="form-label">Trial mínimo</label><input type="number" name="trial_minimo_plano_saas" class="form-control" min="7" max="30" value="<?=(int)($planoEditar['trial_dias_minimo'] ?? 7)?>" required></div>
+            <div class="col-md-2"><label class="form-label">Trial padrão</label><input type="number" name="trial_padrao_plano_saas" class="form-control" min="7" max="30" value="<?=(int)($planoEditar['trial_dias_padrao'] ?? 15)?>" required></div>
+            <div class="col-md-2"><label class="form-label">Trial máximo</label><input type="number" name="trial_maximo_plano_saas" class="form-control" min="7" max="30" value="<?=(int)($planoEditar['trial_dias_maximo'] ?? 30)?>" required></div>
+            <div class="col-md-3"><label class="form-label">Limite padrão de usuários</label><input type="number" name="limite_usuarios_plano_saas" class="form-control" min="1" max="100000" value="<?=(int)($planoEditar['limite_usuarios_padrao'] ?? 5)?>" required></div>
+            <div class="col-md-3"><label class="form-label">Armazenamento padrão (GB)</label><input type="number" name="armazenamento_plano_saas" class="form-control" min="1" max="1000000" value="<?=(int)($planoEditar['limite_armazenamento_gb_padrao'] ?? 10)?>" required></div>
+
+            <div class="col-12 d-flex flex-wrap gap-4">
+                <div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="suporte_incluso_plano_saas" id="suportePlano" value="1" <?=!isset($planoEditar['suporte_incluso']) || !empty($planoEditar['suporte_incluso'])?'checked':''?>><label class="form-check-label" for="suportePlano">Suporte incluído</label></div>
+                <div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="destaque_plano_saas" id="destaquePlano" value="1" <?=!empty($planoEditar['destaque'])?'checked':''?>><label class="form-check-label" for="destaquePlano">Plano em destaque</label></div>
+                <div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="ativo_plano_saas" id="ativoPlano" value="1" <?=!isset($planoEditar['ativo']) || !empty($planoEditar['ativo'])?'checked':''?>><label class="form-check-label" for="ativoPlano">Plano ativo</label></div>
+            </div>
+            <div class="col-12 d-flex gap-2"><button class="btn btn-dark"><i class="bi bi-save me-1"></i><?=$planoEditar?'Atualizar plano':'Cadastrar plano'?></button><?php if($planoEditar): ?><a href="?mod=configuracoes&tab=planos" class="btn btn-outline-secondary">Cancelar edição</a><?php endif; ?></div>
+        </form>
+    </div>
+</div>
+
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center"><span><i class="bi bi-list-check me-1"></i> Planos Comerciais</span><span class="badge bg-light text-primary"><?=$totalPlanosSaas?> plano(s)</span></div>
+    <div class="card-body p-0"><div class="table-responsive"><table class="table table-hover align-middle mb-0">
+        <thead class="table-light"><tr><th>Plano</th><th>Preços</th><th>Trial</th><th>Capacidade</th><th>Suporte</th><th>Status</th><th class="text-end">Ações</th></tr></thead>
+        <tbody><?php if(!$planosSaas): ?><tr><td colspan="7" class="text-center text-muted py-4">Nenhum plano cadastrado.</td></tr><?php else: foreach($planosSaas as $planoItem): ?>
+        <tr>
+            <td><strong><?=htmlspecialchars($planoItem['nome'])?></strong> <?php if(!empty($planoItem['destaque'])): ?><span class="badge bg-warning text-dark">Destaque</span><?php endif; ?><br><code><?=htmlspecialchars($planoItem['codigo'])?></code><br><small class="text-muted">Ordem: <?=(int)$planoItem['ordem_exibicao']?></small></td>
+            <td><strong>R$ <?=number_format((float)$planoItem['valor_mensal'],2,',','.')?></strong>/mês<br><span>R$ <?=number_format((float)$planoItem['valor_anual'],2,',','.')?>/ano</span><br><small class="text-success"><?=number_format((float)$planoItem['desconto_anual_percentual'],2,',','.')?>% de desconto anual</small></td>
+            <td><?=(int)$planoItem['trial_dias_padrao']?> dias<br><small class="text-muted">Faixa: <?=(int)$planoItem['trial_dias_minimo']?>–<?=(int)$planoItem['trial_dias_maximo']?> dias</small></td>
+            <td><?=(int)$planoItem['limite_usuarios_padrao']?> usuário(s)<br><small class="text-muted"><?=(int)$planoItem['limite_armazenamento_gb_padrao']?> GB</small></td>
+            <td><?=!empty($planoItem['suporte_incluso'])?'Incluído':'Não incluído'?><br><small class="text-muted"><?=htmlspecialchars(ucfirst($planoItem['nivel_suporte']))?></small></td>
+            <td><span class="badge <?=!empty($planoItem['ativo'])?'bg-success':'bg-secondary'?>"><?=!empty($planoItem['ativo'])?'Ativo':'Inativo'?></span></td>
+            <td class="text-end"><a href="?mod=configuracoes&tab=planos&editar_plano=<?=(int)$planoItem['id']?>" class="btn btn-sm btn-outline-primary" title="Editar"><i class="bi bi-pencil"></i></a>
+                <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_plano_saas"><input type="hidden" name="plano_saas_id" value="<?=(int)$planoItem['id']?>"><input type="hidden" name="novo_status_plano_saas" value="<?=!empty($planoItem['ativo'])?0:1?>"><button class="btn btn-sm <?=!empty($planoItem['ativo'])?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Confirmar <?=!empty($planoItem['ativo'])?'inativação':'ativação'?> deste plano?')" title="<?=!empty($planoItem['ativo'])?'Inativar':'Ativar'?>"><i class="bi <?=!empty($planoItem['ativo'])?'bi-pause-circle':'bi-play-circle'?>"></i></button></form>
+                <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="excluir_plano_saas"><input type="hidden" name="plano_saas_id" value="<?=(int)$planoItem['id']?>"><button class="btn btn-sm btn-danger" onclick="return confirm('Deseja realmente excluir definitivamente o plano <?=htmlspecialchars(addslashes((string)$planoItem['nome']), ENT_QUOTES, 'UTF-8')?>?\n\nEsta ação removerá também os módulos e o histórico de preços vinculados e não poderá ser desfeita.\n\nPlanos utilizados por escritórios ou licenças não serão excluídos.')" title="Excluir definitivamente"><i class="bi bi-trash"></i></button></form>
+            </td>
+        </tr><?php endforeach; endif; ?></tbody>
+    </table></div></div>
+</div>
+
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-light"><i class="bi bi-clock-history me-1"></i> Histórico recente de preços</div>
+    <div class="card-body p-0"><div class="table-responsive"><table class="table table-sm align-middle mb-0"><thead><tr><th>Data</th><th>Plano</th><th>Mensal</th><th>Anual</th><th>Motivo</th><th>Responsável</th></tr></thead><tbody>
+    <?php if(!$historicoPrecosPlanos): ?><tr><td colspan="6" class="text-center text-muted py-3">Nenhuma alteração de preço registrada.</td></tr><?php else: foreach($historicoPrecosPlanos as $histPlano): ?><tr><td><?=date('d/m/Y H:i',strtotime($histPlano['criado_em']))?></td><td><?=htmlspecialchars($histPlano['plano_nome'])?></td><td><?=isset($histPlano['valor_mensal_anterior'])?'R$ '.number_format((float)$histPlano['valor_mensal_anterior'],2,',','.').' → ':''?><strong>R$ <?=number_format((float)$histPlano['valor_mensal_novo'],2,',','.')?></strong></td><td><?=isset($histPlano['valor_anual_anterior'])?'R$ '.number_format((float)$histPlano['valor_anual_anterior'],2,',','.').' → ':''?><strong>R$ <?=number_format((float)$histPlano['valor_anual_novo'],2,',','.')?></strong></td><td><?=htmlspecialchars($histPlano['motivo'] ?: '-')?></td><td><?=htmlspecialchars($histPlano['alterado_por_nome'] ?: 'Sistema')?></td></tr><?php endforeach; endif; ?>
+    </tbody></table></div></div>
+</div>
+<script>
+(function(){
+    const mensal=document.getElementById('valorMensalPlano');
+    const anual=document.getElementById('valorAnualPlano');
+    const saida=document.getElementById('descontoAnualCalculado');
+    function calcular(){
+        const m=parseFloat(mensal?.value||0), a=parseFloat(anual?.value||0);
+        let d=0; if(m>0){ d=Math.max(0,Math.min(100,(1-(a/(m*12)))*100)); }
+        if(saida) saida.textContent=d.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';
+    }
+    mensal?.addEventListener('input',calcular); anual?.addEventListener('input',calcular); calcular();
+})();
+</script>
+<?php endif; ?>
+
+
+<?php if ($tab_ativa === 'modulos'): ?>
+<div class="alert alert-primary border-0 shadow-sm"><strong><i class="bi bi-grid-3x3-gap-fill me-1"></i>Cadastro e Configurador de Módulos SaaS</strong><div class="small">Gerencie o catálogo técnico e comercial e defina quais módulos pertencem a cada plano.</div></div>
+<div class="row g-3 mb-4">
+<div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted">MÓDULOS</small><h3><?=$totalModulosSaas?></h3></div></div></div>
+<div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted">ATIVOS</small><h3 class="text-success"><?=$totalModulosAtivos?></h3></div></div></div>
+<div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted">COM IA EXTERNA</small><h3 class="text-primary"><?=$totalModulosIa?></h3></div></div></div>
+<div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted">BETA</small><h3 class="text-warning"><?=$totalModulosBeta?></h3></div></div></div>
+</div>
+<div class="card shadow-sm border-0 mb-4"><div class="card-header bg-dark text-white"><i class="bi bi-plus-circle me-1"></i><?= $moduloEditar?'Editar módulo':'Novo módulo' ?></div><div class="card-body">
+<form method="post" class="row g-3"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="salvar_modulo_saas"><input type="hidden" name="modulo_saas_id" value="<?=(int)($moduloEditar['id']??0)?>">
+<div class="col-md-3"><label class="form-label">Código interno</label><input name="codigo_modulo_saas" class="form-control font-monospace" required value="<?=htmlspecialchars((string)($moduloEditar['codigo']??''))?>"></div>
+<div class="col-md-5"><label class="form-label">Nome</label><input name="nome_modulo_saas" class="form-control" required value="<?=htmlspecialchars((string)($moduloEditar['nome']??''))?>"></div>
+<div class="col-md-2"><label class="form-label">Categoria</label><input name="categoria_modulo_saas" class="form-control" value="<?=htmlspecialchars((string)($moduloEditar['categoria']??'operacional'))?>"></div>
+<div class="col-md-2"><label class="form-label">Ordem</label><input type="number" min="0" name="ordem_modulo_saas" class="form-control" value="<?=(int)($moduloEditar['ordem_exibicao']??0)?>"></div>
+<div class="col-md-8"><label class="form-label">Descrição</label><textarea name="descricao_modulo_saas" class="form-control" rows="2"><?=htmlspecialchars((string)($moduloEditar['descricao']??''))?></textarea></div>
+<div class="col-md-2"><label class="form-label">Ícone Bootstrap</label><input name="icone_modulo_saas" class="form-control" value="<?=htmlspecialchars((string)($moduloEditar['icone']??'bi-box'))?>"></div>
+<div class="col-md-2"><label class="form-label">Status</label><select name="status_lancamento_modulo_saas" class="form-select"><?php foreach(['producao'=>'Produção','beta'=>'Beta','desenvolvimento'=>'Em desenvolvimento','descontinuado'=>'Descontinuado'] as $v=>$l): ?><option value="<?=$v?>" <?=($moduloEditar['status_lancamento']??'producao')===$v?'selected':''?>><?=$l?></option><?php endforeach; ?></select></div>
+<div class="col-12"><div class="row g-2">
+<?php foreach([['essencial_modulo_saas','Essencial','modulo_essencial'],['permite_desativacao_modulo_saas','Pode ser removido','permite_desativacao'],['exige_ia_modulo_saas','Requer IA externa','exige_ia_externa'],['requer_api_modulo_saas','Requer API','requer_api'],['exibir_portal_modulo_saas','Exibir no portal','exibir_portal'],['exibir_menu_modulo_saas','Exibir no menu','exibir_menu'],['exibir_venda_modulo_saas','Exibir na venda','exibir_venda'],['ativo_modulo_saas','Ativo','ativo']] as $c): ?><div class="col-md-3"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" name="<?=$c[0]?>" <?=!empty($moduloEditar[$c[2]]??(in_array($c[2], ['permite_desativacao','exibir_menu','exibir_venda','ativo'], true)?1:0))?'checked':''?>><label class="form-check-label"><?=$c[1]?></label></div></div><?php endforeach; ?>
+</div></div>
+<div class="col-12 d-flex gap-2"><button class="btn btn-primary"><i class="bi bi-check-lg me-1"></i>Salvar módulo</button><?php if($moduloEditar): ?><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=modulos">Cancelar</a><?php endif; ?></div>
+</form></div></div>
+<div class="card shadow-sm border-0 mb-4"><div class="card-header bg-primary text-white">Catálogo de módulos <span class="badge bg-light text-primary float-end"><?=$totalModulosSaas?></span></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover align-middle mb-0"><thead><tr><th>Módulo</th><th>Categoria</th><th>Características</th><th>Status</th><th class="text-end">Ações</th></tr></thead><tbody>
+<?php foreach($modulosSaas as $m): ?><tr><td><i class="bi <?=htmlspecialchars($m['icone']?:'bi-box')?> me-2"></i><strong><?=htmlspecialchars($m['nome'])?></strong><br><code><?=htmlspecialchars($m['codigo'])?></code></td><td><?=htmlspecialchars(ucfirst($m['categoria']))?></td><td><?php if($m['modulo_essencial']): ?><span class="badge bg-dark">Essencial</span><?php endif; ?> <?php if($m['exige_ia_externa']): ?><span class="badge bg-primary">IA</span><?php endif; ?> <?php if(!empty($m['requer_api'])): ?><span class="badge bg-info text-dark">API</span><?php endif; ?></td><td><span class="badge <?=$m['ativo']?'bg-success':'bg-secondary'?>"><?=$m['ativo']?'Ativo':'Inativo'?></span> <span class="badge bg-light text-dark"><?=htmlspecialchars(ucfirst($m['status_lancamento']??'producao'))?></span></td><td class="text-end"><a class="btn btn-sm btn-outline-primary" href="?mod=configuracoes&tab=modulos&editar_modulo=<?=(int)$m['id']?>"><i class="bi bi-pencil"></i></a> <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_modulo_saas"><input type="hidden" name="modulo_saas_id" value="<?=(int)$m['id']?>"><input type="hidden" name="novo_status_modulo_saas" value="<?=$m['ativo']?0:1?>"><button class="btn btn-sm <?=$m['ativo']?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Confirmar alteração de status?')"><i class="bi <?=$m['ativo']?'bi-pause-circle':'bi-play-circle'?>"></i></button></form> <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="excluir_modulo_saas"><input type="hidden" name="modulo_saas_id" value="<?=(int)$m['id']?>"><button class="btn btn-sm btn-danger" onclick="return confirm('Excluir definitivamente este módulo? Módulos essenciais ou vinculados serão protegidos.')"><i class="bi bi-trash"></i></button></form></td></tr><?php endforeach; ?>
+</tbody></table></div></div></div>
+<div class="card shadow-sm border-0"><div class="card-header bg-dark text-white"><i class="bi bi-diagram-3 me-1"></i>Montagem dos planos por módulos</div><div class="card-body">
+<form method="get" class="row g-2 mb-3"><input type="hidden" name="mod" value="configuracoes"><input type="hidden" name="tab" value="modulos"><div class="col-md-6"><select name="configurar_plano" class="form-select" onchange="this.form.submit()"><?php foreach($planosSaas as $p): ?><option value="<?=(int)$p['id']?>" <?=$configuradorPlanoId===(int)$p['id']?'selected':''?>><?=htmlspecialchars($p['nome'])?> — R$ <?=number_format((float)$p['valor_mensal'],2,',','.')?>/mês</option><?php endforeach; ?></select></div></form>
+<form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="salvar_configuracao_plano_modulos"><input type="hidden" name="plano_configurador_id" value="<?=$configuradorPlanoId?>"><div class="table-responsive"><table class="table table-sm align-middle"><thead><tr><th>Módulo</th><th>Incluído</th><th>Obrigatório</th><th>Removível</th><th>Desconto mensal</th><th>Desconto anual</th></tr></thead><tbody>
+<?php foreach($modulosSaas as $m): $v=$vinculosPlanoModulo[(int)$m['id']]??[]; $ess=!empty($m['modulo_essencial']); ?><tr><td><strong><?=htmlspecialchars($m['nome'])?></strong><br><small class="text-muted"><?=htmlspecialchars($m['categoria'])?></small></td><td><input type="checkbox" name="modulos_plano[<?=(int)$m['id']?>][incluido]" <?=$ess||!empty($v['incluido_padrao'])?'checked':''?> <?=$ess?'disabled':''?>><?php if($ess): ?><input type="hidden" name="modulos_plano[<?=(int)$m['id']?>][incluido]" value="1"><?php endif; ?></td><td><input type="checkbox" name="modulos_plano[<?=(int)$m['id']?>][obrigatorio]" <?=$ess||!empty($v['obrigatorio'])?'checked':''?> <?=$ess?'disabled':''?>><?php if($ess): ?><input type="hidden" name="modulos_plano[<?=(int)$m['id']?>][obrigatorio]" value="1"><?php endif; ?></td><td><input type="checkbox" name="modulos_plano[<?=(int)$m['id']?>][permite_remocao]" <?=!empty($v['permite_remocao'])?'checked':''?> <?=($ess||empty($m['permite_desativacao']))?'disabled':''?>></td><td><input type="number" min="0" step="0.01" class="form-control form-control-sm" name="modulos_plano[<?=(int)$m['id']?>][desconto_mensal]" value="<?=number_format((float)($v['desconto_remocao_mensal']??0),2,'.','')?>"></td><td><input type="number" min="0" step="0.01" class="form-control form-control-sm" name="modulos_plano[<?=(int)$m['id']?>][desconto_anual]" value="<?=number_format((float)($v['desconto_remocao_anual']??0),2,'.','')?>"></td></tr><?php endforeach; ?>
+</tbody></table></div><button class="btn btn-success"><i class="bi bi-check2-square me-1"></i>Salvar composição do plano</button></form>
+</div></div>
 <?php endif; ?>
 
 

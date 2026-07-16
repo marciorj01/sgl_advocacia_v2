@@ -454,6 +454,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
 
                     registrarInicioSessaoAutenticada();
+
+                    /*
+                     * Sprint 4.6 — Camada Multi-Tenant Enterprise.
+                     *
+                     * O contexto é carregado somente depois da autenticação e da
+                     * regeneração da sessão. O MASTER entra no Modo Plataforma;
+                     * administradores e usuários entram no escritório vinculado.
+                     */
+                    try {
+                        $contextoTenant = rojexCarregarContextoTenant(
+                            $conn,
+                            (int)$user['id'],
+                            (string)$_SESSION['perfil']
+                        );
+                    } catch (Throwable $eTenant) {
+                        rojexRegistrarEventoLogin(
+                            $conn,
+                            'Login recusado por contexto Multi-Tenant inválido',
+                            'NEGADO',
+                            'ERRO',
+                            $usuario,
+                            $user,
+                            'Autenticação válida, porém o contexto do escritório não pôde ser carregado.'
+                        );
+
+                        error_log(
+                            '[ROJEX LOGIN TENANT] ' . $eTenant->getMessage()
+                        );
+
+                        rojexEncerrarSessaoLocal();
+                        $mensagem_erro =
+                            'Seu acesso não possui um escritório ativo ou válido. Contate o administrador da plataforma.';
+
+                        $conn->close();
+                        $conn = null;
+
+                        throw new RuntimeException(
+                            'Falha ao carregar o contexto Multi-Tenant do usuário.',
+                            0,
+                            $eTenant
+                        );
+                    }
+
                     rojexLoginLimparFalhasLocais();
 
                     rojexRegistrarEventoLogin(
@@ -464,8 +507,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $usuario,
                         $user,
                         $senhaMigrada
-                            ? 'Sessão autenticada. Senha legada migrada automaticamente para hash seguro.'
-                            : 'Sessão autenticada e iniciada com sucesso.'
+                            ? 'Sessão autenticada, contexto Multi-Tenant carregado e senha legada migrada automaticamente para hash seguro.'
+                            : 'Sessão autenticada e contexto Multi-Tenant carregado com sucesso.'
                     );
 
                     if ($senhaMigrada) {

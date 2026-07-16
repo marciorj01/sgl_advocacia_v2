@@ -264,3 +264,500 @@ if (!function_exists('registrarInicioSessaoAutenticada')) {
         rotacionarTokenCsrf();
     }
 }
+
+/**
+ * -----------------------------------------------------------------------------
+ * CONTEXTO MULTI-TENANT ENTERPRISE — SPRINT 4.6
+ * -----------------------------------------------------------------------------
+ *
+ * Esta camada não autentica credenciais. Ela organiza, valida e disponibiliza
+ * o contexto SaaS após o login, preservando todas as chaves antigas da sessão.
+ */
+
+if (!function_exists('rojexAuthTabelaExiste')) {
+    function rojexAuthTabelaExiste(mysqli $conn, string $tabela): bool
+    {
+        static $cache = [];
+
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $tabela)) {
+            return false;
+        }
+
+        $chave = spl_object_id($conn) . ':' . $tabela;
+
+        if (array_key_exists($chave, $cache)) {
+            return $cache[$chave];
+        }
+
+        try {
+            $stmt = $conn->prepare(
+                "SELECT COUNT(*) AS total
+                   FROM information_schema.TABLES
+                  WHERE TABLE_SCHEMA = DATABASE()
+                    AND TABLE_NAME = ?"
+            );
+
+            if (!$stmt) {
+                return $cache[$chave] = false;
+            }
+
+            $stmt->bind_param('s', $tabela);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            return $cache[$chave] = ((int)($row['total'] ?? 0) > 0);
+        } catch (Throwable $e) {
+            error_log('[ROJEX TENANT][TABELA] ' . $e->getMessage());
+            return $cache[$chave] = false;
+        }
+    }
+}
+
+if (!function_exists('rojexAuthConfiguracao')) {
+    function rojexAuthConfiguracao(mysqli $conn, string $chave, string $padrao = ''): string
+    {
+        if (!rojexAuthTabelaExiste($conn, 'configuracoes')) {
+            return $padrao;
+        }
+
+        try {
+            $stmt = $conn->prepare(
+                "SELECT valor FROM configuracoes WHERE chave = ? LIMIT 1"
+            );
+
+            if (!$stmt) {
+                return $padrao;
+            }
+
+            $stmt->bind_param('s', $chave);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            return $row ? (string)$row['valor'] : $padrao;
+        } catch (Throwable $e) {
+            error_log('[ROJEX TENANT][CONFIG] ' . $e->getMessage());
+            return $padrao;
+        }
+    }
+}
+
+if (!function_exists('rojexUsuarioEhMasterSaas')) {
+    function rojexUsuarioEhMasterSaas(mysqli $conn, int $usuarioId, ?string $perfil = null): bool
+    {
+        if ($usuarioId <= 0) {
+            return false;
+        }
+
+        $perfil = trim((string)($perfil ?? ($_SESSION['perfil'] ?? '')));
+
+        if (strcasecmp($perfil, 'Administrador Master') === 0) {
+            return true;
+        }
+
+        return (int)rojexAuthConfiguracao($conn, 'usuario_master_id', '0') === $usuarioId;
+    }
+}
+
+if (!function_exists('rojexLimparContextoTenant')) {
+    function rojexLimparContextoTenant(bool $preservarModoPlataforma = false): void
+    {
+        unset(
+            $_SESSION['tenant'],
+            $_SESSION['tenant_id'],
+            $_SESSION['escritorio_id'],
+            $_SESSION['licenca_id'],
+            $_SESSION['licenca_chave'],
+            $_SESSION['licenca_status'],
+            $_SESSION['plano_id'],
+            $_SESSION['plano'],
+            $_SESSION['papel_tenant'],
+            $_SESSION['permissoes_tenant'],
+            $_SESSION['modulos_tenant']
+        );
+
+        if (!$preservarModoPlataforma) {
+            unset($_SESSION['modo_plataforma']);
+        }
+
+        $_SESSION['modo_suporte'] = false;
+    }
+}
+
+if (!function_exists('rojexDefinirContextoPlataforma')) {
+    function rojexDefinirContextoPlataforma(): array
+    {
+        rojexLimparContextoTenant(true);
+
+        $contexto = [
+            'tipo_contexto' => 'plataforma',
+            'tenant_id' => null,
+            'escritorio_id' => null,
+            'escritorio_nome' => null,
+            'escritorio_status' => null,
+            'licenca_id' => null,
+            'licenca_chave' => null,
+            'licenca_status' => null,
+            'plano_id' => null,
+            'plano' => null,
+            'assinatura_status' => null,
+            'papel' => 'master_saas',
+            'principal' => true,
+            'modo_suporte' => false,
+            'permissoes' => ['plataforma_total'],
+            'modulos' => [],
+            'carregado_em' => date('c'),
+        ];
+
+        $_SESSION['tenant'] = $contexto;
+        $_SESSION['modo_plataforma'] = true;
+        $_SESSION['modo_suporte'] = false;
+        $_SESSION['papel_tenant'] = 'master_saas';
+        $_SESSION['permissoes_tenant'] = $contexto['permissoes'];
+        $_SESSION['modulos_tenant'] = [];
+
+        return $contexto;
+    }
+}
+
+if (!function_exists('rojexCarregarModulosTenant')) {
+    function rojexCarregarModulosTenant(mysqli $conn, int $escritorioId): array
+    {
+        if (
+            $escritorioId <= 0
+            || !rojexAuthTabelaExiste($conn, 'escritorios_modulos_saas')
+            || !rojexAuthTabelaExiste($conn, 'modulos_saas')
+        ) {
+            return [];
+        }
+
+        try {
+            $stmt = $conn->prepare(
+                "SELECT m.id, m.slug, m.nome, m.status,
+                        em.origem, em.valor_ajuste
+                   FROM escritorios_modulos_saas em
+                   INNER JOIN modulos_saas m ON m.id = em.modulo_id
+                  WHERE em.escritorio_id = ?
+                    AND em.ativo = 1
+                  ORDER BY m.ordem ASC, m.nome ASC"
+            );
+
+            if (!$stmt) {
+                return [];
+            }
+
+            $stmt->bind_param('i', $escritorioId);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            $modulos = [];
+
+            while ($row = $res->fetch_assoc()) {
+                $slug = trim((string)($row['slug'] ?? ''));
+                if ($slug === '') {
+                    continue;
+                }
+
+                $modulos[$slug] = [
+                    'id' => (int)$row['id'],
+                    'slug' => $slug,
+                    'nome' => (string)($row['nome'] ?? $slug),
+                    'status' => (string)($row['status'] ?? 'ativo'),
+                    'origem' => (string)($row['origem'] ?? 'plano'),
+                    'valor_ajuste' => (float)($row['valor_ajuste'] ?? 0),
+                ];
+            }
+
+            $stmt->close();
+            return $modulos;
+        } catch (Throwable $e) {
+            error_log('[ROJEX TENANT][MODULOS] ' . $e->getMessage());
+            return [];
+        }
+    }
+}
+
+if (!function_exists('rojexCarregarContextoTenant')) {
+    /**
+     * Carrega o contexto SaaS do usuário autenticado.
+     *
+     * MASTER entra por padrão no modo plataforma. Um escritório específico só
+     * será carregado quando $escritorioForcadoId for informado explicitamente.
+     */
+    function rojexCarregarContextoTenant(
+        mysqli $conn,
+        int $usuarioId,
+        ?string $perfil = null,
+        ?int $escritorioForcadoId = null,
+        bool $modoSuporte = false
+    ): array {
+        if ($usuarioId <= 0) {
+            throw new InvalidArgumentException('Usuário inválido para o contexto tenant.');
+        }
+
+        $ehMaster = rojexUsuarioEhMasterSaas($conn, $usuarioId, $perfil);
+
+        if ($ehMaster && (!$escritorioForcadoId || $escritorioForcadoId <= 0)) {
+            return rojexDefinirContextoPlataforma();
+        }
+
+        if (
+            !rojexAuthTabelaExiste($conn, 'usuarios_escritorios_saas')
+            || !rojexAuthTabelaExiste($conn, 'escritorios_saas')
+        ) {
+            throw new RuntimeException('Estrutura Multi-Tenant ainda não está disponível no banco.');
+        }
+
+        $sql = "SELECT
+                    ue.escritorio_id,
+                    ue.tenant_id,
+                    ue.papel,
+                    ue.principal,
+                    ue.ativo AS vinculo_ativo,
+                    e.nome AS escritorio_nome,
+                    e.status AS escritorio_status,
+                    e.plano AS escritorio_plano,
+                    l.id AS licenca_id,
+                    l.chave_licenca,
+                    l.plano AS licenca_plano,
+                    l.status AS licenca_status,
+                    l.limite_usuarios,
+                    l.limite_armazenamento_gb,
+                    l.ativada_em,
+                    l.renovacao_em,
+                    a.plano_id,
+                    a.status AS assinatura_status,
+                    a.periodicidade,
+                    a.trial_inicio,
+                    a.trial_fim,
+                    a.inicio_vigencia,
+                    a.proximo_vencimento
+                FROM usuarios_escritorios_saas ue
+                INNER JOIN escritorios_saas e
+                        ON e.id = ue.escritorio_id
+                LEFT JOIN licencas_saas l
+                       ON l.escritorio_id = e.id
+                LEFT JOIN assinaturas_saas a
+                       ON a.escritorio_id = e.id
+               WHERE ue.usuario_id = ?
+                 AND ue.ativo = 1";
+
+        if ($escritorioForcadoId && $escritorioForcadoId > 0) {
+            $sql .= " AND ue.escritorio_id = ?";
+        }
+
+        $sql .= " ORDER BY ue.principal DESC, ue.id ASC LIMIT 1";
+
+        $stmt = $conn->prepare($sql);
+        if (!$stmt) {
+            throw new RuntimeException('Não foi possível preparar o contexto do tenant.');
+        }
+
+        if ($escritorioForcadoId && $escritorioForcadoId > 0) {
+            $stmt->bind_param('ii', $usuarioId, $escritorioForcadoId);
+        } else {
+            $stmt->bind_param('i', $usuarioId);
+        }
+
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        /*
+         * O MASTER pode acessar um escritório em modo suporte mesmo sem vínculo
+         * permanente na tabela usuarios_escritorios_saas.
+         */
+        if (!$row && $ehMaster && $escritorioForcadoId && $escritorioForcadoId > 0) {
+            $stmt = $conn->prepare(
+                "SELECT
+                    e.id AS escritorio_id,
+                    e.tenant_id,
+                    'master_suporte' AS papel,
+                    0 AS principal,
+                    1 AS vinculo_ativo,
+                    e.nome AS escritorio_nome,
+                    e.status AS escritorio_status,
+                    e.plano AS escritorio_plano,
+                    l.id AS licenca_id,
+                    l.chave_licenca,
+                    l.plano AS licenca_plano,
+                    l.status AS licenca_status,
+                    l.limite_usuarios,
+                    l.limite_armazenamento_gb,
+                    l.ativada_em,
+                    l.renovacao_em,
+                    a.plano_id,
+                    a.status AS assinatura_status,
+                    a.periodicidade,
+                    a.trial_inicio,
+                    a.trial_fim,
+                    a.inicio_vigencia,
+                    a.proximo_vencimento
+                 FROM escritorios_saas e
+                 LEFT JOIN licencas_saas l ON l.escritorio_id = e.id
+                 LEFT JOIN assinaturas_saas a ON a.escritorio_id = e.id
+                 WHERE e.id = ?
+                 LIMIT 1"
+            );
+
+            if ($stmt) {
+                $stmt->bind_param('i', $escritorioForcadoId);
+                $stmt->execute();
+                $row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+            }
+        }
+
+        if (!$row) {
+            rojexLimparContextoTenant();
+            throw new RuntimeException('Nenhum escritório ativo está vinculado a este usuário.');
+        }
+
+        $escritorioId = (int)$row['escritorio_id'];
+        $tenantId = trim((string)$row['tenant_id']);
+
+        if ($escritorioId <= 0 || $tenantId === '') {
+            rojexLimparContextoTenant();
+            throw new RuntimeException('O vínculo do usuário não possui tenant válido.');
+        }
+
+        $modulos = rojexCarregarModulosTenant($conn, $escritorioId);
+        $papel = trim((string)($row['papel'] ?? 'usuario')) ?: 'usuario';
+        $plano = trim((string)($row['licenca_plano'] ?? $row['escritorio_plano'] ?? ''));
+
+        $permissoes = match (mb_strtolower($papel, 'UTF-8')) {
+            'administrador', 'admin' => ['tenant_administrar'],
+            'master_suporte' => ['tenant_suporte'],
+            default => ['tenant_utilizar'],
+        };
+
+        $contexto = [
+            'tipo_contexto' => 'tenant',
+            'tenant_id' => $tenantId,
+            'escritorio_id' => $escritorioId,
+            'escritorio_nome' => (string)($row['escritorio_nome'] ?? ''),
+            'escritorio_status' => (string)($row['escritorio_status'] ?? ''),
+            'licenca_id' => isset($row['licenca_id']) ? (int)$row['licenca_id'] : null,
+            'licenca_chave' => $row['chave_licenca'] ?? null,
+            'licenca_status' => $row['licenca_status'] ?? null,
+            'limite_usuarios' => isset($row['limite_usuarios']) ? (int)$row['limite_usuarios'] : null,
+            'limite_armazenamento_gb' => isset($row['limite_armazenamento_gb']) ? (int)$row['limite_armazenamento_gb'] : null,
+            'plano_id' => isset($row['plano_id']) ? (int)$row['plano_id'] : null,
+            'plano' => $plano !== '' ? $plano : null,
+            'assinatura_status' => $row['assinatura_status'] ?? null,
+            'periodicidade' => $row['periodicidade'] ?? null,
+            'trial_inicio' => $row['trial_inicio'] ?? null,
+            'trial_fim' => $row['trial_fim'] ?? null,
+            'inicio_vigencia' => $row['inicio_vigencia'] ?? null,
+            'proximo_vencimento' => $row['proximo_vencimento'] ?? null,
+            'papel' => $papel,
+            'principal' => (bool)($row['principal'] ?? false),
+            'modo_suporte' => $ehMaster && ($modoSuporte || $papel === 'master_suporte'),
+            'permissoes' => $permissoes,
+            'modulos' => $modulos,
+            'carregado_em' => date('c'),
+        ];
+
+        rojexLimparContextoTenant();
+
+        $_SESSION['tenant'] = $contexto;
+        $_SESSION['tenant_id'] = $tenantId;
+        $_SESSION['escritorio_id'] = $escritorioId;
+        $_SESSION['licenca_id'] = $contexto['licenca_id'];
+        $_SESSION['licenca_chave'] = $contexto['licenca_chave'];
+        $_SESSION['licenca_status'] = $contexto['licenca_status'];
+        $_SESSION['plano_id'] = $contexto['plano_id'];
+        $_SESSION['plano'] = $contexto['plano'];
+        $_SESSION['papel_tenant'] = $papel;
+        $_SESSION['modo_plataforma'] = false;
+        $_SESSION['modo_suporte'] = $contexto['modo_suporte'];
+        $_SESSION['permissoes_tenant'] = $permissoes;
+        $_SESSION['modulos_tenant'] = array_keys($modulos);
+
+        return $contexto;
+    }
+}
+
+if (!function_exists('rojexContextoTenant')) {
+    function rojexContextoTenant(): array
+    {
+        return isset($_SESSION['tenant']) && is_array($_SESSION['tenant'])
+            ? $_SESSION['tenant']
+            : [];
+    }
+}
+
+if (!function_exists('rojexTenantId')) {
+    function rojexTenantId(): ?string
+    {
+        $tenantId = trim((string)($_SESSION['tenant_id'] ?? ''));
+        return $tenantId !== '' ? $tenantId : null;
+    }
+}
+
+if (!function_exists('rojexEscritorioId')) {
+    function rojexEscritorioId(): ?int
+    {
+        $id = (int)($_SESSION['escritorio_id'] ?? 0);
+        return $id > 0 ? $id : null;
+    }
+}
+
+if (!function_exists('rojexModoPlataforma')) {
+    function rojexModoPlataforma(): bool
+    {
+        return !empty($_SESSION['modo_plataforma'])
+            && (rojexContextoTenant()['tipo_contexto'] ?? null) === 'plataforma';
+    }
+}
+
+if (!function_exists('rojexModoSuporte')) {
+    function rojexModoSuporte(): bool
+    {
+        return !empty($_SESSION['modo_suporte']);
+    }
+}
+
+if (!function_exists('rojexContextoTenantValido')) {
+    function rojexContextoTenantValido(): bool
+    {
+        $contexto = rojexContextoTenant();
+
+        if (($contexto['tipo_contexto'] ?? null) === 'plataforma') {
+            return rojexModoPlataforma();
+        }
+
+        return ($contexto['tipo_contexto'] ?? null) === 'tenant'
+            && rojexEscritorioId() !== null
+            && rojexTenantId() !== null;
+    }
+}
+
+if (!function_exists('rojexExigirContextoTenant')) {
+    function rojexExigirContextoTenant(): void
+    {
+        if (rojexContextoTenantValido() && !rojexModoPlataforma()) {
+            return;
+        }
+
+        throw new RuntimeException('Nenhum escritório está ativo nesta sessão.');
+    }
+}
+
+if (!function_exists('rojexTenantTemModulo')) {
+    function rojexTenantTemModulo(string $slug): bool
+    {
+        $slug = trim($slug);
+
+        if ($slug === '') {
+            return false;
+        }
+
+        if (rojexModoPlataforma()) {
+            return false;
+        }
+
+        $modulos = $_SESSION['modulos_tenant'] ?? [];
+        return is_array($modulos) && in_array($slug, $modulos, true);
+    }
+}

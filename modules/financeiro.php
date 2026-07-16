@@ -3,6 +3,25 @@
 
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
+
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    $conn->close();
+    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Financeiro.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? (string)rojexTenantId()
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    $conn->close();
+    throw new RuntimeException('Tenant ou escritório não identificado para o módulo Financeiro.');
+}
+
 sgl_integracao_garantir_financeiro($conn);
 sgl_integracao_garantir_recibos($conn);
 if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
@@ -32,8 +51,24 @@ function financeiroAdicionarColuna(mysqli $conn, string $tabela, string $coluna,
     }
 }
 
+function financeiroTenantId(): string
+{
+    return function_exists('rojexTenantId')
+        ? (string)rojexTenantId()
+        : trim((string)($_SESSION['tenant_id'] ?? ''));
+}
+
+function financeiroEscritorioId(): int
+{
+    return function_exists('rojexEscritorioId')
+        ? (int)rojexEscritorioId()
+        : (int)($_SESSION['escritorio_id'] ?? 0);
+}
+
 function financeiroGarantirEstrutura(mysqli $conn): void
 {
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    financeiroAdicionarColuna($conn, 'contas_pagar', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'qtd_parcelas', "qtd_parcelas INT DEFAULT 1");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_parcela', "valor_parcela DECIMAL(12,2) DEFAULT 0");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_pago', "valor_pago DECIMAL(12,2) DEFAULT 0");
@@ -44,6 +79,8 @@ function financeiroGarantirEstrutura(mysqli $conn): void
     financeiroAdicionarColuna($conn, 'contas_pagar', 'observacoes', "observacoes TEXT NULL");
     financeiroAdicionarColuna($conn, 'contas_pagar', 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0");
 
+    financeiroAdicionarColuna($conn, 'contas_receber', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    financeiroAdicionarColuna($conn, 'contas_receber', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
     financeiroAdicionarColuna($conn, 'contas_receber', 'cliente_id', "cliente_id VARCHAR(10) NULL");
     financeiroAdicionarColuna($conn, 'contas_receber', 'qtd_parcelas', "qtd_parcelas INT DEFAULT 1");
     financeiroAdicionarColuna($conn, 'contas_receber', 'valor_parcela', "valor_parcela DECIMAL(12,2) DEFAULT 0");
@@ -57,6 +94,8 @@ function financeiroGarantirEstrutura(mysqli $conn): void
 
     $conn->query("CREATE TABLE IF NOT EXISTS contas_pagar_parcelas (
         id VARCHAR(20) PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         conta_id VARCHAR(10) NOT NULL,
         parcela_numero INT NOT NULL,
         valor_parcela DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -72,6 +111,8 @@ function financeiroGarantirEstrutura(mysqli $conn): void
 
     $conn->query("CREATE TABLE IF NOT EXISTS contas_receber_parcelas (
         id VARCHAR(20) PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         conta_id VARCHAR(10) NOT NULL,
         parcela_numero INT NOT NULL,
         valor_parcela DECIMAL(12,2) NOT NULL DEFAULT 0,
@@ -87,6 +128,8 @@ function financeiroGarantirEstrutura(mysqli $conn): void
 
     $conn->query("CREATE TABLE IF NOT EXISTS bancos_caixa (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         nome VARCHAR(120) NOT NULL,
         tipo VARCHAR(40) DEFAULT 'Conta Corrente',
         banco VARCHAR(120) NULL,
@@ -100,6 +143,8 @@ function financeiroGarantirEstrutura(mysqli $conn): void
 
     $conn->query("CREATE TABLE IF NOT EXISTS bancos_movimentacoes (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         data_movimento DATE NOT NULL,
         tipo VARCHAR(30) NOT NULL DEFAULT 'Transferência',
         banco_origem_id INT NULL,
@@ -122,9 +167,92 @@ function financeiroGarantirEstrutura(mysqli $conn): void
     financeiroAdicionarColuna($conn, 'bancos_caixa', 'titularidade', "titularidade VARCHAR(40) NOT NULL DEFAULT 'Pessoa Jurídica'");
     financeiroAdicionarColuna($conn, 'bancos_caixa', 'finalidade', "finalidade VARCHAR(120) NULL");
     financeiroAdicionarColuna($conn, 'bancos_caixa', 'observacoes', "observacoes TEXT NULL");
+
+    financeiroAdicionarColuna($conn, 'contas_pagar_parcelas', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    financeiroAdicionarColuna($conn, 'contas_pagar_parcelas', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+    financeiroAdicionarColuna($conn, 'contas_receber_parcelas', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    financeiroAdicionarColuna($conn, 'contas_receber_parcelas', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+    financeiroAdicionarColuna($conn, 'bancos_caixa', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    financeiroAdicionarColuna($conn, 'bancos_caixa', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+    financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+
+    try {
+        $tenantLegado = '';
+        $escritorioLegado = 0;
+
+        $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave = 'tenant_id' LIMIT 1");
+        if ($stmtCfg) {
+            $stmtCfg->execute();
+            $rowCfg = $stmtCfg->get_result()->fetch_assoc();
+            $stmtCfg->close();
+            $tenantLegado = trim((string)($rowCfg['valor'] ?? ''));
+        }
+
+        if ($tenantLegado !== '') {
+            $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
+            if ($stmtEsc) {
+                $stmtEsc->bind_param('s', $tenantLegado);
+                $stmtEsc->execute();
+                $rowEsc = $stmtEsc->get_result()->fetch_assoc();
+                $stmtEsc->close();
+                $escritorioLegado = (int)($rowEsc['id'] ?? 0);
+            }
+        }
+
+        if ($tenantLegado !== '' && $escritorioLegado > 0) {
+            foreach ([
+                'contas_pagar',
+                'contas_receber',
+                'contas_pagar_parcelas',
+                'contas_receber_parcelas',
+                'bancos_caixa',
+                'bancos_movimentacoes'
+            ] as $tabelaTenant) {
+                $sqlBackfill = "UPDATE `{$tabelaTenant}`
+                                   SET tenant_id = ?,
+                                       escritorio_id = ?
+                                 WHERE tenant_id IS NULL
+                                    OR tenant_id = ''
+                                    OR escritorio_id IS NULL
+                                    OR escritorio_id = 0";
+                $stmtBackfill = $conn->prepare($sqlBackfill);
+                if ($stmtBackfill) {
+                    $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
+                    $stmtBackfill->execute();
+                    $stmtBackfill->close();
+                }
+            }
+        }
+
+        foreach ([
+            'contas_pagar',
+            'contas_receber',
+            'contas_pagar_parcelas',
+            'contas_receber_parcelas',
+            'bancos_caixa',
+            'bancos_movimentacoes'
+        ] as $tabelaIndice) {
+            $nomeIndice = 'idx_' . $tabelaIndice . '_tenant';
+            $indices = [];
+            $resIdx = $conn->query("SHOW INDEX FROM `{$tabelaIndice}`");
+            if ($resIdx) {
+                while ($idx = $resIdx->fetch_assoc()) {
+                    $indices[(string)$idx['Key_name']] = true;
+                }
+            }
+            if (!isset($indices[$nomeIndice])) {
+                $conn->query("ALTER TABLE `{$tabelaIndice}` ADD INDEX `{$nomeIndice}` (tenant_id)");
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('[ROJEX FINANCEIRO MULTI-TENANT] ' . $e->getMessage());
+        throw new RuntimeException('Não foi possível preparar o isolamento Multi-Tenant do Financeiro.', 0, $e);
+    }
 }
 
 financeiroGarantirEstrutura($conn);
+$tenantSql = $conn->real_escape_string($tenantId);
 
 
 /* ======================================================
@@ -237,9 +365,27 @@ function sqlMoney(float $valor): string
     return number_format($valor, 2, '.', '');
 }
 
+function financeiroBancoPertenceAoContexto(mysqli $conn, int $bancoId): bool
+{
+    if ($bancoId <= 0) return false;
+    $tenant = financeiroTenantId();
+    $escritorio = financeiroEscritorioId();
+    $stmt = $conn->prepare("SELECT id FROM bancos_caixa WHERE tenant_id = ? AND escritorio_id = ? AND id = ? LIMIT 1");
+    if (!$stmt) return false;
+    $stmt->bind_param('sii', $tenant, $escritorio, $bancoId);
+    $stmt->execute();
+    $existe = (bool)$stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $existe;
+}
+
 function financeiroListaBancos(mysqli $conn, bool $somenteAtivos = true): array
 {
-    $where = $somenteAtivos ? 'WHERE ativo = 1' : '';
+    $tenant = $conn->real_escape_string(financeiroTenantId());
+    $escritorio = financeiroEscritorioId();
+    $where = $somenteAtivos
+        ? "WHERE tenant_id = '{$tenant}' AND escritorio_id = {$escritorio} AND ativo = 1"
+        : "WHERE tenant_id = '{$tenant}' AND escritorio_id = {$escritorio}";
     $lista = [];
     $res = $conn->query("SELECT * FROM bancos_caixa {$where} ORDER BY ativo DESC, nome ASC");
     if ($res) while ($row = $res->fetch_assoc()) $lista[] = $row;
@@ -250,7 +396,9 @@ function financeiroNomeBanco(mysqli $conn, $id): string
 {
     $id = (int)$id;
     if ($id <= 0) return '-';
-    $res = $conn->query("SELECT nome FROM bancos_caixa WHERE id = {$id} LIMIT 1");
+    $tenant = $conn->real_escape_string(financeiroTenantId());
+    $escritorio = financeiroEscritorioId();
+    $res = $conn->query("SELECT nome FROM bancos_caixa WHERE tenant_id = '{$tenant}' AND escritorio_id = {$escritorio} AND id = {$id} LIMIT 1");
     if ($res && $res->num_rows) return (string)$res->fetch_assoc()['nome'];
     return '-';
 }
@@ -274,15 +422,17 @@ function financeiroSaldoBanco(mysqli $conn, int $bancoId): float
 {
     if ($bancoId <= 0) return 0.0;
     $saldo = 0.0;
-    $res = $conn->query("SELECT COALESCE(saldo_inicial,0) AS total FROM bancos_caixa WHERE id={$bancoId}");
+    $tenant = $conn->real_escape_string(financeiroTenantId());
+    $escritorio = financeiroEscritorioId();
+    $res = $conn->query("SELECT COALESCE(saldo_inicial,0) AS total FROM bancos_caixa WHERE tenant_id='{$tenant}' AND escritorio_id={$escritorio} AND id={$bancoId}");
     if ($res && $row = $res->fetch_assoc()) $saldo += (float)$row['total'];
-    $res = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE deletado=0 AND banco_id={$bancoId} AND status IN ('Recebido','Pago','Quitada')");
+    $res = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE tenant_id='{$tenant}' AND escritorio_id={$escritorio} AND deletado=0 AND banco_id={$bancoId} AND status IN ('Recebido','Pago','Quitada')");
     if ($res && $row = $res->fetch_assoc()) $saldo += (float)$row['total'];
-    $res = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_pagar WHERE deletado=0 AND banco_id={$bancoId} AND status IN ('Pago','Quitada')");
+    $res = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_pagar WHERE tenant_id='{$tenant}' AND escritorio_id={$escritorio} AND deletado=0 AND banco_id={$bancoId} AND status IN ('Pago','Quitada')");
     if ($res && $row = $res->fetch_assoc()) $saldo -= (float)$row['total'];
-    $res = $conn->query("SELECT COALESCE(SUM(valor),0) AS total FROM bancos_movimentacoes WHERE banco_destino_id={$bancoId}");
+    $res = $conn->query("SELECT COALESCE(SUM(valor),0) AS total FROM bancos_movimentacoes WHERE tenant_id='{$tenant}' AND escritorio_id={$escritorio} AND banco_destino_id={$bancoId}");
     if ($res && $row = $res->fetch_assoc()) $saldo += (float)$row['total'];
-    $res = $conn->query("SELECT COALESCE(SUM(valor),0) AS total FROM bancos_movimentacoes WHERE banco_origem_id={$bancoId}");
+    $res = $conn->query("SELECT COALESCE(SUM(valor),0) AS total FROM bancos_movimentacoes WHERE tenant_id='{$tenant}' AND escritorio_id={$escritorio} AND banco_origem_id={$bancoId}");
     if ($res && $row = $res->fetch_assoc()) $saldo -= (float)$row['total'];
     return $saldo;
 }
@@ -356,7 +506,8 @@ function gerarParcelasCP(mysqli $conn, array $conta, bool $gerar30dias = true): 
     $observacoes     = $conta['observacoes'] ?? '';
 
     // apaga parcelas anteriores
-    $conn->query("DELETE FROM contas_pagar_parcelas WHERE conta_id = '" . $conn->real_escape_string($conta_id) . "'");
+    $tenant = $conn->real_escape_string(financeiroTenantId());
+    $conn->query("DELETE FROM contas_pagar_parcelas WHERE tenant_id = '{$tenant}' AND conta_id = '" . $conn->real_escape_string($conta_id) . "'");
 
     $valor_parcela_base = round($valor_total / $qtd_parcelas, 2);
     $data_atual         = new DateTime($data_vencimento);
@@ -377,13 +528,18 @@ function gerarParcelasCP(mysqli $conn, array $conta, bool $gerar30dias = true): 
         $saldo_devedor_par = $valor_parcela;
 
         $stmt = $conn->prepare("INSERT INTO contas_pagar_parcelas
-            (id, conta_id, parcela_numero, valor_parcela, data_vencimento, forma_pagamento,
+            (id, tenant_id, escritorio_id, conta_id, parcela_numero, valor_parcela, data_vencimento, forma_pagamento,
              status_pagamento, valor_pago, saldo_devedor, observacoes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+
+        $tenantParcela = financeiroTenantId();
+        $escritorioParcela = financeiroEscritorioId();
 
         $stmt->bind_param(
-            "ssidssssds",
+            "ssisidsssdds",
             $id_parcela,
+            $tenantParcela,
+            $escritorioParcela,
             $conta_id,
             $i,
             $valor_parcela,
@@ -410,7 +566,8 @@ function getParcelasCP(mysqli $conn, string $conta_id): array
 {
     $parcelas = [];
     $conta_id = $conn->real_escape_string($conta_id);
-    $res = $conn->query("SELECT * FROM contas_pagar_parcelas WHERE conta_id = '$conta_id' ORDER BY parcela_numero ASC");
+    $tenant = $conn->real_escape_string(financeiroTenantId());
+    $res = $conn->query("SELECT * FROM contas_pagar_parcelas WHERE tenant_id = '{$tenant}' AND conta_id = '$conta_id' ORDER BY parcela_numero ASC");
     if ($res) {
         while ($row = $res->fetch_assoc()) {
             $parcelas[] = $row;
@@ -430,7 +587,8 @@ function recalcContaPagar(mysqli $conn, string $conta_id): void
             COALESCE(SUM(valor_pago), 0)    AS total_pago,
             COALESCE(SUM(saldo_devedor), 0) AS total_saldo
         FROM contas_pagar_parcelas
-        WHERE conta_id = '$conta_id'
+        WHERE tenant_id = '" . $conn->real_escape_string(financeiroTenantId()) . "'
+          AND conta_id = '$conta_id'
     ");
 
     if (!$res) return;
@@ -451,7 +609,8 @@ function recalcContaPagar(mysqli $conn, string $conta_id): void
             valor_pago     = " . sqlMoney($total_pago) . ",
             valor_pendente = " . sqlMoney($total_saldo) . ",
             status         = " . sqlText($conn, $status) . "
-        WHERE id = " . sqlText($conn, $conta_id) . "
+        WHERE tenant_id = " . sqlText($conn, financeiroTenantId()) . "
+          AND id = " . sqlText($conn, $conta_id) . "
     ");
 }
 
@@ -468,13 +627,14 @@ if (isset($_GET['receber_cr'])) {
         $stmtConta = $conn->prepare(
             "SELECT valor, forma_recebimento, banco_id
              FROM contas_receber
-             WHERE id = ?
+             WHERE tenant_id = ?
+               AND id = ?
                AND deletado = 0
              LIMIT 1"
         );
 
         if ($stmtConta) {
-            $stmtConta->bind_param('s', $id);
+            $stmtConta->bind_param('ss', $tenantId, $id);
             $stmtConta->execute();
             $res = $stmtConta->get_result();
             $cr = $res ? $res->fetch_assoc() : null;
@@ -497,11 +657,12 @@ if (isset($_GET['receber_cr'])) {
                      valor_pendente = 0,
                      status = 'Recebido',
                      data_recebimento = ?
-                 WHERE id = ?"
+                 WHERE tenant_id = ?
+                   AND id = ?"
             );
 
             if ($stmtAtualiza) {
-                $stmtAtualiza->bind_param('dss', $valor, $hojeSql, $id);
+                $stmtAtualiza->bind_param('dsss', $valor, $hojeSql, $tenantId, $id);
                 $okAtualiza = $stmtAtualiza->execute();
                 $stmtAtualiza->close();
             } else {
@@ -558,13 +719,14 @@ if (isset($_GET['gerar_recibo_cr'])) {
         $stmtConta = $conn->prepare(
             "SELECT valor, valor_pago, status, data_recebimento, forma_recebimento, banco_id
              FROM contas_receber
-             WHERE id = ?
+             WHERE tenant_id = ?
+               AND id = ?
                AND deletado = 0
              LIMIT 1"
         );
 
         if ($stmtConta) {
-            $stmtConta->bind_param('s', $id);
+            $stmtConta->bind_param('ss', $tenantId, $id);
             $stmtConta->execute();
             $res = $stmtConta->get_result();
             $cr = $res ? $res->fetch_assoc() : null;
@@ -593,11 +755,12 @@ if (isset($_GET['gerar_recibo_cr'])) {
                      valor_pendente = 0,
                      status = 'Recebido',
                      data_recebimento = ?
-                 WHERE id = ?"
+                 WHERE tenant_id = ?
+                   AND id = ?"
             );
 
             if ($stmtAtualiza) {
-                $stmtAtualiza->bind_param('dss', $valor, $dataReceb, $id);
+                $stmtAtualiza->bind_param('dsss', $valor, $dataReceb, $tenantId, $id);
                 $okAtualiza = $stmtAtualiza->execute();
                 $stmtAtualiza->close();
             } else {
@@ -633,8 +796,20 @@ if (isset($_GET['pagar_cp'])) {
         $msg = '<div class="alert alert-danger">Token de segurança inválido. Atualize a página e tente novamente.</div>';
     } else {
         $id = (string)$_GET['pagar_cp'];
-        marcarContaPagarPaga($conn, $id, date('Y-m-d'));
-        $msg = '<div class="alert alert-success">✅ Conta a pagar marcada como paga.</div>';
+        $stmtValidaCp = $conn->prepare(
+            "SELECT id FROM contas_pagar WHERE tenant_id = ? AND id = ? AND deletado = 0 LIMIT 1"
+        );
+        $stmtValidaCp->bind_param('ss', $tenantId, $id);
+        $stmtValidaCp->execute();
+        $cpValida = $stmtValidaCp->get_result()->fetch_assoc();
+        $stmtValidaCp->close();
+
+        if ($cpValida) {
+            marcarContaPagarPaga($conn, $id, date('Y-m-d'));
+            $msg = '<div class="alert alert-success">✅ Conta a pagar marcada como paga.</div>';
+        } else {
+            $msg = '<div class="alert alert-danger">Conta a pagar não encontrada neste escritório.</div>';
+        }
     }
     $aba = 'cp';
     $acao = 'listar';
@@ -657,15 +832,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_banco'])) {
     if ($nome === '') {
         $msg = '<div class="alert alert-danger">Informe o nome da conta/banco/caixa.</div>';
     } elseif ($id > 0) {
-        $stmt = $conn->prepare("UPDATE bancos_caixa SET nome=?, tipo=?, banco=?, agencia=?, conta=?, saldo_inicial=?, ativo=? WHERE id=?");
-        $stmt->bind_param('sssssdis', $nome, $tipo, $banco, $agencia, $conta, $saldo_inicial, $ativo, $id);
+        $stmt = $conn->prepare("UPDATE bancos_caixa SET nome=?, tipo=?, banco=?, agencia=?, conta=?, saldo_inicial=?, ativo=? WHERE tenant_id=? AND escritorio_id=? AND id=?");
+        $stmt->bind_param('sssssdisii', $nome, $tipo, $banco, $agencia, $conta, $saldo_inicial, $ativo, $tenantId, $escritorioId, $id);
         $ok = $stmt->execute();
         $stmt->close();
         $msg = $ok ? '<div class="alert alert-success">Banco/Caixa atualizado.</div>' : '<div class="alert alert-danger">Erro ao atualizar banco/caixa.</div>';
         if ($ok && function_exists('sgl_registrar_log')) sgl_registrar_log($conn, 'Atualizou banco/caixa', 'bancos_caixa', (string)$id, $nome);
     } else {
-        $stmt = $conn->prepare("INSERT INTO bancos_caixa (nome, tipo, banco, agencia, conta, saldo_inicial, ativo) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        $stmt->bind_param('sssssdi', $nome, $tipo, $banco, $agencia, $conta, $saldo_inicial, $ativo);
+        $stmt = $conn->prepare("INSERT INTO bancos_caixa (tenant_id, escritorio_id, nome, tipo, banco, agencia, conta, saldo_inicial, ativo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param('sisssssdi', $tenantId, $escritorioId, $nome, $tipo, $banco, $agencia, $conta, $saldo_inicial, $ativo);
         $ok = $stmt->execute();
         $novoBancoId = $stmt->insert_id;
         $stmt->close();
@@ -691,16 +866,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['transferir_banco'])) 
     $origemValida = $origem > 0 || $origemOutros !== null;
     $destinoValido = $destino > 0 || $destinoOutros !== null;
     $mesmaConta = ($origem > 0 && $destino > 0 && $origem === $destino) || ($origemRaw !== '' && $origemRaw === $destinoRaw);
+    $origemDoTenant = $origem <= 0 || financeiroBancoPertenceAoContexto($conn, $origem);
+    $destinoDoTenant = $destino <= 0 || financeiroBancoPertenceAoContexto($conn, $destino);
 
-    if (!$origemValida || !$destinoValido || $mesmaConta || $valor <= 0) {
+    if (!$origemValida || !$destinoValido || !$origemDoTenant || !$destinoDoTenant || $mesmaConta || $valor <= 0) {
         $msg = '<div class="alert alert-danger">Não foi possível registrar a transferência: selecione origem/destino diferentes e informe valor maior que zero. Aceita: 1000,00, 1.000,00 ou R$ 1.000,00.</div>';
     } else {
         if ($origemOutros !== null && $origemOutros === '') $origemOutros = 'OUTROS';
         if ($destinoOutros !== null && $destinoOutros === '') $destinoOutros = 'OUTROS';
-        $stmt = $conn->prepare("INSERT INTO bancos_movimentacoes (data_movimento, tipo, banco_origem_id, banco_destino_id, valor, descricao, origem_outros, destino_outros, usuario_nome) VALUES (?, 'Transferência', ?, ?, ?, ?, ?, ?, ?)");
+        $stmt = $conn->prepare("INSERT INTO bancos_movimentacoes (tenant_id, escritorio_id, data_movimento, tipo, banco_origem_id, banco_destino_id, valor, descricao, origem_outros, destino_outros, usuario_nome) VALUES (?, ?, ?, 'Transferência', ?, ?, ?, ?, ?, ?, ?)");
         $origemDb = $origem > 0 ? $origem : null;
         $destinoDb = $destino > 0 ? $destino : null;
-        $stmt->bind_param('siidssss', $dataMov, $origemDb, $destinoDb, $valor, $descricao, $origemOutros, $destinoOutros, $usuarioNome);
+        $stmt->bind_param('sisiidssss', $tenantId, $escritorioId, $dataMov, $origemDb, $destinoDb, $valor, $descricao, $origemOutros, $destinoOutros, $usuarioNome);
         $ok = $stmt->execute();
         $movId = $stmt->insert_id;
         $stmt->close();
@@ -720,10 +897,10 @@ if (isset($_GET['excluir']) && isset($_GET['tipo'])) {
     $id   = $conn->real_escape_string($_GET['excluir']);
 
     if ($tipo === 'cp') {
-        $conn->query("UPDATE contas_pagar SET deletado = 1 WHERE id = '$id'");
+        $conn->query("UPDATE contas_pagar SET deletado = 1 WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND id = '$id'");
         $msg = '<div class="alert alert-warning">🗑️ Conta a Pagar movida para a lixeira com sucesso.</div>';
     } elseif ($tipo === 'cr') {
-        $conn->query("UPDATE contas_receber SET deletado = 1 WHERE id = '$id'");
+        $conn->query("UPDATE contas_receber SET deletado = 1 WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND id = '$id'");
         $msg = '<div class="alert alert-warning">🗑️ Conta a Receber movida para a lixeira com sucesso.</div>';
     }
 
@@ -736,10 +913,10 @@ if (isset($_GET['restaurar']) && isset($_GET['tipo'])) {
     $id   = $conn->real_escape_string($_GET['restaurar']);
 
     if ($tipo === 'cp') {
-        $conn->query("UPDATE contas_pagar SET deletado = 0 WHERE id = '$id'");
+        $conn->query("UPDATE contas_pagar SET deletado = 0 WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND id = '$id'");
         $msg = '<div class="alert alert-success">✅ Conta a Pagar restaurada com sucesso!</div>';
     } elseif ($tipo === 'cr') {
-        $conn->query("UPDATE contas_receber SET deletado = 0 WHERE id = '$id'");
+        $conn->query("UPDATE contas_receber SET deletado = 0 WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND id = '$id'");
         $msg = '<div class="alert alert-success">✅ Conta a Receber restaurada com sucesso!</div>';
     }
 
@@ -752,13 +929,13 @@ if (isset($_GET['excluir_permanente']) && isset($_GET['tipo'])) {
     $id   = $conn->real_escape_string($_GET['excluir_permanente']);
 
     if ($tipo === 'cp') {
-        $conn->query("DELETE FROM contas_pagar_parcelas WHERE conta_id = '$id'");
-        $conn->query("DELETE FROM contas_pagar WHERE id = '$id'");
+        $conn->query("DELETE FROM contas_pagar_parcelas WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND conta_id = '$id'");
+        $conn->query("DELETE FROM contas_pagar WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND id = '$id'");
         $msg = '<div class="alert alert-danger">💥 Conta a Pagar e suas parcelas foram excluídas permanentemente.</div>';
     } elseif ($tipo === 'cr') {
         // Remove também eventuais parcelas de CR, caso existam para este registro
-        $conn->query("DELETE FROM contas_receber_parcelas WHERE conta_id = '$id'");
-        $conn->query("DELETE FROM contas_receber WHERE id = '$id'");
+        $conn->query("DELETE FROM contas_receber_parcelas WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND conta_id = '$id'");
+        $conn->query("DELETE FROM contas_receber WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND id = '$id'");
         $msg = '<div class="alert alert-danger">💥 Conta a Receber excluída permanentemente.</div>';
     }
 
@@ -806,10 +983,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
 
     if ($novo) {
         $sql = "INSERT INTO contas_pagar
-            (id, descricao, categoria, fornecedor, valor, data_vencimento, data_pagamento,
+            (id, tenant_id, escritorio_id, descricao, categoria, fornecedor, valor, data_vencimento, data_pagamento,
              forma_pagamento, status, mes_referencia, observacoes, valor_pago, valor_pendente, banco_id, deletado)
             VALUES (
                 " . sqlText($conn, $id) . ",
+                " . sqlText($conn, $tenantId) . ",
+                " . (int)$escritorioId . ",
                 " . sqlNullableText($conn, $descricao) . ",
                 " . sqlNullableText($conn, $categoria) . ",
                 " . sqlNullableText($conn, $fornecedor) . ",
@@ -838,7 +1017,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
                 mes_referencia  = " . sqlNullableText($conn, $mes_referencia) . ",
                 observacoes     = " . sqlNullableText($conn, $observacoes) . ",
                 banco_id        = {$banco_sql}
-            WHERE id = " . sqlText($conn, $id);
+            WHERE tenant_id = " . sqlText($conn, $tenantId) . "
+              AND id = " . sqlText($conn, $id);
     }
 
     if ($conn->query($sql)) {
@@ -860,7 +1040,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
         } else {
             recalcContaPagar($conn, $id);
             if ($status_input === 'Cancelado') {
-                $conn->query("UPDATE contas_pagar SET status = 'Cancelado' WHERE id = " . sqlText($conn, $id));
+                $conn->query("UPDATE contas_pagar SET status = 'Cancelado' WHERE tenant_id = " . sqlText($conn, $tenantId) . " AND id = " . sqlText($conn, $id));
             }
         }
 
@@ -883,7 +1063,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_parcela_cp']))
 
     $parcela_id = $conn->real_escape_string($parcela_id);
 
-    $res = $conn->query("SELECT valor_parcela FROM contas_pagar_parcelas WHERE id = '$parcela_id' LIMIT 1");
+    $res = $conn->query("SELECT valor_parcela FROM contas_pagar_parcelas WHERE tenant_id = '" . $conn->real_escape_string($tenantId) . "' AND id = '$parcela_id' LIMIT 1");
     if ($res && $res->num_rows) {
         $row           = $res->fetch_assoc();
         $valor_parcela = (float)$row['valor_parcela'];
@@ -903,7 +1083,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_parcela_cp']))
                 valor_pago       = " . sqlMoney($vp) . ",
                 saldo_devedor    = " . sqlMoney($saldo) . ",
                 status_pagamento = " . sqlText($conn, $status) . "
-            WHERE id = '$parcela_id'
+            WHERE tenant_id = '" . $conn->real_escape_string($tenantId) . "'
+              AND id = '$parcela_id'
         ");
 
         if ($conta_id !== '') {
@@ -998,11 +1179,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
         } else {
             if ($novo) {
                 $sql = "INSERT INTO contas_receber
-                    (id, descricao, valor, valor_parcela, valor_pago, valor_pendente,
+                    (id, tenant_id, escritorio_id, descricao, valor, valor_parcela, valor_pago, valor_pendente,
                      data_vencimento, data_recebimento, forma_recebimento, status,
                      observacoes, banco_id, deletado)
                     VALUES (
                         " . sqlText($conn, $id) . ",
+                        " . sqlText($conn, $tenantId) . ",
+                        " . (int)$escritorioId . ",
                         " . sqlNullableText($conn, $descricao) . ",
                         " . sqlMoney($valor) . ",
                         " . sqlMoney($valor) . ",
@@ -1029,7 +1212,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
                         status = " . sqlText($conn, $status) . ",
                         observacoes = " . sqlNullableText($conn, $observacoes) . ",
                         banco_id = {$bancoSql}
-                    WHERE id = " . sqlText($conn, $id);
+                    WHERE tenant_id = " . sqlText($conn, $tenantId) . "
+                      AND id = " . sqlText($conn, $id);
             }
 
             if ($conn->query($sql)) {
@@ -1102,8 +1286,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
 $filtro_deletado_cp = ($aba === 'cp' && $acao === 'lixeira') ? 1 : 0;
 $filtro_deletado_cr = ($aba === 'cr' && $acao === 'lixeira') ? 1 : 0;
 
-$lista_cp = $conn->query("SELECT cp.*, b.nome AS banco_nome FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id = cp.banco_id WHERE cp.deletado = $filtro_deletado_cp ORDER BY cp.data_vencimento DESC, cp.id DESC");
-$lista_cr = $conn->query("SELECT cr.*, c.nome AS cliente_nome, b.nome AS banco_nome FROM contas_receber cr LEFT JOIN clientes c ON c.id = cr.cliente_id LEFT JOIN bancos_caixa b ON b.id = cr.banco_id WHERE cr.deletado = $filtro_deletado_cr ORDER BY cr.data_vencimento DESC, cr.id DESC");
+$lista_cp = $conn->query("SELECT cp.*, b.nome AS banco_nome FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id = cp.banco_id AND b.tenant_id = cp.tenant_id AND b.escritorio_id = cp.escritorio_id WHERE cp.tenant_id = '" . $conn->real_escape_string($tenantId) . "' AND cp.escritorio_id = " . (int)$escritorioId . " AND cp.deletado = $filtro_deletado_cp ORDER BY cp.data_vencimento DESC, cp.id DESC");
+$lista_cr = $conn->query("SELECT cr.*, c.nome AS cliente_nome, b.nome AS banco_nome FROM contas_receber cr LEFT JOIN clientes c ON c.id = cr.cliente_id AND c.tenant_id = cr.tenant_id AND c.escritorio_id = cr.escritorio_id LEFT JOIN bancos_caixa b ON b.id = cr.banco_id AND b.tenant_id = cr.tenant_id AND b.escritorio_id = cr.escritorio_id WHERE cr.tenant_id = '" . $conn->real_escape_string($tenantId) . "' AND cr.escritorio_id = " . (int)$escritorioId . " AND cr.deletado = $filtro_deletado_cr ORDER BY cr.data_vencimento DESC, cr.id DESC");
 
 $hoje = date('Y-m-d');
 $inicioMes = date('Y-m-01');
@@ -1118,17 +1302,17 @@ $resumoFinanceiro = [
     'vencidas_receber' => 0,
 ];
 
-$q = $conn->query("SELECT COALESCE(SUM(valor_pendente),0) AS total FROM contas_pagar WHERE deletado = 0 AND status IN ('Pendente','Parcial')");
+$q = $conn->query("SELECT COALESCE(SUM(valor_pendente),0) AS total FROM contas_pagar WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND deletado = 0 AND status IN ('Pendente','Parcial')");
 if ($q) $resumoFinanceiro['pagar_aberto'] = (float)($q->fetch_assoc()['total'] ?? 0);
-$q = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pendente > 0 THEN valor_pendente ELSE valor END),0) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Pendente','Parcial')");
+$q = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pendente > 0 THEN valor_pendente ELSE valor END),0) AS total FROM contas_receber WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND deletado = 0 AND status IN ('Pendente','Parcial')");
 if ($q) $resumoFinanceiro['receber_aberto'] = (float)($q->fetch_assoc()['total'] ?? 0);
-$q = $conn->query("SELECT COALESCE(SUM(valor_pago),0) AS total FROM contas_pagar WHERE deletado = 0 AND data_pagamento BETWEEN '$inicioMes' AND '$fimMes'");
+$q = $conn->query("SELECT COALESCE(SUM(valor_pago),0) AS total FROM contas_pagar WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND deletado = 0 AND data_pagamento BETWEEN '$inicioMes' AND '$fimMes'");
 if ($q) $resumoFinanceiro['pago_mes'] = (float)($q->fetch_assoc()['total'] ?? 0);
-$q = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Recebido','Pago','Quitada') AND data_recebimento BETWEEN '$inicioMes' AND '$fimMes'");
+$q = $conn->query("SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND deletado = 0 AND status IN ('Recebido','Pago','Quitada') AND data_recebimento BETWEEN '$inicioMes' AND '$fimMes'");
 if ($q) $resumoFinanceiro['recebido_mes'] = (float)($q->fetch_assoc()['total'] ?? 0);
-$q = $conn->query("SELECT COUNT(*) AS total FROM contas_pagar WHERE deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '$hoje'");
+$q = $conn->query("SELECT COUNT(*) AS total FROM contas_pagar WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '$hoje'");
 if ($q) $resumoFinanceiro['vencidas_pagar'] = (int)($q->fetch_assoc()['total'] ?? 0);
-$q = $conn->query("SELECT COUNT(*) AS total FROM contas_receber WHERE deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '$hoje'");
+$q = $conn->query("SELECT COUNT(*) AS total FROM contas_receber WHERE tenant_id = '{$tenantSql}' AND escritorio_id = {$escritorioId} AND deletado = 0 AND status IN ('Pendente','Parcial') AND data_vencimento < '$hoje'");
 if ($q) $resumoFinanceiro['vencidas_receber'] = (int)($q->fetch_assoc()['total'] ?? 0);
 
 if ($acao === 'caixa') {
@@ -1157,12 +1341,12 @@ if ($acao === 'caixa') {
     };
 
     // Entradas operacionais: recebimentos reais de clientes/honorários/contas.
-    $sqlEntradas = "SELECT cr.id, cr.descricao, cr.valor_pago, cr.valor, cr.data_recebimento, cr.forma_recebimento, cr.status, c.nome AS cliente_nome, b.nome AS banco_nome, b.tipo AS banco_tipo FROM contas_receber cr LEFT JOIN clientes c ON c.id=cr.cliente_id LEFT JOIN bancos_caixa b ON b.id=cr.banco_id WHERE cr.deletado=0 AND cr.status IN ('Recebido','Pago','Quitada') AND cr.data_recebimento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cr.data_recebimento ASC, cr.id ASC";
+    $sqlEntradas = "SELECT cr.id, cr.descricao, cr.valor_pago, cr.valor, cr.data_recebimento, cr.forma_recebimento, cr.status, c.nome AS cliente_nome, b.nome AS banco_nome, b.tipo AS banco_tipo FROM contas_receber cr LEFT JOIN clientes c ON c.id=cr.cliente_id AND c.tenant_id=cr.tenant_id AND c.escritorio_id=cr.escritorio_id LEFT JOIN bancos_caixa b ON b.id=cr.banco_id AND b.tenant_id=cr.tenant_id AND b.escritorio_id=cr.escritorio_id WHERE cr.tenant_id='" . $conn->real_escape_string($tenantId) . "' AND cr.escritorio_id=" . (int)$escritorioId . " AND cr.deletado=0 AND cr.status IN ('Recebido','Pago','Quitada') AND cr.data_recebimento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cr.data_recebimento ASC, cr.id ASC";
     $res = $conn->query($sqlEntradas);
     if ($res) while($r=$res->fetch_assoc()) $entradas[]=$r;
 
     // Saídas operacionais: despesas reais pagas.
-    $sqlSaidas = "SELECT cp.id, cp.descricao, cp.categoria, cp.fornecedor, cp.valor_pago, cp.valor, cp.data_pagamento, cp.forma_pagamento, cp.status, b.nome AS banco_nome, b.tipo AS banco_tipo FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id=cp.banco_id WHERE cp.deletado=0 AND cp.status IN ('Pago','Quitada') AND cp.data_pagamento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cp.data_pagamento ASC, cp.id ASC";
+    $sqlSaidas = "SELECT cp.id, cp.descricao, cp.categoria, cp.fornecedor, cp.valor_pago, cp.valor, cp.data_pagamento, cp.forma_pagamento, cp.status, b.nome AS banco_nome, b.tipo AS banco_tipo FROM contas_pagar cp LEFT JOIN bancos_caixa b ON b.id=cp.banco_id AND b.tenant_id=cp.tenant_id AND b.escritorio_id=cp.escritorio_id WHERE cp.tenant_id='" . $conn->real_escape_string($tenantId) . "' AND cp.escritorio_id=" . (int)$escritorioId . " AND cp.deletado=0 AND cp.status IN ('Pago','Quitada') AND cp.data_pagamento BETWEEN '$inicioCaixa' AND '$fimCaixa' ORDER BY cp.data_pagamento ASC, cp.id ASC";
     $res = $conn->query($sqlSaidas);
     if ($res) while($r=$res->fetch_assoc()) $saidas[]=$r;
 
@@ -1174,9 +1358,10 @@ if ($acao === 'caixa') {
                COALESCE(bo.nome, m.origem_outros, 'OUTROS') AS origem_nome,
                COALESCE(bd.nome, m.destino_outros, 'OUTROS') AS destino_nome
         FROM bancos_movimentacoes m
-        LEFT JOIN bancos_caixa bo ON bo.id = m.banco_origem_id
-        LEFT JOIN bancos_caixa bd ON bd.id = m.banco_destino_id
-        WHERE m.data_movimento BETWEEN '$inicioCaixa' AND '$fimCaixa'
+        LEFT JOIN bancos_caixa bo ON bo.id = m.banco_origem_id AND bo.tenant_id = m.tenant_id AND bo.escritorio_id = m.escritorio_id
+        LEFT JOIN bancos_caixa bd ON bd.id = m.banco_destino_id AND bd.tenant_id = m.tenant_id AND bd.escritorio_id = m.escritorio_id
+        WHERE m.tenant_id = '" . $conn->real_escape_string($tenantId) . "'
+          AND m.escritorio_id = " . (int)$escritorioId . " AND m.data_movimento BETWEEN '$inicioCaixa' AND '$fimCaixa'
         ORDER BY m.data_movimento ASC, m.id ASC
     ";
     $res = $conn->query($sqlTransferencias);
@@ -1344,7 +1529,7 @@ if ($acao === 'caixa') {
 if ($acao === 'movimentacao_bancos') {
     $bancos = financeiroListaBancos($conn, false);
     $movs = [];
-    $resMov = $conn->query("SELECT m.*, COALESCE(bo.nome, m.origem_outros, 'OUTROS') AS origem_nome, COALESCE(bd.nome, m.destino_outros, 'OUTROS') AS destino_nome FROM bancos_movimentacoes m LEFT JOIN bancos_caixa bo ON bo.id=m.banco_origem_id LEFT JOIN bancos_caixa bd ON bd.id=m.banco_destino_id ORDER BY m.data_movimento DESC, m.id DESC LIMIT 80");
+    $resMov = $conn->query("SELECT m.*, COALESCE(bo.nome, m.origem_outros, 'OUTROS') AS origem_nome, COALESCE(bd.nome, m.destino_outros, 'OUTROS') AS destino_nome FROM bancos_movimentacoes m LEFT JOIN bancos_caixa bo ON bo.id=m.banco_origem_id AND bo.tenant_id=m.tenant_id AND bo.escritorio_id=m.escritorio_id LEFT JOIN bancos_caixa bd ON bd.id=m.banco_destino_id AND bd.tenant_id=m.tenant_id AND bd.escritorio_id=m.escritorio_id WHERE m.tenant_id='" . $conn->real_escape_string($tenantId) . "' AND m.escritorio_id=" . (int)$escritorioId . " ORDER BY m.data_movimento DESC, m.id DESC LIMIT 80");
     if ($resMov) while($r=$resMov->fetch_assoc()) $movs[]=$r;
     ?>
     <div class="container-fluid">
@@ -1555,7 +1740,7 @@ if ($acao === 'bancos') {
 
                 if ($acao === 'editar_cp' && isset($_GET['id'])) {
                     $id_edit = $conn->real_escape_string($_GET['id']);
-                    $res_cp  = $conn->query("SELECT * FROM contas_pagar WHERE id = '$id_edit' LIMIT 1");
+                    $res_cp  = $conn->query("SELECT * FROM contas_pagar WHERE tenant_id = '" . $conn->real_escape_string($tenantId) . "' AND escritorio_id = " . (int)$escritorioId . " AND id = '$id_edit' LIMIT 1");
                     if ($res_cp && $res_cp->num_rows) {
                         $conta_cp = $res_cp->fetch_assoc();
                     }
@@ -1884,7 +2069,7 @@ if ($acao === 'bancos') {
 
                 if ($acao === 'editar_cr' && isset($_GET['id'])) {
                     $id_edit = $conn->real_escape_string($_GET['id']);
-                    $res_cr  = $conn->query("SELECT * FROM contas_receber WHERE id = '$id_edit' LIMIT 1");
+                    $res_cr  = $conn->query("SELECT * FROM contas_receber WHERE tenant_id = '" . $conn->real_escape_string($tenantId) . "' AND escritorio_id = " . (int)$escritorioId . " AND id = '$id_edit' LIMIT 1");
                     if ($res_cr && $res_cr->num_rows) {
                         $conta_cr = $res_cr->fetch_assoc();
                     }

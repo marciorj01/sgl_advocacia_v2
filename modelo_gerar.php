@@ -11,6 +11,24 @@ iniciarSessaoSegura();
 exigirLogin('auth/login.php');
 $conn = conectar();
 
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    http_response_code(403);
+    exit('Contexto Multi-Tenant inválido.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? trim((string)rojexTenantId())
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    http_response_code(403);
+    exit('Tenant ou escritório não identificado.');
+}
+
 /**
  * Registra eventos de visualização e exportação no LOG Enterprise.
  * A geração continua funcionando mesmo quando a integração de LOG não estiver disponível.
@@ -131,7 +149,7 @@ function mg_vars(?array $cliente, ?array $processo): array
             ? 'R$ ' . number_format((float)$processo['valor_causa'], 2, ',', '.')
             : 'VALOR DA CAUSA',
         // Mantido por compatibilidade com os modelos já cadastrados.
-        'escritorio_nome' => 'SGL Advocacia',
+        'escritorio_nome' => (string)($_SESSION['empresa_nome'] ?? $_SESSION['escritorio_nome'] ?? 'ROJEX.AI'),
         'data_atual' => date('d/m/Y'),
         'mes_extenso' => mg_mes(),
         'ano_atual' => date('Y'),
@@ -214,7 +232,7 @@ if ($geradoId > 0) {
     $stmt = $conn->prepare(
         "SELECT id, modelo_id, cliente_id, processo_id, titulo, conteudo_final, gerado_por, gerado_em
          FROM modelos_documentos_gerados
-         WHERE id = ?
+         WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
          LIMIT 1"
     );
 
@@ -223,7 +241,7 @@ if ($geradoId > 0) {
         exit('Não foi possível consultar o documento gerado.');
     }
 
-    $stmt->bind_param('i', $geradoId);
+    $stmt->bind_param('sii', $tenantId, $escritorioId, $geradoId);
     $stmt->execute();
     $resultado = $stmt->get_result();
     $gerado = $resultado ? $resultado->fetch_assoc() : null;
@@ -305,7 +323,7 @@ if ($id <= 0) {
 $stmt = $conn->prepare(
     "SELECT *
      FROM modelos_documentos
-     WHERE id = ?
+     WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
        AND COALESCE(deletado, 0) = 0
      LIMIT 1"
 );
@@ -315,7 +333,7 @@ if (!$stmt) {
     exit('Não foi possível consultar o modelo.');
 }
 
-$stmt->bind_param('i', $id);
+$stmt->bind_param('sii', $tenantId, $escritorioId, $id);
 $stmt->execute();
 $resultado = $stmt->get_result();
 $modelo = $resultado ? $resultado->fetch_assoc() : null;
@@ -346,13 +364,16 @@ if ($processoId > 0) {
     $stmt = $conn->prepare(
         "SELECT p.*, c.nome AS cliente_nome
          FROM processos p
-         LEFT JOIN clientes c ON c.id = p.cliente_id
-         WHERE p.id = ?
+         LEFT JOIN clientes c
+           ON c.id = p.cliente_id
+          AND c.tenant_id = p.tenant_id
+          AND c.escritorio_id = p.escritorio_id
+         WHERE p.tenant_id = ? AND p.escritorio_id = ? AND p.id = ?
          LIMIT 1"
     );
 
     if ($stmt) {
-        $stmt->bind_param('i', $processoId);
+        $stmt->bind_param('sii', $tenantId, $escritorioId, $processoId);
         $stmt->execute();
         $resultado = $stmt->get_result();
         $processo = $resultado ? $resultado->fetch_assoc() : null;
@@ -369,18 +390,34 @@ if ($clienteId > 0) {
         "SELECT id, nome, cpf_cnpj, telefone, whatsapp, email,
                 logradouro, numero, complemento, bairro, cidade, estado
          FROM clientes
-         WHERE id = ?
+         WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
            AND COALESCE(deletado, 0) = 0
          LIMIT 1"
     );
 
     if ($stmt) {
-        $stmt->bind_param('i', $clienteId);
+        $stmt->bind_param('sii', $tenantId, $escritorioId, $clienteId);
         $stmt->execute();
         $resultado = $stmt->get_result();
         $cliente = $resultado ? $resultado->fetch_assoc() : null;
         $stmt->close();
     }
+
+    if (!$cliente) {
+        http_response_code(404);
+        exit('Cliente não encontrado neste escritório.');
+    }
+}
+
+if ($processoId > 0 && !$processo) {
+    http_response_code(404);
+    exit('Processo não encontrado neste escritório.');
+}
+
+if ($processo && $clienteId > 0 && (int)($processo['cliente_id'] ?? 0) > 0
+    && (int)$processo['cliente_id'] !== $clienteId) {
+    http_response_code(409);
+    exit('O processo não pertence ao cliente selecionado.');
 }
 
 $conteudo = mg_apply((string)$modelo['conteudo'], mg_vars($cliente, $processo));

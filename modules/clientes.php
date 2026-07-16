@@ -6,6 +6,25 @@
 
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
+
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    $conn->close();
+    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Clientes.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? (string)rojexTenantId()
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    $conn->close();
+    throw new RuntimeException('Tenant ou escritório não identificado para o módulo Clientes.');
+}
+
 $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
 
@@ -18,6 +37,117 @@ if (!function_exists('h')) {
 function apenasDigitos(?string $valor): string {
     return preg_replace('/\D+/', '', (string)$valor);
 }
+
+/**
+ * Garante a estrutura mínima Multi-Tenant da tabela clientes.
+ *
+ * Os registros legados sem tenant são atribuídos ao tenant oficial definido
+ * nas configurações da instalação, preservando os dados do escritório original.
+ */
+function garantirClientesMultiTenant(mysqli $conn): void {
+    static $garantido = false;
+
+    if ($garantido) {
+        return;
+    }
+
+    if (function_exists('sgl_int_add_coluna')) {
+        sgl_int_add_coluna($conn, 'clientes', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+        sgl_int_add_coluna($conn, 'clientes', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+    }
+
+    try {
+        $tenantLegado = '';
+        $escritorioLegado = 0;
+
+        $stmtConfig = $conn->prepare(
+            "SELECT valor
+               FROM configuracoes
+              WHERE chave = 'tenant_id'
+              LIMIT 1"
+        );
+
+        if ($stmtConfig) {
+            $stmtConfig->execute();
+            $rowConfig = $stmtConfig->get_result()->fetch_assoc();
+            $stmtConfig->close();
+            $tenantLegado = trim((string)($rowConfig['valor'] ?? ''));
+        }
+
+        if ($tenantLegado !== '') {
+            $stmtEsc = $conn->prepare(
+                "SELECT id
+                   FROM escritorios_saas
+                  WHERE tenant_id = ?
+                  LIMIT 1"
+            );
+
+            if ($stmtEsc) {
+                $stmtEsc->bind_param('s', $tenantLegado);
+                $stmtEsc->execute();
+                $rowEsc = $stmtEsc->get_result()->fetch_assoc();
+                $stmtEsc->close();
+                $escritorioLegado = (int)($rowEsc['id'] ?? 0);
+            }
+        }
+
+        if ($tenantLegado !== '' && $escritorioLegado > 0) {
+            $stmtBackfill = $conn->prepare(
+                "UPDATE clientes
+                    SET tenant_id = ?,
+                        escritorio_id = ?
+                  WHERE tenant_id IS NULL
+                     OR tenant_id = ''
+                     OR escritorio_id IS NULL
+                     OR escritorio_id = 0"
+            );
+
+            if ($stmtBackfill) {
+                $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
+                $stmtBackfill->execute();
+                $stmtBackfill->close();
+            }
+        }
+
+        $indices = [];
+        $resIndices = $conn->query("SHOW INDEX FROM clientes");
+        if ($resIndices) {
+            while ($idx = $resIndices->fetch_assoc()) {
+                $indices[(string)$idx['Key_name']] = true;
+            }
+        }
+
+        if (isset($indices['uk_clientes_cpf_cnpj'])) {
+            $conn->query("ALTER TABLE clientes DROP INDEX uk_clientes_cpf_cnpj");
+        }
+
+        if (!isset($indices['idx_clientes_tenant'])) {
+            $conn->query("ALTER TABLE clientes ADD INDEX idx_clientes_tenant (tenant_id)");
+        }
+
+        if (!isset($indices['idx_clientes_escritorio'])) {
+            $conn->query("ALTER TABLE clientes ADD INDEX idx_clientes_escritorio (escritorio_id)");
+        }
+
+        if (!isset($indices['idx_clientes_tenant_documento'])) {
+            $conn->query(
+                "ALTER TABLE clientes
+                 ADD INDEX idx_clientes_tenant_documento (tenant_id, cpf_cnpj)"
+            );
+        }
+
+        $garantido = true;
+    } catch (Throwable $e) {
+        error_log('[ROJEX CLIENTES MULTI-TENANT] ' . $e->getMessage());
+        throw new RuntimeException(
+            'Não foi possível preparar o isolamento Multi-Tenant de Clientes.',
+            0,
+            $e
+        );
+    }
+}
+
+garantirClientesMultiTenant($conn);
 
 function gerarIdCliente(mysqli $conn): string {
     $res = $conn->query("SELECT id FROM clientes WHERE id LIKE 'CLI%' ORDER BY CAST(SUBSTRING(id, 4) AS UNSIGNED) DESC LIMIT 1");
@@ -80,11 +210,16 @@ function validarCliente(array $c): array {
     return $erros;
 }
 
-function clienteExisteDocumento(mysqli $conn, string $cpfCnpj, ?string $ignorarId = null): bool {
+function clienteExisteDocumento(
+    mysqli $conn,
+    string $tenantId,
+    string $cpfCnpj,
+    ?string $ignorarId = null
+): bool {
     if (trim($cpfCnpj) === '') return false;
-    $sql = 'SELECT id FROM clientes WHERE cpf_cnpj = ? AND deletado = 0';
-    $params = [$cpfCnpj];
-    $types = 's';
+    $sql = 'SELECT id FROM clientes WHERE tenant_id = ? AND cpf_cnpj = ? AND deletado = 0';
+    $params = [$tenantId, $cpfCnpj];
+    $types = 'ss';
     if ($ignorarId !== null) {
         $sql .= ' AND id <> ?';
         $params[] = $ignorarId;
@@ -98,16 +233,22 @@ function clienteExisteDocumento(mysqli $conn, string $cpfCnpj, ?string $ignorarI
     return $res && $res->num_rows > 0;
 }
 
-function salvarCliente(mysqli $conn, string $id, array $c): bool {
+function salvarCliente(
+    mysqli $conn,
+    string $tenantId,
+    int $escritorioId,
+    string $id,
+    array $c
+): bool {
     $sql = "INSERT INTO clientes (
-        id, nome, cpf_cnpj, tipo_pessoa, rg, data_nascimento, estado_civil, profissao,
+        id, tenant_id, escritorio_id, nome, cpf_cnpj, tipo_pessoa, rg, data_nascimento, estado_civil, profissao,
         telefone, celular, whatsapp, email, email_secundario, cep, logradouro, numero,
         complemento, bairro, cidade, estado, status, indicacao, observacoes, data_cadastro
-    ) VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())";
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param(
-        'sssssssssssssssssssssss',
-        $id, $c['nome'], $c['cpf_cnpj'], $c['tipo_pessoa'], $c['rg'], $c['data_nascimento'],
+        'ssissssssssssssssssssssss',
+        $id, $tenantId, $escritorioId, $c['nome'], $c['cpf_cnpj'], $c['tipo_pessoa'], $c['rg'], $c['data_nascimento'],
         $c['estado_civil'], $c['profissao'], $c['telefone'], $c['celular'], $c['whatsapp'],
         $c['email'], $c['email_secundario'], $c['cep'], $c['logradouro'], $c['numero'],
         $c['complemento'], $c['bairro'], $c['cidade'], $c['estado'], $c['status'],
@@ -116,33 +257,35 @@ function salvarCliente(mysqli $conn, string $id, array $c): bool {
     return $stmt->execute();
 }
 
-function atualizarCliente(mysqli $conn, string $id, array $c): bool {
+function atualizarCliente(mysqli $conn, string $tenantId, string $id, array $c): bool {
     $sql = "UPDATE clientes SET
         nome = ?, cpf_cnpj = NULLIF(?, ''), tipo_pessoa = ?, rg = ?, data_nascimento = NULLIF(?, ''),
         estado_civil = ?, profissao = ?, telefone = ?, celular = ?, whatsapp = ?, email = ?,
         email_secundario = ?, cep = ?, logradouro = ?, numero = ?, complemento = ?, bairro = ?,
         cidade = ?, estado = ?, status = ?, indicacao = ?, observacoes = ?
-        WHERE id = ? AND deletado = 0";
+        WHERE id = ? AND tenant_id = ? AND deletado = 0";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param(
-        'sssssssssssssssssssssss',
+        'ssssssssssssssssssssssss',
         $c['nome'], $c['cpf_cnpj'], $c['tipo_pessoa'], $c['rg'], $c['data_nascimento'],
         $c['estado_civil'], $c['profissao'], $c['telefone'], $c['celular'], $c['whatsapp'],
         $c['email'], $c['email_secundario'], $c['cep'], $c['logradouro'], $c['numero'],
         $c['complemento'], $c['bairro'], $c['cidade'], $c['estado'], $c['status'],
-        $c['indicacao'], $c['observacoes'], $id
+        $c['indicacao'], $c['observacoes'], $id, $tenantId
     );
     return $stmt->execute();
 }
 
 
-function buscarClienteAuditoria(mysqli $conn, string $id): ?array {
-    $stmt = $conn->prepare('SELECT * FROM clientes WHERE id = ? LIMIT 1');
+function buscarClienteAuditoria(mysqli $conn, string $tenantId, string $id): ?array {
+    $stmt = $conn->prepare(
+        'SELECT * FROM clientes WHERE id = ? AND tenant_id = ? LIMIT 1'
+    );
     if (!$stmt) {
         return null;
     }
 
-    $stmt->bind_param('s', $id);
+    $stmt->bind_param('ss', $id, $tenantId);
     $stmt->execute();
     $res = $stmt->get_result();
     $cliente = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
@@ -163,7 +306,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
         $erros = validarCliente($c);
         $idAtual = $_POST['id'] ?? null;
 
-        if (clienteExisteDocumento($conn, $c['cpf_cnpj'], $idAtual)) {
+        if (clienteExisteDocumento($conn, $tenantId, $c['cpf_cnpj'], $idAtual)) {
             $erros[] = 'Já existe outro cliente cadastrado com este CPF/CNPJ.';
         }
 
@@ -174,7 +317,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
             if ($idAtual) $cliente_editar['id'] = $idAtual;
         } elseif (isset($_POST['salvar_cliente'])) {
             $id = gerarIdCliente($conn);
-            if (salvarCliente($conn, $id, $c)) {
+            if (salvarCliente($conn, $tenantId, $escritorioId, $id, $c)) {
                 if (function_exists('sgl_registrar_log')) {
                     sgl_registrar_log(
                         $conn,
@@ -188,7 +331,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
                             'origem' => 'Cadastro de clientes',
                             'resultado' => 'SUCESSO',
                             'nivel' => 'INFO',
-                            'dados_novos' => buscarClienteAuditoria($conn, $id) ?? $c,
+                            'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $id) ?? $c,
                         ]
                     );
                 }
@@ -202,9 +345,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
             }
         } else {
             $id = (string)($_POST['id'] ?? '');
-            $dadosAnteriores = buscarClienteAuditoria($conn, $id);
+            $dadosAnteriores = buscarClienteAuditoria($conn, $tenantId, $id);
 
-            if (atualizarCliente($conn, $id, $c)) {
+            if (atualizarCliente($conn, $tenantId, $id, $c)) {
                 if (function_exists('sgl_registrar_log')) {
                     sgl_registrar_log(
                         $conn,
@@ -219,7 +362,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
                             'resultado' => 'SUCESSO',
                             'nivel' => 'INFO',
                             'dados_anteriores' => $dadosAnteriores,
-                            'dados_novos' => buscarClienteAuditoria($conn, $id) ?? $c,
+                            'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $id) ?? $c,
                         ]
                     );
                 }
@@ -242,10 +385,16 @@ if (isset($_GET['excluir'])) {
         $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Tente novamente.</div>';
     } else {
         $id = (string)$_GET['excluir'];
-        $dadosAnteriores = buscarClienteAuditoria($conn, $id);
+        $dadosAnteriores = buscarClienteAuditoria($conn, $tenantId, $id);
 
-        $stmt = $conn->prepare("UPDATE clientes SET deletado = 1, status = 'Excluído' WHERE id = ?");
-        $stmt->bind_param('s', $id);
+        $stmt = $conn->prepare(
+            "UPDATE clientes
+                SET deletado = 1,
+                    status = 'Excluído'
+              WHERE id = ?
+                AND tenant_id = ?"
+        );
+        $stmt->bind_param('ss', $id, $tenantId);
         $okExcluir = $stmt->execute();
         $linhasAfetadas = $stmt->affected_rows;
         $stmt->close();
@@ -265,7 +414,7 @@ if (isset($_GET['excluir'])) {
                         'resultado' => 'SUCESSO',
                         'nivel' => 'AVISO',
                         'dados_anteriores' => $dadosAnteriores,
-                        'dados_novos' => buscarClienteAuditoria($conn, $id),
+                        'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $id),
                     ]
                 );
             }
@@ -299,8 +448,15 @@ if (isset($_GET['excluir'])) {
 // CARREGAR EDIÇÃO
 if ($acao === 'editar' && isset($_GET['id']) && $cliente_editar === null) {
     $id_editar = (string)$_GET['id'];
-    $stmt = $conn->prepare('SELECT * FROM clientes WHERE id = ? AND deletado = 0 LIMIT 1');
-    $stmt->bind_param('s', $id_editar);
+    $stmt = $conn->prepare(
+        'SELECT *
+           FROM clientes
+          WHERE id = ?
+            AND tenant_id = ?
+            AND deletado = 0
+          LIMIT 1'
+    );
+    $stmt->bind_param('ss', $id_editar, $tenantId);
     $stmt->execute();
     $res = $stmt->get_result();
     if ($res && $res->num_rows > 0) {
@@ -431,9 +587,9 @@ $pagina = max(1, (int)($_GET['pagina'] ?? 1));
 $porPagina = 15;
 $offset = ($pagina - 1) * $porPagina;
 
-$condicoes = ['deletado = 0'];
-$params = [];
-$types = '';
+$condicoes = ['tenant_id = ?', 'deletado = 0'];
+$params = [$tenantId];
+$types = 's';
 
 if ($busca !== '') {
     $condicoes[] = '(id LIKE ? OR nome LIKE ? OR cpf_cnpj LIKE ? OR telefone LIKE ? OR celular LIKE ? OR whatsapp LIKE ? OR email LIKE ?)';
@@ -468,11 +624,25 @@ $stmtLista->bind_param($typesLista, ...$paramsLista);
 $stmtLista->execute();
 $lista = $stmtLista->get_result();
 
-$resumo = $conn->query("SELECT
-    COUNT(*) AS total,
-    SUM(CASE WHEN status = 'Ativo' THEN 1 ELSE 0 END) AS ativos,
-    SUM(CASE WHEN MONTH(criado_em) = MONTH(CURDATE()) AND YEAR(criado_em) = YEAR(CURDATE()) THEN 1 ELSE 0 END) AS novos_mes
-    FROM clientes WHERE deletado = 0")->fetch_assoc();
+$stmtResumo = $conn->prepare(
+    "SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'Ativo' THEN 1 ELSE 0 END) AS ativos,
+        SUM(
+            CASE
+                WHEN MONTH(criado_em) = MONTH(CURDATE())
+                 AND YEAR(criado_em) = YEAR(CURDATE())
+                THEN 1 ELSE 0
+            END
+        ) AS novos_mes
+     FROM clientes
+     WHERE tenant_id = ?
+       AND deletado = 0"
+);
+$stmtResumo->bind_param('s', $tenantId);
+$stmtResumo->execute();
+$resumo = $stmtResumo->get_result()->fetch_assoc();
+$stmtResumo->close();
 
 $queryBase = http_build_query(['mod' => 'clientes', 'busca' => $busca, 'status' => $statusFiltro, 'cidade' => $cidadeFiltro]);
 ?>

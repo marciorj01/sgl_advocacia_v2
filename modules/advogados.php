@@ -7,15 +7,141 @@
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
 
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    $conn->close();
+    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Advogados.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? (string)rojexTenantId()
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    $conn->close();
+    throw new RuntimeException('Tenant ou escritório não identificado para o módulo Advogados.');
+}
+
 // Correção preventiva Fase 5: garante colunas usadas por este módulo sem apagar dados.
 @$conn->query("ALTER TABLE advogados ADD COLUMN IF NOT EXISTS cpf VARCHAR(20) NULL AFTER nome");
 @$conn->query("ALTER TABLE advogados ADD COLUMN IF NOT EXISTS oab_uf CHAR(2) NULL AFTER oab");
 @$conn->query("ALTER TABLE advogados ADD COLUMN IF NOT EXISTS deletado TINYINT(1) NOT NULL DEFAULT 0 AFTER observacoes");
 
-function adv_scalar(mysqli $conn, string $sql, int $default = 0): int {
-    $res = @$conn->query($sql);
-    if (!$res) { return $default; }
-    $row = $res->fetch_assoc();
+function garantirAdvogadosMultiTenant(mysqli $conn): void {
+    static $garantido = false;
+
+    if ($garantido) {
+        return;
+    }
+
+    if (function_exists('sgl_int_add_coluna')) {
+        sgl_int_add_coluna($conn, 'advogados', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+        sgl_int_add_coluna($conn, 'advogados', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+    }
+
+    try {
+        $tenantLegado = '';
+        $escritorioLegado = 0;
+
+        $stmtConfig = $conn->prepare(
+            "SELECT valor
+               FROM configuracoes
+              WHERE chave = 'tenant_id'
+              LIMIT 1"
+        );
+
+        if ($stmtConfig) {
+            $stmtConfig->execute();
+            $rowConfig = $stmtConfig->get_result()->fetch_assoc();
+            $stmtConfig->close();
+            $tenantLegado = trim((string)($rowConfig['valor'] ?? ''));
+        }
+
+        if ($tenantLegado !== '') {
+            $stmtEsc = $conn->prepare(
+                "SELECT id
+                   FROM escritorios_saas
+                  WHERE tenant_id = ?
+                  LIMIT 1"
+            );
+
+            if ($stmtEsc) {
+                $stmtEsc->bind_param('s', $tenantLegado);
+                $stmtEsc->execute();
+                $rowEsc = $stmtEsc->get_result()->fetch_assoc();
+                $stmtEsc->close();
+                $escritorioLegado = (int)($rowEsc['id'] ?? 0);
+            }
+        }
+
+        if ($tenantLegado !== '' && $escritorioLegado > 0) {
+            $stmtBackfill = $conn->prepare(
+                "UPDATE advogados
+                    SET tenant_id = ?,
+                        escritorio_id = ?
+                  WHERE tenant_id IS NULL
+                     OR tenant_id = ''
+                     OR escritorio_id IS NULL
+                     OR escritorio_id = 0"
+            );
+
+            if ($stmtBackfill) {
+                $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
+                $stmtBackfill->execute();
+                $stmtBackfill->close();
+            }
+        }
+
+        $indices = [];
+        $resIndices = $conn->query("SHOW INDEX FROM advogados");
+        if ($resIndices) {
+            while ($idx = $resIndices->fetch_assoc()) {
+                $indices[(string)$idx['Key_name']] = true;
+            }
+        }
+
+        if (!isset($indices['idx_advogados_tenant'])) {
+            $conn->query("ALTER TABLE advogados ADD INDEX idx_advogados_tenant (tenant_id)");
+        }
+
+        if (!isset($indices['idx_advogados_escritorio'])) {
+            $conn->query("ALTER TABLE advogados ADD INDEX idx_advogados_escritorio (escritorio_id)");
+        }
+
+        if (!isset($indices['idx_advogados_tenant_cpf'])) {
+            $conn->query("ALTER TABLE advogados ADD INDEX idx_advogados_tenant_cpf (tenant_id, cpf)");
+        }
+
+        if (!isset($indices['idx_advogados_tenant_oab'])) {
+            $conn->query("ALTER TABLE advogados ADD INDEX idx_advogados_tenant_oab (tenant_id, oab, oab_uf)");
+        }
+
+        $garantido = true;
+    } catch (Throwable $e) {
+        error_log('[ROJEX ADVOGADOS MULTI-TENANT] ' . $e->getMessage());
+        throw new RuntimeException(
+            'Não foi possível preparar o isolamento Multi-Tenant de Advogados.',
+            0,
+            $e
+        );
+    }
+}
+
+garantirAdvogadosMultiTenant($conn);
+
+function adv_scalar(mysqli $conn, string $sql, string $tenantId, int $default = 0): int {
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) { return $default; }
+    $stmt->bind_param('s', $tenantId);
+    if (!$stmt->execute()) {
+        $stmt->close();
+        return $default;
+    }
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
     return (int)($row['total'] ?? $default);
 }
 
@@ -77,34 +203,14 @@ function validarAdvogado(array $a): array {
     return $erros;
 }
 
-function advogadoExisteCampo(mysqli $conn, string $campo, string $valor, ?string $ignorarId = null): bool {
+function advogadoExisteCampo(mysqli $conn, string $tenantId, string $campo, string $valor, ?string $ignorarId = null): bool {
     $valor = trim($valor);
     if ($valor === '') return false;
     $permitidos = ['cpf', 'email'];
     if (!in_array($campo, $permitidos, true)) return false;
 
-    $sql = "SELECT id FROM advogados WHERE {$campo} = ? AND deletado = 0";
-    $params = [$valor];
-    $types = 's';
-    if ($ignorarId !== null && $ignorarId !== '') {
-        $sql .= ' AND id <> ?';
-        $params[] = $ignorarId;
-        $types .= 's';
-    }
-    $sql .= ' LIMIT 1';
-    $stmt = $conn->prepare($sql);
-    $stmt->bind_param($types, ...$params);
-    $stmt->execute();
-    $res = $stmt->get_result();
-    return $res && $res->num_rows > 0;
-}
-
-function advogadoExisteOab(mysqli $conn, string $oab, string $uf, ?string $ignorarId = null): bool {
-    $oab = trim($oab);
-    $uf = trim($uf);
-    if ($oab === '') return false;
-    $sql = 'SELECT id FROM advogados WHERE oab = ? AND COALESCE(oab_uf, \'\') = ? AND deletado = 0';
-    $params = [$oab, $uf];
+    $sql = "SELECT id FROM advogados WHERE tenant_id = ? AND {$campo} = ? AND deletado = 0";
+    $params = [$tenantId, $valor];
     $types = 'ss';
     if ($ignorarId !== null && $ignorarId !== '') {
         $sql .= ' AND id <> ?';
@@ -119,41 +225,62 @@ function advogadoExisteOab(mysqli $conn, string $oab, string $uf, ?string $ignor
     return $res && $res->num_rows > 0;
 }
 
-function salvarAdvogado(mysqli $conn, string $id, array $a): bool {
+function advogadoExisteOab(mysqli $conn, string $tenantId, string $oab, string $uf, ?string $ignorarId = null): bool {
+    $oab = trim($oab);
+    $uf = trim($uf);
+    if ($oab === '') return false;
+    $sql = 'SELECT id FROM advogados WHERE tenant_id = ? AND oab = ? AND COALESCE(oab_uf, \'\') = ? AND deletado = 0';
+    $params = [$tenantId, $oab, $uf];
+    $types = 'sss';
+    if ($ignorarId !== null && $ignorarId !== '') {
+        $sql .= ' AND id <> ?';
+        $params[] = $ignorarId;
+        $types .= 's';
+    }
+    $sql .= ' LIMIT 1';
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    return $res && $res->num_rows > 0;
+}
+
+function salvarAdvogado(mysqli $conn, string $tenantId, int $escritorioId, string $id, array $a): bool {
     $sql = "INSERT INTO advogados (
-        id, nome, cpf, oab, oab_uf, especialidade, telefone, email, status, observacoes, data_cadastro
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())";
+        id, tenant_id, escritorio_id, nome, cpf, oab, oab_uf, especialidade,
+        telefone, email, status, observacoes, data_cadastro
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURDATE())";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param(
-        'ssssssssss',
-        $id, $a['nome'], $a['cpf'], $a['oab'], $a['oab_uf'], $a['especialidade'],
-        $a['telefone'], $a['email'], $a['status'], $a['observacoes']
+        'ssisssssssss',
+        $id, $tenantId, $escritorioId, $a['nome'], $a['cpf'], $a['oab'], $a['oab_uf'],
+        $a['especialidade'], $a['telefone'], $a['email'], $a['status'], $a['observacoes']
     );
     return $stmt->execute();
 }
 
-function atualizarAdvogado(mysqli $conn, string $id, array $a): bool {
+function atualizarAdvogado(mysqli $conn, string $tenantId, string $id, array $a): bool {
     $sql = "UPDATE advogados SET
         nome = ?, cpf = ?, oab = ?, oab_uf = ?, especialidade = ?,
         telefone = ?, email = ?, status = ?, observacoes = ?
-        WHERE id = ? AND deletado = 0";
+        WHERE id = ? AND tenant_id = ? AND deletado = 0";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param(
-        'ssssssssss',
+        'sssssssssss',
         $a['nome'], $a['cpf'], $a['oab'], $a['oab_uf'], $a['especialidade'],
-        $a['telefone'], $a['email'], $a['status'], $a['observacoes'], $id
+        $a['telefone'], $a['email'], $a['status'], $a['observacoes'], $id, $tenantId
     );
     return $stmt->execute();
 }
 
 
-function buscarAdvogadoAuditoria(mysqli $conn, string $id): ?array {
-    $stmt = $conn->prepare('SELECT * FROM advogados WHERE id = ? LIMIT 1');
+function buscarAdvogadoAuditoria(mysqli $conn, string $tenantId, string $id): ?array {
+    $stmt = $conn->prepare('SELECT * FROM advogados WHERE id = ? AND tenant_id = ? LIMIT 1');
     if (!$stmt) {
         return null;
     }
 
-    $stmt->bind_param('s', $id);
+    $stmt->bind_param('ss', $id, $tenantId);
     $stmt->execute();
     $res = $stmt->get_result();
     $advogado = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
@@ -173,13 +300,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_advogado']) |
         $erros = validarAdvogado($a);
         $idAtual = $_POST['id'] ?? null;
 
-        if (advogadoExisteCampo($conn, 'cpf', $a['cpf'], $idAtual)) {
+        if (advogadoExisteCampo($conn, $tenantId, 'cpf', $a['cpf'], $idAtual)) {
             $erros[] = 'Já existe outro advogado cadastrado com este CPF.';
         }
-        if (advogadoExisteCampo($conn, 'email', $a['email'], $idAtual)) {
+        if (advogadoExisteCampo($conn, $tenantId, 'email', $a['email'], $idAtual)) {
             $erros[] = 'Já existe outro advogado cadastrado com este e-mail.';
         }
-        if (advogadoExisteOab($conn, $a['oab'], $a['oab_uf'], $idAtual)) {
+        if (advogadoExisteOab($conn, $tenantId, $a['oab'], $a['oab_uf'], $idAtual)) {
             $erros[] = 'Já existe outro advogado cadastrado com esta OAB/UF.';
         }
 
@@ -190,7 +317,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_advogado']) |
             if ($idAtual) $advogado_editar['id'] = $idAtual;
         } elseif (isset($_POST['salvar_advogado'])) {
             $id = gerarIdAdvogado($conn);
-            if (salvarAdvogado($conn, $id, $a)) {
+            if (salvarAdvogado($conn, $tenantId, $escritorioId, $id, $a)) {
                 if (function_exists('sgl_registrar_log')) {
                     sgl_registrar_log(
                         $conn,
@@ -204,7 +331,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_advogado']) |
                             'origem' => 'Cadastro de advogados',
                             'resultado' => 'SUCESSO',
                             'nivel' => 'INFO',
-                            'dados_novos' => buscarAdvogadoAuditoria($conn, $id) ?? $a,
+                            'dados_novos' => buscarAdvogadoAuditoria($conn, $tenantId, $id) ?? $a,
                         ]
                     );
                 }
@@ -218,9 +345,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_advogado']) |
             }
         } else {
             $id = (string)($_POST['id'] ?? '');
-            $dadosAnteriores = buscarAdvogadoAuditoria($conn, $id);
+            $dadosAnteriores = buscarAdvogadoAuditoria($conn, $tenantId, $id);
 
-            if (atualizarAdvogado($conn, $id, $a)) {
+            if ($dadosAnteriores === null) {
+                $msg = '<div class="alert alert-danger">Advogado não encontrado neste escritório.</div>';
+                $acao = 'listar';
+            } elseif (atualizarAdvogado($conn, $tenantId, $id, $a)) {
                 if (function_exists('sgl_registrar_log')) {
                     sgl_registrar_log(
                         $conn,
@@ -235,7 +365,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_advogado']) |
                             'resultado' => 'SUCESSO',
                             'nivel' => 'INFO',
                             'dados_anteriores' => $dadosAnteriores,
-                            'dados_novos' => buscarAdvogadoAuditoria($conn, $id) ?? $a,
+                            'dados_novos' => buscarAdvogadoAuditoria($conn, $tenantId, $id) ?? $a,
                         ]
                     );
                 }
@@ -257,10 +387,16 @@ if (isset($_GET['excluir'])) {
         $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Tente novamente.</div>';
     } else {
         $id = (string)$_GET['excluir'];
-        $dadosAnteriores = buscarAdvogadoAuditoria($conn, $id);
+        $dadosAnteriores = buscarAdvogadoAuditoria($conn, $tenantId, $id);
 
-        $stmt = $conn->prepare("UPDATE advogados SET deletado = 1, status = 'Excluído' WHERE id = ?");
-        $stmt->bind_param('s', $id);
+        $stmt = $conn->prepare(
+            "UPDATE advogados
+                SET deletado = 1,
+                    status = 'Excluído'
+              WHERE id = ?
+                AND tenant_id = ?"
+        );
+        $stmt->bind_param('ss', $id, $tenantId);
         $okExcluir = $stmt->execute();
         $linhasAfetadas = $stmt->affected_rows;
         $stmt->close();
@@ -280,7 +416,7 @@ if (isset($_GET['excluir'])) {
                         'resultado' => 'SUCESSO',
                         'nivel' => 'AVISO',
                         'dados_anteriores' => $dadosAnteriores,
-                        'dados_novos' => buscarAdvogadoAuditoria($conn, $id),
+                        'dados_novos' => buscarAdvogadoAuditoria($conn, $tenantId, $id),
                     ]
                 );
             }
@@ -313,8 +449,14 @@ if (isset($_GET['excluir'])) {
 
 if ($acao === 'editar' && isset($_GET['id']) && $advogado_editar === null) {
     $id_editar = (string)$_GET['id'];
-    $stmt = $conn->prepare('SELECT * FROM advogados WHERE id = ? AND deletado = 0 LIMIT 1');
-    $stmt->bind_param('s', $id_editar);
+    $stmt = $conn->prepare(
+        'SELECT * FROM advogados
+          WHERE id = ?
+            AND tenant_id = ?
+            AND deletado = 0
+          LIMIT 1'
+    );
+    $stmt->bind_param('ss', $id_editar, $tenantId);
     $stmt->execute();
     $res = $stmt->get_result();
     if ($res && $res->num_rows > 0) {
@@ -416,9 +558,9 @@ $busca = trim($_GET['busca'] ?? '');
 $statusFiltro = $_GET['status'] ?? '';
 $especialidadeFiltro = trim($_GET['especialidade'] ?? '');
 
-$where = ['deletado = 0'];
-$params = [];
-$types = '';
+$where = ['tenant_id = ?', 'deletado = 0'];
+$params = [$tenantId];
+$types = 's';
 
 if ($busca !== '') {
     $where[] = '(id LIKE ? OR nome LIKE ? OR cpf LIKE ? OR oab LIKE ? OR oab_uf LIKE ? OR especialidade LIKE ? OR telefone LIKE ? OR email LIKE ?)';
@@ -441,10 +583,41 @@ if ($especialidadeFiltro !== '') {
 
 $whereSql = 'WHERE ' . implode(' AND ', $where);
 
-$totalAdvogados = adv_scalar($conn, "SELECT COUNT(*) AS total FROM advogados WHERE COALESCE(deletado,0) = 0");
-$ativos = adv_scalar($conn, "SELECT COUNT(*) AS total FROM advogados WHERE COALESCE(deletado,0) = 0 AND status = 'Ativo'");
-$inativos = adv_scalar($conn, "SELECT COUNT(*) AS total FROM advogados WHERE COALESCE(deletado,0) = 0 AND status = 'Inativo'");
-$novosMes = adv_scalar($conn, "SELECT COUNT(*) AS total FROM advogados WHERE COALESCE(deletado,0) = 0 AND data_cadastro >= DATE_FORMAT(CURDATE(), '%Y-%m-01')");
+$totalAdvogados = adv_scalar(
+    $conn,
+    "SELECT COUNT(*) AS total
+       FROM advogados
+      WHERE tenant_id = ?
+        AND COALESCE(deletado,0) = 0",
+    $tenantId
+);
+$ativos = adv_scalar(
+    $conn,
+    "SELECT COUNT(*) AS total
+       FROM advogados
+      WHERE tenant_id = ?
+        AND COALESCE(deletado,0) = 0
+        AND status = 'Ativo'",
+    $tenantId
+);
+$inativos = adv_scalar(
+    $conn,
+    "SELECT COUNT(*) AS total
+       FROM advogados
+      WHERE tenant_id = ?
+        AND COALESCE(deletado,0) = 0
+        AND status = 'Inativo'",
+    $tenantId
+);
+$novosMes = adv_scalar(
+    $conn,
+    "SELECT COUNT(*) AS total
+       FROM advogados
+      WHERE tenant_id = ?
+        AND COALESCE(deletado,0) = 0
+        AND data_cadastro >= DATE_FORMAT(CURDATE(), '%Y-%m-01')",
+    $tenantId
+);
 
 $especialidadesPadrao = [
     'Administrativo',
@@ -469,14 +642,27 @@ $especialidadesPadrao = [
 ];
 
 $especialidadesCadastradas = [];
-$especialidadesQuery = $conn->query("SELECT DISTINCT especialidade FROM advogados WHERE deletado = 0 AND especialidade IS NOT NULL AND especialidade <> '' ORDER BY especialidade ASC LIMIT 100");
-if ($especialidadesQuery) {
+$stmtEspecialidades = $conn->prepare(
+    "SELECT DISTINCT especialidade
+       FROM advogados
+      WHERE tenant_id = ?
+        AND deletado = 0
+        AND especialidade IS NOT NULL
+        AND especialidade <> ''
+      ORDER BY especialidade ASC
+      LIMIT 100"
+);
+if ($stmtEspecialidades) {
+    $stmtEspecialidades->bind_param('s', $tenantId);
+    $stmtEspecialidades->execute();
+    $especialidadesQuery = $stmtEspecialidades->get_result();
     while ($esp = $especialidadesQuery->fetch_assoc()) {
         $valor = trim((string)$esp['especialidade']);
         if ($valor !== '') {
             $especialidadesCadastradas[] = $valor;
         }
     }
+    $stmtEspecialidades->close();
 }
 $especialidadesFiltro = array_values(array_unique(array_merge($especialidadesPadrao, $especialidadesCadastradas)));
 sort($especialidadesFiltro, SORT_NATURAL | SORT_FLAG_CASE);

@@ -20,6 +20,24 @@ exigirLogin('auth/login.php');
 
 $conn = conectar();
 
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    http_response_code(403);
+    exit('Contexto Multi-Tenant inválido.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? trim((string)rojexTenantId())
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    http_response_code(403);
+    exit('Tenant ou escritório não identificado.');
+}
+
 
 function sgl_doc_endpoint_log(
     mysqli $conn,
@@ -80,6 +98,8 @@ if ($id <= 0) {
 try {
     $conn->query("CREATE TABLE IF NOT EXISTS documentos_arquivos (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         codigo VARCHAR(20) NOT NULL UNIQUE,
         titulo VARCHAR(180) NOT NULL,
         categoria VARCHAR(80) NOT NULL DEFAULT 'Documento geral',
@@ -100,14 +120,31 @@ try {
         deletado TINYINT(1) NOT NULL DEFAULT 0,
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_doc_tenant (tenant_id, escritorio_id),
         INDEX idx_doc_cliente (cliente_id),
         INDEX idx_doc_processo (processo_id),
         INDEX idx_doc_categoria (categoria),
         INDEX idx_doc_deletado (deletado)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
-    $stmt = $conn->prepare("SELECT id, codigo, titulo, categoria, cliente_id, processo_id, numero_processo, nome_original, caminho, extensao, mime_type, tamanho_bytes, hash_arquivo FROM documentos_arquivos WHERE id = ? AND COALESCE(deletado,0) = 0 LIMIT 1");
-    $stmt->bind_param('i', $id);
+    $resColTenant = $conn->query("SHOW COLUMNS FROM documentos_arquivos LIKE 'tenant_id'");
+    if (!$resColTenant || $resColTenant->num_rows === 0) {
+        $conn->query("ALTER TABLE documentos_arquivos ADD COLUMN tenant_id VARCHAR(80) NULL AFTER id");
+    }
+    $resColEsc = $conn->query("SHOW COLUMNS FROM documentos_arquivos LIKE 'escritorio_id'");
+    if (!$resColEsc || $resColEsc->num_rows === 0) {
+        $conn->query("ALTER TABLE documentos_arquivos ADD COLUMN escritorio_id INT NULL AFTER tenant_id");
+    }
+
+    $stmt = $conn->prepare(
+        "SELECT id, tenant_id, escritorio_id, codigo, titulo, categoria, cliente_id, processo_id,
+                numero_processo, nome_original, caminho, extensao, mime_type, tamanho_bytes, hash_arquivo
+         FROM documentos_arquivos
+         WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
+           AND COALESCE(deletado,0) = 0
+         LIMIT 1"
+    );
+    $stmt->bind_param('sii', $tenantId, $escritorioId, $id);
     $stmt->execute();
     $doc = $stmt->get_result()->fetch_assoc();
     $stmt->close();
@@ -172,6 +209,8 @@ try {
             'origem' => $modo === 'download' ? 'Download de documento' : 'Visualização de documento',
             'dados_novos' => [
                 'id' => (int)$doc['id'],
+                'tenant_id' => (string)$doc['tenant_id'],
+                'escritorio_id' => (int)$doc['escritorio_id'],
                 'codigo' => (string)($doc['codigo'] ?? ''),
                 'titulo' => (string)($doc['titulo'] ?? ''),
                 'categoria' => (string)($doc['categoria'] ?? ''),

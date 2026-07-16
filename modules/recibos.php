@@ -2,9 +2,38 @@
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
 if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
+
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    $conn->close();
+    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Recibos.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? trim((string)rojexTenantId())
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    $conn->close();
+    throw new RuntimeException('Tenant ou escritório não identificado para o módulo Recibos.');
+}
+
 $acao = $_GET['acao'] ?? 'listar';
 $msg = '';
 
+function sglReciboTenantId(): string {
+    return function_exists('rojexTenantId')
+        ? trim((string)rojexTenantId())
+        : trim((string)($_SESSION['tenant_id'] ?? ''));
+}
+function sglReciboEscritorioId(): int {
+    return function_exists('rojexEscritorioId')
+        ? (int)rojexEscritorioId()
+        : (int)($_SESSION['escritorio_id'] ?? 0);
+}
 function hRec($v): string { return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8'); }
 function brlRec($v): string { return 'R$ ' . number_format((float)($v ?? 0), 2, ',', '.'); }
 function dataRec($d): string { return empty($d) ? '-' : date('d/m/Y', strtotime($d)); }
@@ -29,7 +58,9 @@ function sglReciboGarantirColuna(mysqli $conn, string $coluna, string $definicao
 function sglReciboTabela(mysqli $conn): void {
     $conn->query("CREATE TABLE IF NOT EXISTS recibos (
         id VARCHAR(20) PRIMARY KEY,
-        numero VARCHAR(30) NOT NULL UNIQUE,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
+        numero VARCHAR(30) NOT NULL,
         cliente_id VARCHAR(10) NULL,
         nome_cliente VARCHAR(150) NOT NULL,
         cpf_cnpj VARCHAR(25) NULL,
@@ -47,6 +78,8 @@ function sglReciboTabela(mysqli $conn): void {
         deletado TINYINT(1) NOT NULL DEFAULT 0,
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_rec_tenant (tenant_id, escritorio_id),
+        UNIQUE KEY uq_rec_numero_tenant (tenant_id, numero),
         INDEX idx_rec_numero (numero),
         INDEX idx_rec_cliente (cliente_id),
         INDEX idx_rec_status (status),
@@ -55,6 +88,8 @@ function sglReciboTabela(mysqli $conn): void {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
 
     // Compatibilidade com bancos criados nas fases anteriores.
+    sglReciboGarantirColuna($conn, 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    sglReciboGarantirColuna($conn, 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
     sglReciboGarantirColuna($conn, 'processo_numero', "processo_numero VARCHAR(80) NULL AFTER cpf_cnpj");
     sglReciboGarantirColuna($conn, 'honorario_id', "honorario_id VARCHAR(20) NULL AFTER processo_numero");
     sglReciboGarantirColuna($conn, 'parcela_id', "parcela_id VARCHAR(20) NULL AFTER honorario_id");
@@ -74,9 +109,58 @@ function sglReciboTabela(mysqli $conn): void {
         $conn->query("UPDATE recibos SET referente = 'Honorários advocatícios' WHERE referente IS NULL OR referente = ''");
     }
     $conn->query("UPDATE recibos SET data_emissao = CURDATE() WHERE data_emissao IS NULL");
+
+    // Migração controlada dos registros legados para o tenant original da instalação.
+    try {
+        $tenantLegado = '';
+        $escritorioLegado = 0;
+        $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave='tenant_id' LIMIT 1");
+        if ($stmtCfg) {
+            $stmtCfg->execute();
+            $cfg = $stmtCfg->get_result()->fetch_assoc();
+            $stmtCfg->close();
+            $tenantLegado = trim((string)($cfg['valor'] ?? ''));
+        }
+        if ($tenantLegado !== '') {
+            $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id=? LIMIT 1");
+            if ($stmtEsc) {
+                $stmtEsc->bind_param('s', $tenantLegado);
+                $stmtEsc->execute();
+                $esc = $stmtEsc->get_result()->fetch_assoc();
+                $stmtEsc->close();
+                $escritorioLegado = (int)($esc['id'] ?? 0);
+            }
+        }
+        if ($tenantLegado !== '' && $escritorioLegado > 0) {
+            $stmtBackfill = $conn->prepare(
+                "UPDATE recibos
+                 SET tenant_id=?, escritorio_id=?
+                 WHERE tenant_id IS NULL OR tenant_id='' OR escritorio_id IS NULL OR escritorio_id=0"
+            );
+            if ($stmtBackfill) {
+                $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
+                $stmtBackfill->execute();
+                $stmtBackfill->close();
+            }
+        }
+
+        $indices = [];
+        $resIdx = $conn->query("SHOW INDEX FROM recibos");
+        if ($resIdx) {
+            while ($idx = $resIdx->fetch_assoc()) $indices[(string)$idx['Key_name']] = true;
+        }
+        if (!isset($indices['idx_rec_tenant'])) {
+            $conn->query("ALTER TABLE recibos ADD INDEX idx_rec_tenant (tenant_id, escritorio_id)");
+        }
+    } catch (Throwable $e) {
+        error_log('[ROJEX RECIBOS MULTI-TENANT] ' . $e->getMessage());
+        throw new RuntimeException('Não foi possível preparar o isolamento Multi-Tenant dos Recibos.', 0, $e);
+    }
 }
 function gerarIdRecibo(mysqli $conn): string {
-    $res = $conn->query("SELECT id FROM recibos ORDER BY CAST(SUBSTRING(id, 4) AS UNSIGNED) DESC LIMIT 1");
+    $tenant = $conn->real_escape_string(sglReciboTenantId());
+    $escritorio = sglReciboEscritorioId();
+    $res = $conn->query("SELECT id FROM recibos WHERE tenant_id='{$tenant}' AND escritorio_id={$escritorio} ORDER BY CAST(SUBSTRING(id, 4) AS UNSIGNED) DESC LIMIT 1");
     if (!$res || $res->num_rows === 0) return 'REC001';
     $num = (int)substr($res->fetch_assoc()['id'], 3) + 1;
     return 'REC' . str_pad((string)$num, 3, '0', STR_PAD_LEFT);
@@ -84,8 +168,10 @@ function gerarIdRecibo(mysqli $conn): string {
 function gerarNumeroRecibo(mysqli $conn): string {
     $ano = date('Y');
     $prefixo = 'REC-' . $ano . '-';
-    $stmt = $conn->prepare("SELECT numero FROM recibos WHERE numero LIKE CONCAT(?, '%') ORDER BY numero DESC LIMIT 1");
-    $stmt->bind_param('s', $prefixo);
+    $tenant = sglReciboTenantId();
+    $escritorio = sglReciboEscritorioId();
+    $stmt = $conn->prepare("SELECT numero FROM recibos WHERE tenant_id=? AND escritorio_id=? AND numero LIKE CONCAT(?, '%') ORDER BY numero DESC LIMIT 1");
+    $stmt->bind_param('sis', $tenant, $escritorio, $prefixo);
     $stmt->execute();
     $res = $stmt->get_result();
     if (!$res || $res->num_rows === 0) return $prefixo . '0001';
@@ -95,29 +181,74 @@ function gerarNumeroRecibo(mysqli $conn): string {
 }
 function getClientesRec(mysqli $conn): array {
     $dados = [];
-    $res = $conn->query("SELECT id, nome, cpf_cnpj FROM clientes WHERE COALESCE(deletado,0)=0 ORDER BY nome ASC");
+    $tenant = $conn->real_escape_string(sglReciboTenantId());
+    $escritorio = sglReciboEscritorioId();
+    $res = $conn->query("SELECT id, nome, cpf_cnpj FROM clientes WHERE tenant_id='{$tenant}' AND escritorio_id={$escritorio} AND COALESCE(deletado,0)=0 ORDER BY nome ASC");
     if ($res) while($r=$res->fetch_assoc()) $dados[]=$r;
     return $dados;
 }
 
 function urlValidacaoRecibo(array $rec): string {
-    $chave = (string)($rec['chave_validacao'] ?? '');
-    if (function_exists('getBaseUrl')) {
-        return rtrim(getBaseUrl(), '/') . '/validar_recibo.php?chave=' . urlencode($chave);
+    $chave = trim((string)($rec['chave_validacao'] ?? ''));
+
+    // Permite definir uma URL pública/LAN sem alterar o módulo novamente.
+    // Exemplos:
+    // define('ROJEX_PUBLIC_BASE_URL', 'https://seudominio.com.br');
+    // ou variável de ambiente ROJEX_PUBLIC_BASE_URL.
+    $baseConfigurada = '';
+    if (defined('ROJEX_PUBLIC_BASE_URL')) {
+        $baseConfigurada = trim((string)constant('ROJEX_PUBLIC_BASE_URL'));
     }
-    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['SERVER_PORT'] ?? '') === '443');
-    $scheme = $https ? 'https' : 'http';
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    $dir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
-    return $scheme . '://' . $host . ($dir && $dir !== '/' ? $dir : '') . '/validar_recibo.php?chave=' . urlencode($chave);
+    if ($baseConfigurada === '') {
+        $baseConfigurada = trim((string)(getenv('ROJEX_PUBLIC_BASE_URL') ?: ''));
+    }
+
+    if ($baseConfigurada !== '') {
+        return rtrim($baseConfigurada, '/') . '/validar_recibo.php?chave=' . urlencode($chave);
+    }
+
+    $base = function_exists('getBaseUrl') ? trim((string)getBaseUrl()) : '';
+
+    if ($base === '') {
+        $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+            || (($_SERVER['SERVER_PORT'] ?? '') === '443');
+        $scheme = $https ? 'https' : 'http';
+        $host = trim((string)($_SERVER['HTTP_HOST'] ?? 'localhost'));
+        $dir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '')), '/');
+        $base = $scheme . '://' . $host . ($dir && $dir !== '/' ? $dir : '');
+    }
+
+    // Em XAMPP, tenta trocar localhost pelo IP LAN do computador.
+    $hostAtual = (string)(parse_url($base, PHP_URL_HOST) ?? '');
+    if (in_array(strtolower($hostAtual), ['localhost', '127.0.0.1', '::1'], true)) {
+        $ipServidor = trim((string)($_SERVER['SERVER_ADDR'] ?? ''));
+        if ($ipServidor !== '' && !in_array($ipServidor, ['127.0.0.1', '::1', '0.0.0.0'], true)) {
+            $porta = (string)(parse_url($base, PHP_URL_PORT) ?? '');
+            $novoHost = $ipServidor . ($porta !== '' ? ':' . $porta : '');
+            $base = preg_replace(
+                '#^(https?://)(localhost|127\.0\.0\.1|\[?::1\]?)(:\d+)?#i',
+                '$1' . $novoHost,
+                $base
+            ) ?: $base;
+        }
+    }
+
+    return rtrim($base, '/') . '/validar_recibo.php?chave=' . urlencode($chave);
+}
+
+function reciboUrlEhLocalhost(string $url): bool {
+    $host = strtolower((string)(parse_url($url, PHP_URL_HOST) ?? ''));
+    return in_array($host, ['localhost', '127.0.0.1', '::1'], true);
 }
 function qrUrlRecibo(string $url): string {
     return 'https://api.qrserver.com/v1/create-qr-code/?size=110x110&margin=1&data=' . urlencode($url);
 }
 
 function getRecibo(mysqli $conn, string $id): ?array {
-    $stmt = $conn->prepare("SELECT * FROM recibos WHERE id=? LIMIT 1");
-    $stmt->bind_param('s', $id);
+    $tenant = sglReciboTenantId();
+    $escritorio = sglReciboEscritorioId();
+    $stmt = $conn->prepare("SELECT * FROM recibos WHERE tenant_id=? AND escritorio_id=? AND id=? LIMIT 1");
+    $stmt->bind_param('sis', $tenant, $escritorio, $id);
     $stmt->execute();
     $res = $stmt->get_result();
     return ($res && $res->num_rows) ? $res->fetch_assoc() : null;
@@ -132,8 +263,8 @@ if (isset($_GET['cancelar'])) {
         $msg = '<div class="alert alert-danger">Token de segurança inválido.</div>';
     } else {
         $id = (string)$_GET['cancelar'];
-        $stmt = $conn->prepare("UPDATE recibos SET status='Cancelado' WHERE id=?");
-        $stmt->bind_param('s', $id); $stmt->execute();
+        $stmt = $conn->prepare("UPDATE recibos SET status='Cancelado' WHERE tenant_id=? AND escritorio_id=? AND id=?");
+        $stmt->bind_param('sis', $tenantId, $escritorioId, $id); $stmt->execute();
         $msg = '<div class="alert alert-warning">Recibo cancelado com sucesso.</div>';
         if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Cancelou recibo', 'recibos', $id); }
     }
@@ -144,8 +275,8 @@ if (isset($_GET['excluir'])) {
         $msg = '<div class="alert alert-danger">Token de segurança inválido.</div>';
     } else {
         $id = (string)$_GET['excluir'];
-        $stmt = $conn->prepare("UPDATE recibos SET deletado=1 WHERE id=?");
-        $stmt->bind_param('s', $id); $stmt->execute();
+        $stmt = $conn->prepare("UPDATE recibos SET deletado=1 WHERE tenant_id=? AND escritorio_id=? AND id=?");
+        $stmt->bind_param('sis', $tenantId, $escritorioId, $id); $stmt->execute();
         $msg = '<div class="alert alert-warning">Recibo movido para a lixeira.</div>';
         if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Moveu recibo para lixeira', 'recibos', $id); }
     }
@@ -162,8 +293,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $nome_cliente = trim($_POST['nome_cliente'] ?? '');
         $cpf_cnpj = trim($_POST['cpf_cnpj'] ?? '');
         if ($cliente_id !== '') {
-            $stmt = $conn->prepare("SELECT nome, cpf_cnpj FROM clientes WHERE id=? LIMIT 1");
-            $stmt->bind_param('s', $cliente_id); $stmt->execute();
+            $stmt = $conn->prepare("SELECT nome, cpf_cnpj FROM clientes WHERE tenant_id=? AND escritorio_id=? AND id=? AND COALESCE(deletado,0)=0 LIMIT 1");
+            $stmt->bind_param('sis', $tenantId, $escritorioId, $cliente_id); $stmt->execute();
             $cli = $stmt->get_result()->fetch_assoc();
             if ($cli) { $nome_cliente = $cli['nome']; $cpf_cnpj = $cli['cpf_cnpj']; }
         }
@@ -177,7 +308,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $valor = brlParaFloatRec((string)($_POST['valor'] ?? '0'));
         $observacoes = trim($_POST['observacoes'] ?? '');
 
-        if ($nome_cliente === '' || $referente === '' || $valor <= 0) {
+        $vinculoInvalido = false;
+        if ($honorario_id !== '') {
+            $stmtHon = $conn->prepare("SELECT id FROM honorarios WHERE tenant_id=? AND escritorio_id=? AND id=? AND COALESCE(deletado,0)=0 LIMIT 1");
+            $stmtHon->bind_param('sis', $tenantId, $escritorioId, $honorario_id);
+            $stmtHon->execute();
+            $vinculoInvalido = !$stmtHon->get_result()->fetch_assoc();
+            $stmtHon->close();
+        }
+        if (!$vinculoInvalido && $parcela_id !== '') {
+            $stmtPar = $conn->prepare("SELECT id FROM honorarios_parcelas WHERE tenant_id=? AND escritorio_id=? AND id=? LIMIT 1");
+            $stmtPar->bind_param('sis', $tenantId, $escritorioId, $parcela_id);
+            $stmtPar->execute();
+            $vinculoInvalido = !$stmtPar->get_result()->fetch_assoc();
+            $stmtPar->close();
+        }
+
+        if ($vinculoInvalido) {
+            $msg = '<div class="alert alert-danger">Honorário ou parcela não pertencem a este escritório.</div>';
+            $acao = $id ? 'editar' : 'novo';
+            $_GET['id'] = $id;
+        } elseif ($nome_cliente === '' || $referente === '' || $valor <= 0) {
             $msg = '<div class="alert alert-danger">Informe cliente, referente e valor maior que zero.</div>';
             $acao = $id ? 'editar' : 'novo';
             $_GET['id'] = $id;
@@ -186,14 +337,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $id = gerarIdRecibo($conn);
                 $numero = gerarNumeroRecibo($conn);
                 $chave = hash('sha256', $numero . $nome_cliente . microtime(true));
-                $stmt = $conn->prepare("INSERT INTO recibos (id, numero, cliente_id, nome_cliente, cpf_cnpj, processo_numero, honorario_id, parcela_id, data_emissao, data_pagamento, referente, forma_pagamento, valor, observacoes, chave_validacao) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                $stmt->bind_param('ssssssssssssdss', $id, $numero, $cliente_id, $nome_cliente, $cpf_cnpj, $processo_numero, $honorario_id, $parcela_id, $data_emissao, $data_pagamento, $referente, $forma_pagamento, $valor, $observacoes, $chave);
+                $stmt = $conn->prepare("INSERT INTO recibos (id, tenant_id, escritorio_id, numero, cliente_id, nome_cliente, cpf_cnpj, processo_numero, honorario_id, parcela_id, data_emissao, data_pagamento, referente, forma_pagamento, valor, observacoes, chave_validacao) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt->bind_param('ssisssssssssssdss', $id, $tenantId, $escritorioId, $numero, $cliente_id, $nome_cliente, $cpf_cnpj, $processo_numero, $honorario_id, $parcela_id, $data_emissao, $data_pagamento, $referente, $forma_pagamento, $valor, $observacoes, $chave);
                 $stmt->execute();
                 $msg = '<div class="alert alert-success">Recibo emitido com sucesso.</div>';
                 if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Emitiu recibo', 'recibos', $id, $numero); }
             } else {
-                $stmt = $conn->prepare("UPDATE recibos SET cliente_id=?, nome_cliente=?, cpf_cnpj=?, processo_numero=?, honorario_id=?, parcela_id=?, data_emissao=?, data_pagamento=?, referente=?, forma_pagamento=?, valor=?, observacoes=? WHERE id=?");
-                $stmt->bind_param('ssssssssssdss', $cliente_id, $nome_cliente, $cpf_cnpj, $processo_numero, $honorario_id, $parcela_id, $data_emissao, $data_pagamento, $referente, $forma_pagamento, $valor, $observacoes, $id);
+                $stmt = $conn->prepare("UPDATE recibos SET cliente_id=?, nome_cliente=?, cpf_cnpj=?, processo_numero=?, honorario_id=?, parcela_id=?, data_emissao=?, data_pagamento=?, referente=?, forma_pagamento=?, valor=?, observacoes=? WHERE tenant_id=? AND escritorio_id=? AND id=?");
+                $stmt->bind_param('ssssssssssdssis', $cliente_id, $nome_cliente, $cpf_cnpj, $processo_numero, $honorario_id, $parcela_id, $data_emissao, $data_pagamento, $referente, $forma_pagamento, $valor, $observacoes, $tenantId, $escritorioId, $id);
                 $stmt->execute();
                 $msg = '<div class="alert alert-success">Recibo atualizado com sucesso.</div>';
                 if (function_exists('sgl_registrar_log')) { sgl_registrar_log($conn, 'Atualizou recibo', 'recibos', $id); }
@@ -209,16 +360,51 @@ if ($acao === 'imprimir'):
     if (!$rec) { echo '<div class="alert alert-danger">Recibo não encontrado.</div>'; return; }
     $urlValidacao = urlValidacaoRecibo($rec);
     $qrValidacao = qrUrlRecibo($urlValidacao);
+    $urlValidacaoLocal = reciboUrlEhLocalhost($urlValidacao);
 ?>
 <style>
 /* RECIBO EM A5 REAL (14,8cm x 21cm) - layout compacto para impressão/PDF */
-@page { size: A5 portrait; margin: 8mm; }
+@page { size: A5 portrait; margin: 6mm; }
 @media print {
-    .sidebar, .btn, .no-print, nav, header, .navbar { display:none!important; }
-    html, body { margin:0!important; padding:0!important; background:#fff!important; }
-    main, .content, .container-fluid { margin:0!important; padding:0!important; width:auto!important; background:#fff!important; }
-    .recibo-a5-page { width:132mm!important; min-height:auto!important; margin:0 auto!important; padding:0!important; box-shadow:none!important; border:none!important; }
-    .recibo-print { width:132mm!important; max-width:132mm!important; min-height:auto!important; margin:0!important; padding:0!important; border:none!important; box-shadow:none!important; }
+    /* Esconde toda a interface do ERP, inclusive painéis que ocupavam espaço invisível. */
+    body * { visibility: hidden !important; }
+    .recibo-a5-page, .recibo-a5-page * { visibility: visible !important; }
+
+    html, body {
+        width: 148mm !important;
+        height: 210mm !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        background: #fff !important;
+        overflow: visible !important;
+    }
+
+    .recibo-a5-page {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        width: 136mm !important;
+        max-width: 136mm !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        transform: none !important;
+    }
+
+    .recibo-print {
+        width: 136mm !important;
+        max-width: 136mm !important;
+        min-height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        border: 0 !important;
+        box-shadow: none !important;
+    }
+
+    .no-print, .btn, nav, header, .navbar, .sidebar,
+    form, .card:not(.recibo-a5-page), .alert { display: none !important; }
 }
 .recibo-a5-page{width:148mm;max-width:148mm;margin:0 auto;background:#fff;padding:8mm;box-sizing:border-box;border:1px solid #e5e7eb;}
 .recibo-print{width:132mm;max-width:132mm;margin:0 auto;background:#fff;color:#111;font-family:Arial, Helvetica, sans-serif;font-size:10.8pt;line-height:1.28;box-sizing:border-box;}
@@ -240,6 +426,12 @@ if ($acao === 'imprimir'):
     <h3 class="fw-bold"><i class="bi bi-receipt"></i> Recibo <?= hRec($rec['numero']) ?></h3>
     <div><button onclick="window.print()" class="btn btn-primary"><i class="bi bi-printer"></i> Imprimir em A5 (14,8 × 21 cm)</button> <a href="?mod=recibos" class="btn btn-outline-secondary">Voltar</a></div>
 </div>
+<?php if ($urlValidacaoLocal): ?>
+<div class="alert alert-warning no-print py-2">
+    <strong>QR Code em ambiente local:</strong> o endereço ainda usa <code>localhost</code> e somente abre neste computador.
+    Para testar pelo celular, defina <code>ROJEX_PUBLIC_BASE_URL</code> com o IP local do computador ou use a URL da Hostinger.
+</div>
+<?php endif; ?>
 <div class="recibo-a5-page shadow-sm">
     <div class="recibo-print">
         <div class="recibo-header">
@@ -308,15 +500,16 @@ if (in_array($acao, ['novo','editar'], true)) {
 <?php return; } ?>
 <?php
 $q = trim($_GET['q'] ?? ''); $status = trim($_GET['status'] ?? '');
-$where = "deletado=0"; $params=[]; $types='';
+$where = "tenant_id=? AND escritorio_id=? AND deletado=0"; $params=[$tenantId,$escritorioId]; $types='si';
 if ($q !== '') { $like='%'.$q.'%'; $where .= " AND (numero LIKE ? OR nome_cliente LIKE ? OR cpf_cnpj LIKE ? OR processo_numero LIKE ? OR referente LIKE ?)"; $params=array_merge($params,[$like,$like,$like,$like,$like]); $types.='sssss'; }
 if ($status !== '') { $where .= " AND status=?"; $params[]=$status; $types.='s'; }
 $stmt = $conn->prepare("SELECT * FROM recibos WHERE $where ORDER BY data_emissao DESC, numero DESC");
 if ($params) $stmt->bind_param($types, ...$params);
 $stmt->execute(); $lista=$stmt->get_result();
-$totEmitidos = $conn->query("SELECT COUNT(*) c FROM recibos WHERE deletado=0 AND status='Emitido'")->fetch_assoc()['c'] ?? 0;
-$valorMes = $conn->query("SELECT COALESCE(SUM(valor),0) v FROM recibos WHERE deletado=0 AND status='Emitido' AND MONTH(data_emissao)=MONTH(CURDATE()) AND YEAR(data_emissao)=YEAR(CURDATE())")->fetch_assoc()['v'] ?? 0;
-$cancelados = $conn->query("SELECT COUNT(*) c FROM recibos WHERE deletado=0 AND status='Cancelado'")->fetch_assoc()['c'] ?? 0;
+$tenantSqlRec = $conn->real_escape_string($tenantId);
+$totEmitidos = $conn->query("SELECT COUNT(*) c FROM recibos WHERE tenant_id='{$tenantSqlRec}' AND escritorio_id={$escritorioId} AND deletado=0 AND status='Emitido'")->fetch_assoc()['c'] ?? 0;
+$valorMes = $conn->query("SELECT COALESCE(SUM(valor),0) v FROM recibos WHERE tenant_id='{$tenantSqlRec}' AND escritorio_id={$escritorioId} AND deletado=0 AND status='Emitido' AND MONTH(data_emissao)=MONTH(CURDATE()) AND YEAR(data_emissao)=YEAR(CURDATE())")->fetch_assoc()['v'] ?? 0;
+$cancelados = $conn->query("SELECT COUNT(*) c FROM recibos WHERE tenant_id='{$tenantSqlRec}' AND escritorio_id={$escritorioId} AND deletado=0 AND status='Cancelado'")->fetch_assoc()['c'] ?? 0;
 ?>
 <div class="d-flex justify-content-between align-items-start mb-4">
     <div><h2 class="fw-bold text-primary"><i class="bi bi-receipt"></i> Recibos</h2><p class="text-muted mb-0">Geração, controle, impressão e histórico de recibos do escritório.</p></div>

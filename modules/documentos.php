@@ -7,6 +7,24 @@
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
 
+if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
+    $conn->close();
+    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Documentos.');
+}
+
+$tenantId = function_exists('rojexTenantId')
+    ? trim((string)rojexTenantId())
+    : trim((string)($_SESSION['tenant_id'] ?? ''));
+
+$escritorioId = function_exists('rojexEscritorioId')
+    ? (int)rojexEscritorioId()
+    : (int)($_SESSION['escritorio_id'] ?? 0);
+
+if ($tenantId === '' || $escritorioId <= 0) {
+    $conn->close();
+    throw new RuntimeException('Tenant ou escritório não identificado para o módulo Documentos.');
+}
+
 if (session_status() !== PHP_SESSION_ACTIVE) {
     session_start();
 }
@@ -22,9 +40,31 @@ function sgl_doc_coluna_existe(mysqli $conn, string $tabela, string $coluna): bo
     return $res && $res->num_rows > 0;
 }
 
+function sgl_doc_adicionar_coluna(mysqli $conn, string $tabela, string $coluna, string $definicao): void {
+    if (!sgl_doc_coluna_existe($conn, $tabela, $coluna)) {
+        if (!$conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}")) {
+            throw new RuntimeException("Não foi possível adicionar {$tabela}.{$coluna}: " . $conn->error);
+        }
+    }
+}
+
+function sgl_doc_tenant_id(): string {
+    return function_exists('rojexTenantId')
+        ? trim((string)rojexTenantId())
+        : trim((string)($_SESSION['tenant_id'] ?? ''));
+}
+
+function sgl_doc_escritorio_id(): int {
+    return function_exists('rojexEscritorioId')
+        ? (int)rojexEscritorioId()
+        : (int)($_SESSION['escritorio_id'] ?? 0);
+}
+
 function sgl_doc_garantir_tabela(mysqli $conn): void {
     $conn->query("CREATE TABLE IF NOT EXISTS documentos_arquivos (
         id INT AUTO_INCREMENT PRIMARY KEY,
+        tenant_id VARCHAR(80) NULL,
+        escritorio_id INT NULL,
         codigo VARCHAR(20) NOT NULL UNIQUE,
         titulo VARCHAR(180) NOT NULL,
         categoria VARCHAR(80) NOT NULL DEFAULT 'Documento geral',
@@ -45,11 +85,63 @@ function sgl_doc_garantir_tabela(mysqli $conn): void {
         deletado TINYINT(1) NOT NULL DEFAULT 0,
         criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_doc_tenant (tenant_id, escritorio_id),
         INDEX idx_doc_cliente (cliente_id),
         INDEX idx_doc_processo (processo_id),
         INDEX idx_doc_categoria (categoria),
         INDEX idx_doc_deletado (deletado)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+    sgl_doc_adicionar_coluna($conn, 'documentos_arquivos', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+    sgl_doc_adicionar_coluna($conn, 'documentos_arquivos', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
+
+    // Migra somente registros legados ainda sem contexto para o tenant legado configurado.
+    $tenantLegado = '';
+    $escritorioLegado = 0;
+
+    $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave = 'tenant_id' LIMIT 1");
+    if ($stmtCfg) {
+        $stmtCfg->execute();
+        $rowCfg = $stmtCfg->get_result()->fetch_assoc();
+        $stmtCfg->close();
+        $tenantLegado = trim((string)($rowCfg['valor'] ?? ''));
+    }
+
+    if ($tenantLegado !== '') {
+        $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
+        if ($stmtEsc) {
+            $stmtEsc->bind_param('s', $tenantLegado);
+            $stmtEsc->execute();
+            $rowEsc = $stmtEsc->get_result()->fetch_assoc();
+            $stmtEsc->close();
+            $escritorioLegado = (int)($rowEsc['id'] ?? 0);
+        }
+    }
+
+    if ($tenantLegado !== '' && $escritorioLegado > 0) {
+        $stmtBackfill = $conn->prepare(
+            "UPDATE documentos_arquivos
+             SET tenant_id = ?, escritorio_id = ?
+             WHERE tenant_id IS NULL OR tenant_id = ''
+                OR escritorio_id IS NULL OR escritorio_id = 0"
+        );
+        if ($stmtBackfill) {
+            $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
+            $stmtBackfill->execute();
+            $stmtBackfill->close();
+        }
+    }
+
+    $indices = [];
+    $resIdx = $conn->query("SHOW INDEX FROM documentos_arquivos");
+    if ($resIdx) {
+        while ($idx = $resIdx->fetch_assoc()) {
+            $indices[(string)$idx['Key_name']] = true;
+        }
+    }
+    if (!isset($indices['idx_doc_tenant'])) {
+        $conn->query("ALTER TABLE documentos_arquivos ADD INDEX idx_doc_tenant (tenant_id, escritorio_id)");
+    }
 }
 
 function sgl_doc_novo_codigo(mysqli $conn): string {
@@ -83,12 +175,18 @@ function sgl_doc_categoria_lista(): array {
 
 
 function sgl_doc_buscar_auditoria(mysqli $conn, int $id): ?array {
-    $stmt = $conn->prepare("SELECT * FROM documentos_arquivos WHERE id = ? LIMIT 1");
+    $stmt = $conn->prepare(
+        "SELECT * FROM documentos_arquivos
+         WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
+         LIMIT 1"
+    );
     if (!$stmt) {
         return null;
     }
 
-    $stmt->bind_param('i', $id);
+    $tenant = sgl_doc_tenant_id();
+    $escritorio = sgl_doc_escritorio_id();
+    $stmt->bind_param('sii', $tenant, $escritorio, $id);
     $stmt->execute();
     $res = $stmt->get_result();
     $doc = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
@@ -142,8 +240,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $id = (int)($_POST['id'] ?? 0);
             $dadosAnteriores = $id > 0 ? sgl_doc_buscar_auditoria($conn, $id) : null;
 
-            $stmt = $conn->prepare("UPDATE documentos_arquivos SET deletado = 1, status = 'Excluído' WHERE id = ? AND deletado = 0");
-            $stmt->bind_param('i', $id);
+            $stmt = $conn->prepare(
+                "UPDATE documentos_arquivos
+                 SET deletado = 1, status = 'Excluído'
+                 WHERE tenant_id = ? AND escritorio_id = ? AND id = ? AND deletado = 0"
+            );
+            $stmt->bind_param('sii', $tenantId, $escritorioId, $id);
             $ok = $stmt->execute();
             $afetadas = $stmt->affected_rows;
             $stmt->close();
@@ -261,7 +363,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     } else {
                         $finfo = new finfo(FILEINFO_MIME_TYPE);
                         $mime = $finfo->file($file['tmp_name']) ?: 'application/octet-stream';
-                        $dirRel = 'uploads/documentos/' . date('Y') . '/' . date('m');
+                        $tenantPasta = substr(hash('sha256', $tenantId . '|' . $escritorioId), 0, 24);
+                        $dirRel = 'uploads/documentos/' . $tenantPasta . '/' . date('Y') . '/' . date('m');
                         $dirAbs = __DIR__ . '/../' . $dirRel;
                         if (!is_dir($dirAbs)) mkdir($dirAbs, 0775, true);
                         $safeName = bin2hex(random_bytes(16)) . '.' . $ext;
@@ -290,20 +393,101 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $codigo = sgl_doc_novo_codigo($conn);
                             $hash = hash_file('sha256', $destAbs);
                             $numero_processo = null;
-                            if ($processo_id !== '') {
-                                $stmtP = $conn->prepare("SELECT numero_processo FROM processos WHERE id = ? LIMIT 1");
-                                $stmtP->bind_param('s', $processo_id);
-                                $stmtP->execute();
-                                $numero_processo = ($stmtP->get_result()->fetch_assoc()['numero_processo'] ?? null);
-                                $stmtP->close();
+
+                            if ($cliente_id !== '') {
+                                $stmtCli = $conn->prepare(
+                                    "SELECT id FROM clientes
+                                     WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
+                                       AND COALESCE(deletado,0) = 0
+                                     LIMIT 1"
+                                );
+                                $stmtCli->bind_param('sis', $tenantId, $escritorioId, $cliente_id);
+                                $stmtCli->execute();
+                                $clienteValido = $stmtCli->get_result()->fetch_assoc();
+                                $stmtCli->close();
+
+                                if (!$clienteValido) {
+                                    @unlink($destAbs);
+                                    $erro = 'O cliente selecionado não pertence a este escritório.';
+                                }
                             }
+
+                            if (!$erro && $processo_id !== '') {
+                                $stmtP = $conn->prepare(
+                                    "SELECT numero_processo, cliente_id
+                                     FROM processos
+                                     WHERE tenant_id = ? AND escritorio_id = ? AND id = ?
+                                     LIMIT 1"
+                                );
+                                $stmtP->bind_param('sis', $tenantId, $escritorioId, $processo_id);
+                                $stmtP->execute();
+                                $processoValido = $stmtP->get_result()->fetch_assoc();
+                                $stmtP->close();
+
+                                if (!$processoValido) {
+                                    @unlink($destAbs);
+                                    $erro = 'O processo selecionado não pertence a este escritório.';
+                                } else {
+                                    $numero_processo = $processoValido['numero_processo'] ?? null;
+                                    $clienteDoProcesso = trim((string)($processoValido['cliente_id'] ?? ''));
+                                    if ($cliente_id !== '' && $clienteDoProcesso !== '' && $clienteDoProcesso !== $cliente_id) {
+                                        @unlink($destAbs);
+                                        $erro = 'O processo selecionado não pertence ao cliente informado.';
+                                    }
+                                }
+                            }
+
+                            if ($erro) {
+                                sgl_doc_registrar_log(
+                                    $conn,
+                                    'Falha no upload de documento',
+                                    null,
+                                    $erro,
+                                    [
+                                        'tipo_acao' => 'INCLUSAO',
+                                        'origem' => 'Upload de documentos',
+                                        'resultado' => 'NEGADO',
+                                        'nivel' => 'AVISO',
+                                        'dados_novos' => [
+                                            'cliente_id' => $cliente_id ?: null,
+                                            'processo_id' => $processo_id ?: null,
+                                        ],
+                                    ]
+                                );
+                            } else {
                             $uid = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
                             $unome = $_SESSION['nome'] ?? $_SESSION['username'] ?? 'Usuário';
                             $cliente_id_db = $cliente_id !== '' ? $cliente_id : null;
                             $processo_id_db = $processo_id !== '' ? $processo_id : null;
-                            $stmt = $conn->prepare("INSERT INTO documentos_arquivos (codigo,titulo,categoria,cliente_id,processo_id,numero_processo,descricao,nome_original,nome_arquivo,caminho,extensao,mime_type,tamanho_bytes,hash_arquivo,usuario_id,usuario_nome) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                            $stmt = $conn->prepare(
+                                "INSERT INTO documentos_arquivos
+                                 (tenant_id, escritorio_id, codigo, titulo, categoria, cliente_id, processo_id,
+                                  numero_processo, descricao, nome_original, nome_arquivo, caminho, extensao,
+                                  mime_type, tamanho_bytes, hash_arquivo, usuario_id, usuario_nome)
+                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+                            );
                             $tamanho = (int)$file['size'];
-                            $stmt->bind_param('ssssssssssssisis', $codigo,$titulo,$categoria,$cliente_id_db,$processo_id_db,$numero_processo,$descricao,$original,$safeName,$destRel,$ext,$mime,$tamanho,$hash,$uid,$unome);
+                            $stmt->bind_param(
+                                'sissssssssssssisis',
+                                $tenantId,
+                                $escritorioId,
+                                $codigo,
+                                $titulo,
+                                $categoria,
+                                $cliente_id_db,
+                                $processo_id_db,
+                                $numero_processo,
+                                $descricao,
+                                $original,
+                                $safeName,
+                                $destRel,
+                                $ext,
+                                $mime,
+                                $tamanho,
+                                $hash,
+                                $uid,
+                                $unome
+                            );
                             $okInsert = $stmt->execute();
                             $novoId = $stmt->insert_id;
                             $stmt->close();
@@ -349,6 +533,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 );
                                 $erro = 'Não foi possível registrar o documento no banco de dados.';
                             }
+                            }
                         }
                     }
                 }
@@ -358,36 +543,76 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $clientes = [];
-$res = $conn->query("SELECT id, nome FROM clientes WHERE COALESCE(deletado,0)=0 ORDER BY nome LIMIT 500");
+$stmtCliLista = $conn->prepare(
+    "SELECT id, nome FROM clientes
+     WHERE tenant_id = ? AND escritorio_id = ? AND COALESCE(deletado,0)=0
+     ORDER BY nome LIMIT 500"
+);
+$stmtCliLista->bind_param('si', $tenantId, $escritorioId);
+$stmtCliLista->execute();
+$res = $stmtCliLista->get_result();
 while ($r = $res->fetch_assoc()) $clientes[] = $r;
+$stmtCliLista->close();
 
 $processos = [];
-$sqlProc = "SELECT p.id, p.numero_processo, p.cliente_id, COALESCE(c.nome,'') AS cliente_nome FROM processos p LEFT JOIN clientes c ON c.id = p.cliente_id ORDER BY p.numero_processo LIMIT 500";
-$res = $conn->query($sqlProc);
+$sqlProc = "SELECT p.id, p.numero_processo, p.cliente_id, COALESCE(c.nome,'') AS cliente_nome
+            FROM processos p
+            LEFT JOIN clientes c
+              ON c.id = p.cliente_id
+             AND c.tenant_id = p.tenant_id
+             AND c.escritorio_id = p.escritorio_id
+            WHERE p.tenant_id = ? AND p.escritorio_id = ?
+            ORDER BY p.numero_processo LIMIT 500";
+$stmtProcLista = $conn->prepare($sqlProc);
+$stmtProcLista->bind_param('si', $tenantId, $escritorioId);
+$stmtProcLista->execute();
+$res = $stmtProcLista->get_result();
 while ($r = $res->fetch_assoc()) $processos[] = $r;
+$stmtProcLista->close();
 
 $q = trim($_GET['q'] ?? '');
 $fcat = trim($_GET['categoria'] ?? '');
 $fcli = trim($_GET['cliente_id'] ?? '');
 $fproc = trim($_GET['processo_id'] ?? '');
-$where = ['d.deletado = 0'];
-$params = [];
-$types = '';
+$where = ['d.tenant_id = ?', 'd.escritorio_id = ?', 'd.deletado = 0'];
+$params = [$tenantId, $escritorioId];
+$types = 'si';
 if ($q !== '') { $like = '%' . $q . '%'; $where[] = '(d.codigo LIKE ? OR d.titulo LIKE ? OR d.nome_original LIKE ? OR d.descricao LIKE ? OR d.numero_processo LIKE ?)'; array_push($params,$like,$like,$like,$like,$like); $types .= 'sssss'; }
 if ($fcat !== '') { $where[] = 'd.categoria = ?'; $params[]=$fcat; $types.='s'; }
 if ($fcli !== '') { $where[] = 'd.cliente_id = ?'; $params[]=$fcli; $types.='s'; }
 if ($fproc !== '') { $where[] = 'd.processo_id = ?'; $params[]=$fproc; $types.='s'; }
-$sql = "SELECT d.*, COALESCE(c.nome,'-') AS cliente_nome FROM documentos_arquivos d LEFT JOIN clientes c ON c.id = d.cliente_id WHERE " . implode(' AND ', $where) . " ORDER BY d.criado_em DESC LIMIT 200";
+$sql = "SELECT d.*, COALESCE(c.nome,'-') AS cliente_nome
+        FROM documentos_arquivos d
+        LEFT JOIN clientes c
+          ON c.id = d.cliente_id
+         AND c.tenant_id = d.tenant_id
+         AND c.escritorio_id = d.escritorio_id
+        WHERE " . implode(' AND ', $where) . "
+        ORDER BY d.criado_em DESC LIMIT 200";
 $stmt = $conn->prepare($sql);
 if ($params) $stmt->bind_param($types, ...$params);
 $stmt->execute();
 $documentos = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();
 
-$totalDocs = (int)($conn->query("SELECT COUNT(*) total FROM documentos_arquivos WHERE deletado=0")->fetch_assoc()['total'] ?? 0);
-$totalMes = (int)($conn->query("SELECT COUNT(*) total FROM documentos_arquivos WHERE deletado=0 AND YEAR(criado_em)=YEAR(CURDATE()) AND MONTH(criado_em)=MONTH(CURDATE())")->fetch_assoc()['total'] ?? 0);
-$totalProvas = (int)($conn->query("SELECT COUNT(*) total FROM documentos_arquivos WHERE deletado=0 AND categoria='Prova'")->fetch_assoc()['total'] ?? 0);
-$armazenamento = (int)($conn->query("SELECT COALESCE(SUM(tamanho_bytes),0) total FROM documentos_arquivos WHERE deletado=0")->fetch_assoc()['total'] ?? 0);
+$stmtStats = $conn->prepare(
+    "SELECT
+        COUNT(*) AS total_docs,
+        COALESCE(SUM(CASE WHEN YEAR(criado_em)=YEAR(CURDATE()) AND MONTH(criado_em)=MONTH(CURDATE()) THEN 1 ELSE 0 END),0) AS total_mes,
+        COALESCE(SUM(CASE WHEN categoria='Prova' THEN 1 ELSE 0 END),0) AS total_provas,
+        COALESCE(SUM(tamanho_bytes),0) AS armazenamento
+     FROM documentos_arquivos
+     WHERE tenant_id = ? AND escritorio_id = ? AND deletado = 0"
+);
+$stmtStats->bind_param('si', $tenantId, $escritorioId);
+$stmtStats->execute();
+$rowStats = $stmtStats->get_result()->fetch_assoc() ?: [];
+$stmtStats->close();
+
+$totalDocs = (int)($rowStats['total_docs'] ?? 0);
+$totalMes = (int)($rowStats['total_mes'] ?? 0);
+$totalProvas = (int)($rowStats['total_provas'] ?? 0);
+$armazenamento = (int)($rowStats['armazenamento'] ?? 0);
 ?>
 
 <div class="d-flex justify-content-between align-items-start mb-4">

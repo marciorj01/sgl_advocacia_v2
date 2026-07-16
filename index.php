@@ -46,66 +46,30 @@ if (!function_exists('rojexEhAdministrador')) {
 if (!function_exists('rojexEhMasterSaas')) {
     function rojexEhMasterSaas(): bool
     {
-        static $resultado = null;
-
-        if (is_bool($resultado)) {
-            return $resultado;
+        if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
+            return true;
         }
 
-        $usuarioId = (int)($_SESSION['user_id'] ?? 0);
-        $perfil = rojexPerfilAtual();
-
-        if ($usuarioId <= 0) {
-            return $resultado = false;
-        }
-
-        if ($perfil === 'Administrador Master') {
-            return $resultado = true;
-        }
-
-        try {
-            $connMaster = conectar();
-
-            $stmt = $connMaster->prepare(
-                "SELECT valor
-                   FROM configuracoes
-                  WHERE chave = 'usuario_master_id'
-                  LIMIT 1"
-            );
-
-            if (!$stmt) {
-                $connMaster->close();
-                return $resultado = false;
-            }
-
-            $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
-            $stmt->close();
-            $connMaster->close();
-
-            return $resultado = ((int)($row['valor'] ?? 0) === $usuarioId);
-        } catch (Throwable $e) {
-            error_log('[ROJEX MASTER SAAS][INDEX] ' . $e->getMessage());
-            return $resultado = false;
-        }
+        return rojexPerfilAtual() === 'Administrador Master';
     }
 }
 
 if (!function_exists('rojexPodeAcessarModulo')) {
     function rojexPodeAcessarModulo(string $modulo): bool
     {
-        /*
-         * Configurações continua acessível a todos os usuários autenticados.
-         * O próprio módulo mantém abas e ações administrativas protegidas.
-         *
-         * MASTER SaaS possui uma segunda barreira no roteador e outra
-         * dentro de modules/master_saas.php.
-         */
+        $modulosPlataforma = ['master_saas', 'configuracoes'];
+
+        if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
+            return rojexEhMasterSaas() && in_array($modulo, $modulosPlataforma, true);
+        }
+
         if ($modulo === 'master_saas') {
             return rojexEhMasterSaas();
         }
 
-        return true;
+        return function_exists('rojexContextoTenantValido')
+            ? rojexContextoTenantValido()
+            : !empty($_SESSION['tenant_id']);
     }
 }
 
@@ -162,21 +126,48 @@ $modulos_validos = [
     'cij',
 ];
 
+$moduloPadrao = (function_exists('rojexModoPlataforma') && rojexModoPlataforma())
+    ? 'master_saas'
+    : 'dashboard';
+
 $moduloInformado = isset($_GET['mod'])
     ? trim((string)$_GET['mod'])
-    : 'dashboard';
+    : $moduloPadrao;
+
+/*
+ * Compatibilidade com links e favoritos anteriores à Camada Multi-Tenant.
+ * No Modo Plataforma, o antigo destino dashboard representa o Dashboard SaaS.
+ * A normalização é silenciosa para não gerar aviso indevido ao MASTER.
+ */
+if (
+    function_exists('rojexModoPlataforma')
+    && rojexModoPlataforma()
+    && $moduloInformado === 'dashboard'
+) {
+    $moduloInformado = 'master_saas';
+    unset($_SESSION['rojex_aviso_autorizacao']);
+}
 
 if (!in_array($moduloInformado, $modulos_validos, true)) {
     if ($moduloInformado !== '') {
         rojexRegistrarAcessoModuloNegado($moduloInformado);
     }
 
-    $modulo = 'dashboard';
+    $modulo = $moduloPadrao;
 } elseif (!rojexPodeAcessarModulo($moduloInformado)) {
     rojexRegistrarAcessoModuloNegado($moduloInformado);
-    $modulo = 'dashboard';
-    $_SESSION['rojex_aviso_autorizacao'] =
-        'Você não possui permissão para acessar o módulo solicitado.';
+    $modulo = $moduloPadrao;
+
+    /*
+     * O MASTER em Modo Plataforma pode chegar por URLs antigas de módulos
+     * operacionais. Nesse caso, retorna silenciosamente ao Dashboard SaaS.
+     */
+    if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
+        unset($_SESSION['rojex_aviso_autorizacao']);
+    } else {
+        $_SESSION['rojex_aviso_autorizacao'] =
+            'Você não possui permissão para acessar o módulo solicitado.';
+    }
 } else {
     $modulo = $moduloInformado;
 }
@@ -198,6 +189,17 @@ $titulos = [
     'cij' => 'Centro de Inteligência Jurídica',
 ];
 $tituloPagina = $titulos[$modulo] ?? 'SGL';
+$modoPlataforma = function_exists('rojexModoPlataforma') && rojexModoPlataforma();
+$contextoTenantValido = function_exists('rojexContextoTenantValido')
+    ? rojexContextoTenantValido()
+    : !empty($_SESSION['tenant_id']);
+$contextoTenant = function_exists('rojexContextoTenant')
+    ? rojexContextoTenant()
+    : [];
+$nomeContexto = $modoPlataforma
+    ? 'ROJEX.AI Plataforma SaaS'
+    : trim((string)($contextoTenant['escritorio_nome'] ?? $contextoTenant['nome_escritorio'] ?? $nome_escritorio ?? 'Escritório'));
+
 
 function sgl_menu_active(string $atual, array $itens): string {
     return in_array($atual, $itens, true) ? 'show' : '';
@@ -229,6 +231,7 @@ function sgl_table_columns(mysqli $conn, string $tabela): array {
 }
 
 function sgl_busca_global(mysqli $conn, string $termo): array {
+    if (function_exists('rojexContextoTenantValido') && !rojexContextoTenantValido()) { return []; }
     $termo = mb_substr(trim($termo), 0, 160, 'UTF-8');
     if ($termo === '') { return []; }
 
@@ -499,62 +502,74 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
 <div class="d-flex sgl-layout">
     <nav class="sgl-sidebar text-white">
         <div class="sgl-logo-wrap">
-            <img src="<?= htmlspecialchars($logo_src ?? 'assets/img/logo_custom.png') ?>?v=<?= time() ?>" alt="<?= htmlspecialchars($nome_escritorio ?? 'SGL Advocacia') ?>">
+            <img src="<?= htmlspecialchars($logo_src ?? 'assets/img/logo_custom.png') ?>?v=<?= time() ?>" alt="<?= htmlspecialchars($nomeContexto, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
         </div>
         <div class="sgl-user-box">
-            <div class="brand mb-1"><?= htmlspecialchars($nome_escritorio ?? 'SGL Advocacia') ?></div>
+            <div class="brand mb-1"><?= htmlspecialchars($nomeContexto, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
             <div class="hello">Olá, <strong><?= htmlspecialchars($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Usuário') ?></strong></div>
             <div class="role"><?= htmlspecialchars($_SESSION['perfil'] ?? 'Usuário') ?></div>
             <div class="online"><i class="bi bi-circle-fill" style="font-size:.42rem"></i> Online</div>
         </div>
 
         <div class="sgl-menu">
-            <a href="?mod=dashboard" class="nav-link <?= sgl_link_active($modulo, 'dashboard') ?>"><i class="bi bi-speedometer2"></i> Dashboard</a>
-            <a href="?mod=busca" class="nav-link <?= sgl_link_active($modulo, 'busca') ?>"><i class="bi bi-search"></i> Busca Global</a>
-            <a href="?mod=cij" class="nav-link <?= sgl_link_active($modulo, 'cij') ?>"><i class="bi bi-cpu"></i> Centro de Inteligência Jurídica</a>
-
-            <div class="sgl-menu-title">Cadastros</div>
-            <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuCadastros" aria-expanded="<?= sgl_menu_active($modulo, ['advogados','clientes']) ? 'true' : 'false' ?>">
-                <i class="bi bi-people"></i> Cadastros <i class="bi bi-chevron-down chev"></i>
-            </button>
-            <div class="collapse <?= sgl_menu_active($modulo, ['advogados','clientes']) ?>" id="menuCadastros">
-                <div class="sgl-submenu">
-                    <a href="?mod=advogados" class="nav-link <?= sgl_link_active($modulo, 'advogados') ?>"><i class="bi bi-person-badge"></i> Advogados</a>
-                    <a href="?mod=clientes" class="nav-link <?= sgl_link_active($modulo, 'clientes') ?>"><i class="bi bi-person-lines-fill"></i> Clientes</a>
-                </div>
-            </div>
-
-            <div class="sgl-menu-title">Jurídico</div>
-            <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuJuridico" aria-expanded="<?= sgl_menu_active($modulo, ['processos','agenda','documentos','modelos']) ? 'true' : 'false' ?>">
-                <i class="bi bi-briefcase"></i> Jurídico <i class="bi bi-chevron-down chev"></i>
-            </button>
-            <div class="collapse <?= sgl_menu_active($modulo, ['processos','agenda','documentos','modelos']) ?>" id="menuJuridico">
-                <div class="sgl-submenu">
-                    <a href="?mod=processos" class="nav-link <?= sgl_link_active($modulo, 'processos') ?>"><i class="bi bi-folder2-open"></i> Processos</a>
-                    <a href="?mod=agenda" class="nav-link <?= sgl_link_active($modulo, 'agenda') ?>"><i class="bi bi-calendar-event"></i> Agenda</a>
-                    <a href="?mod=documentos" class="nav-link <?= sgl_link_active($modulo, 'documentos') ?>"><i class="bi bi-file-earmark-arrow-up"></i> Documentos</a>
-                    <a href="?mod=modelos" class="nav-link <?= sgl_link_active($modulo, 'modelos') ?>"><i class="bi bi-journal-text"></i> Modelos</a>
-                </div>
-            </div>
-
-            <div class="sgl-menu-title">Financeiro</div>
-            <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuFinanceiro" aria-expanded="<?= sgl_menu_active($modulo, ['honorarios','financeiro','recibos']) ? 'true' : 'false' ?>">
-                <i class="bi bi-cash-coin"></i> Financeiro <i class="bi bi-chevron-down chev"></i>
-            </button>
-            <div class="collapse <?= sgl_menu_active($modulo, ['honorarios','financeiro','recibos']) ?>" id="menuFinanceiro">
-                <div class="sgl-submenu">
-                    <a href="?mod=honorarios" class="nav-link <?= sgl_link_active($modulo, 'honorarios') ?>"><i class="bi bi-cash-stack"></i> Honorários</a>
-                    <a href="?mod=financeiro" class="nav-link <?= sgl_link_active($modulo, 'financeiro') ?>"><i class="bi bi-bar-chart"></i> Financeiro</a>
-                    <a href="?mod=recibos" class="nav-link <?= sgl_link_active($modulo, 'recibos') ?>"><i class="bi bi-receipt"></i> Recibos</a>
-                </div>
-            </div>
-
-            <div class="sgl-menu-title">Administração</div>
-            <a href="?mod=configuracoes" class="nav-link <?= sgl_link_active($modulo, 'configuracoes') ?>"><i class="bi bi-gear"></i> Configurações</a>
-            <?php if (rojexEhMasterSaas()): ?>
+            <?php if ($modoPlataforma): ?>
+                <div class="sgl-menu-title">Plataforma SaaS</div>
                 <a href="?mod=master_saas" class="nav-link <?= sgl_link_active($modulo, 'master_saas') ?>">
-                    <i class="bi bi-shield-check"></i> MASTER SaaS
+                    <i class="bi bi-shield-check"></i> Dashboard SaaS
                 </a>
+
+                <div class="sgl-menu-title">Administração Enterprise</div>
+                <a href="?mod=configuracoes" class="nav-link <?= sgl_link_active($modulo, 'configuracoes') ?>">
+                    <i class="bi bi-gear"></i> Configurações Enterprise
+                </a>
+            <?php else: ?>
+                <a href="?mod=dashboard" class="nav-link <?= sgl_link_active($modulo, 'dashboard') ?>"><i class="bi bi-speedometer2"></i> Dashboard</a>
+                <a href="?mod=busca" class="nav-link <?= sgl_link_active($modulo, 'busca') ?>"><i class="bi bi-search"></i> Busca Global</a>
+                <a href="?mod=cij" class="nav-link <?= sgl_link_active($modulo, 'cij') ?>"><i class="bi bi-cpu"></i> Centro de Inteligência Jurídica</a>
+
+                <div class="sgl-menu-title">Cadastros</div>
+                <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuCadastros" aria-expanded="<?= sgl_menu_active($modulo, ['advogados','clientes']) ? 'true' : 'false' ?>">
+                    <i class="bi bi-people"></i> Cadastros <i class="bi bi-chevron-down chev"></i>
+                </button>
+                <div class="collapse <?= sgl_menu_active($modulo, ['advogados','clientes']) ?>" id="menuCadastros">
+                    <div class="sgl-submenu">
+                        <a href="?mod=advogados" class="nav-link <?= sgl_link_active($modulo, 'advogados') ?>"><i class="bi bi-person-badge"></i> Advogados</a>
+                        <a href="?mod=clientes" class="nav-link <?= sgl_link_active($modulo, 'clientes') ?>"><i class="bi bi-person-lines-fill"></i> Clientes</a>
+                    </div>
+                </div>
+
+                <div class="sgl-menu-title">Jurídico</div>
+                <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuJuridico" aria-expanded="<?= sgl_menu_active($modulo, ['processos','agenda','documentos','modelos']) ? 'true' : 'false' ?>">
+                    <i class="bi bi-briefcase"></i> Jurídico <i class="bi bi-chevron-down chev"></i>
+                </button>
+                <div class="collapse <?= sgl_menu_active($modulo, ['processos','agenda','documentos','modelos']) ?>" id="menuJuridico">
+                    <div class="sgl-submenu">
+                        <a href="?mod=processos" class="nav-link <?= sgl_link_active($modulo, 'processos') ?>"><i class="bi bi-folder2-open"></i> Processos</a>
+                        <a href="?mod=agenda" class="nav-link <?= sgl_link_active($modulo, 'agenda') ?>"><i class="bi bi-calendar-event"></i> Agenda</a>
+                        <a href="?mod=documentos" class="nav-link <?= sgl_link_active($modulo, 'documentos') ?>"><i class="bi bi-file-earmark-arrow-up"></i> Documentos</a>
+                        <a href="?mod=modelos" class="nav-link <?= sgl_link_active($modulo, 'modelos') ?>"><i class="bi bi-journal-text"></i> Modelos</a>
+                    </div>
+                </div>
+
+                <div class="sgl-menu-title">Financeiro</div>
+                <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuFinanceiro" aria-expanded="<?= sgl_menu_active($modulo, ['honorarios','financeiro','recibos']) ? 'true' : 'false' ?>">
+                    <i class="bi bi-cash-coin"></i> Financeiro <i class="bi bi-chevron-down chev"></i>
+                </button>
+                <div class="collapse <?= sgl_menu_active($modulo, ['honorarios','financeiro','recibos']) ?>" id="menuFinanceiro">
+                    <div class="sgl-submenu">
+                        <a href="?mod=honorarios" class="nav-link <?= sgl_link_active($modulo, 'honorarios') ?>"><i class="bi bi-cash-stack"></i> Honorários</a>
+                        <a href="?mod=financeiro" class="nav-link <?= sgl_link_active($modulo, 'financeiro') ?>"><i class="bi bi-bar-chart"></i> Financeiro</a>
+                        <a href="?mod=recibos" class="nav-link <?= sgl_link_active($modulo, 'recibos') ?>"><i class="bi bi-receipt"></i> Recibos</a>
+                    </div>
+                </div>
+
+                <div class="sgl-menu-title">Administração</div>
+                <a href="?mod=configuracoes" class="nav-link <?= sgl_link_active($modulo, 'configuracoes') ?>"><i class="bi bi-gear"></i> Configurações</a>
+                <?php if (rojexEhMasterSaas()): ?>
+                    <a href="?mod=master_saas" class="nav-link <?= sgl_link_active($modulo, 'master_saas') ?>">
+                        <i class="bi bi-shield-check"></i> Voltar à Plataforma
+                    </a>
+                <?php endif; ?>
             <?php endif; ?>
             <a href="auth/alterar_senha.php" class="nav-link"><i class="bi bi-key"></i> Alterar senha</a>
             <a href="auth/logout.php" class="nav-link"><i class="bi bi-box-arrow-right"></i> Sair</a>
@@ -570,15 +585,34 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
     <main class="flex-grow-1 p-4 sgl-main">
         <div class="sgl-topbar">
             <div></div>
-            <form class="sgl-global-search" method="GET" action="">
-                <input type="hidden" name="mod" value="busca">
-                <div class="input-group shadow-sm">
-                    <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
-                    <input type="search" name="q" class="form-control" maxlength="160" value="<?= htmlspecialchars((string)($_GET['q'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="Busca global: cliente, processo, documento, agenda...">
-                    <button class="btn btn-primary" type="submit">Buscar</button>
-                </div>
-            </form>
+            <?php if (!$modoPlataforma && $contextoTenantValido): ?>
+                <form class="sgl-global-search" method="GET" action="">
+                    <input type="hidden" name="mod" value="busca">
+                    <div class="input-group shadow-sm">
+                        <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                        <input type="search" name="q" class="form-control" maxlength="160" value="<?= htmlspecialchars((string)($_GET['q'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" placeholder="Busca global: cliente, processo, documento, agenda...">
+                        <button class="btn btn-primary" type="submit">Buscar</button>
+                    </div>
+                </form>
+            <?php endif; ?>
         </div>
+
+        <?php
+        if ($modoPlataforma && !empty($_SESSION['rojex_aviso_autorizacao'])) {
+            unset($_SESSION['rojex_aviso_autorizacao']);
+        }
+        ?>
+
+        <?php if ($modoPlataforma): ?>
+            <div class="alert alert-primary shadow-sm d-flex align-items-center gap-2">
+                <i class="bi bi-grid-1x2-fill"></i>
+                <div><strong>Modo Plataforma:</strong> nenhum escritório está carregado. Os dados operacionais dos tenants permanecem bloqueados.</div>
+            </div>
+        <?php elseif (!$contextoTenantValido): ?>
+            <div class="alert alert-danger shadow-sm">
+                <strong>Contexto do escritório indisponível.</strong> Saia e entre novamente para recarregar o tenant.
+            </div>
+        <?php endif; ?>
 
         <?php if (!empty($_SESSION['rojex_aviso_autorizacao'])): ?>
             <div class="alert alert-warning shadow-sm">
@@ -634,11 +668,17 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
                 }
             }
         } else {
-            $arquivo = __DIR__ . "/modules/{$modulo}.php";
-            if (file_exists($arquivo)) {
-                include $arquivo;
+            $moduloExigeTenant = !in_array($modulo, ['master_saas', 'configuracoes'], true);
+
+            if ($moduloExigeTenant && !$contextoTenantValido) {
+                echo "<div class='alert alert-danger'><strong>Acesso bloqueado:</strong> nenhum contexto de escritório válido está ativo.</div>";
             } else {
-                echo "<div class='alert alert-danger'><strong>Módulo não encontrado:</strong> " . htmlspecialchars($modulo) . "</div>";
+                $arquivo = __DIR__ . "/modules/{$modulo}.php";
+                if (file_exists($arquivo)) {
+                    include $arquivo;
+                } else {
+                    echo "<div class='alert alert-danger'><strong>Módulo não encontrado:</strong> " . htmlspecialchars($modulo) . "</div>";
+                }
             }
         }
         ?>

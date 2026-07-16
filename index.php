@@ -43,17 +43,68 @@ if (!function_exists('rojexEhAdministrador')) {
     }
 }
 
+if (!function_exists('rojexEhMasterSaas')) {
+    function rojexEhMasterSaas(): bool
+    {
+        static $resultado = null;
+
+        if (is_bool($resultado)) {
+            return $resultado;
+        }
+
+        $usuarioId = (int)($_SESSION['user_id'] ?? 0);
+        $perfil = rojexPerfilAtual();
+
+        if ($usuarioId <= 0) {
+            return $resultado = false;
+        }
+
+        if ($perfil === 'Administrador Master') {
+            return $resultado = true;
+        }
+
+        try {
+            $connMaster = conectar();
+
+            $stmt = $connMaster->prepare(
+                "SELECT valor
+                   FROM configuracoes
+                  WHERE chave = 'usuario_master_id'
+                  LIMIT 1"
+            );
+
+            if (!$stmt) {
+                $connMaster->close();
+                return $resultado = false;
+            }
+
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            $connMaster->close();
+
+            return $resultado = ((int)($row['valor'] ?? 0) === $usuarioId);
+        } catch (Throwable $e) {
+            error_log('[ROJEX MASTER SAAS][INDEX] ' . $e->getMessage());
+            return $resultado = false;
+        }
+    }
+}
+
 if (!function_exists('rojexPodeAcessarModulo')) {
     function rojexPodeAcessarModulo(string $modulo): bool
     {
         /*
-         * Compatibilidade homologada:
-         * todos os usuários autenticados podem abrir Configurações.
+         * Configurações continua acessível a todos os usuários autenticados.
+         * O próprio módulo mantém abas e ações administrativas protegidas.
          *
-         * O próprio modules/configuracoes.php mantém as abas e ações
-         * administrativas restritas ao usuário MASTER, enquanto usuários
-         * comuns continuam com acesso às opções permitidas.
+         * MASTER SaaS possui uma segunda barreira no roteador e outra
+         * dentro de modules/master_saas.php.
          */
+        if ($modulo === 'master_saas') {
+            return rojexEhMasterSaas();
+        }
+
         return true;
     }
 }
@@ -106,6 +157,7 @@ $modulos_validos = [
     'documentos',
     'modelos',
     'configuracoes',
+    'master_saas',
     'busca',
     'cij',
 ];
@@ -141,6 +193,7 @@ $titulos = [
     'documentos' => 'Documentos',
     'modelos' => 'Modelos Jurídicos',
     'configuracoes' => 'Configurações',
+    'master_saas' => 'MASTER SaaS',
     'busca' => 'Busca Global',
     'cij' => 'Centro de Inteligência Jurídica',
 ];
@@ -498,6 +551,11 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
 
             <div class="sgl-menu-title">Administração</div>
             <a href="?mod=configuracoes" class="nav-link <?= sgl_link_active($modulo, 'configuracoes') ?>"><i class="bi bi-gear"></i> Configurações</a>
+            <?php if (rojexEhMasterSaas()): ?>
+                <a href="?mod=master_saas" class="nav-link <?= sgl_link_active($modulo, 'master_saas') ?>">
+                    <i class="bi bi-shield-check"></i> MASTER SaaS
+                </a>
+            <?php endif; ?>
             <a href="auth/alterar_senha.php" class="nav-link"><i class="bi bi-key"></i> Alterar senha</a>
             <a href="auth/logout.php" class="nav-link"><i class="bi bi-box-arrow-right"></i> Sair</a>
         </div>

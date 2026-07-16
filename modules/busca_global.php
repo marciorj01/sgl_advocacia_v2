@@ -501,7 +501,7 @@ if ($q !== '') {
             <h5 class="mb-0">Resultado para: <strong><?= h($q) ?></strong></h5>
             <div class="text-muted small"><?= (int)$totalGeral ?> resultado(s) encontrado(s) em todos os módulos.</div>
         </div>
-        <a href="?mod=busca_global" class="btn btn-outline-secondary btn-sm"><i class="bi bi-x-lg"></i> Limpar busca</a>
+        <a href="?mod=busca" class="btn btn-outline-secondary btn-sm"><i class="bi bi-x-lg"></i> Limpar busca</a>
     </div>
 
     <?php if ($totalGeral === 0): ?>

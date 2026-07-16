@@ -1,12 +1,12 @@
 <?php
 declare(strict_types=1);
 
-ini_set('display_errors', '1');
+ini_set('display_errors', '0');
 error_reporting(E_ALL);
 /**
  * config/base_conhecimento.php
  * Base de Conhecimento do ROJEX.AI
- * Sprint 4.1.1 — Fundação inicial
+ * Sprint 4.6 — Base de Conhecimento Multi-Tenant
  *
  * Objetivo:
  * - Centralizar funções reutilizáveis de leitura do banco.
@@ -210,6 +210,190 @@ if (!function_exists('rojex_kb_bind_params')) {
     }
 }
 
+
+/**
+ * -----------------------------------------------------------------------------
+ * ISOLAMENTO MULTI-TENANT DA BASE DE CONHECIMENTO — SPRINT 4.6
+ * -----------------------------------------------------------------------------
+ *
+ * Toda consulta operacional executada por rojex_kb_consultar() passa por esta
+ * camada. O filtro é aplicado na tabela principal do SELECT usando,
+ * obrigatoriamente, tenant_id e escritorio_id do contexto autenticado.
+ *
+ * A camada trabalha em modo fail-closed:
+ * - sem contexto tenant válido, a consulta operacional é bloqueada;
+ * - no Modo Plataforma MASTER, dados operacionais não são consultados;
+ * - se uma tabela operacional não possuir as duas colunas, a consulta é
+ *   bloqueada em vez de executar com isolamento parcial.
+ */
+
+if (!function_exists('rojex_kb_tabelas_multi_tenant')) {
+    function rojex_kb_tabelas_multi_tenant(): array
+    {
+        return [
+            'clientes',
+            'advogados',
+            'processos',
+            'agenda',
+            'honorarios',
+            'honorarios_parcelas',
+            'contas_pagar',
+            'contas_pagar_parcelas',
+            'contas_receber',
+            'contas_receber_parcelas',
+            'recibos',
+            'documentos_arquivos',
+            'modelos_documentos',
+            'bancos_caixa',
+            'bancos_movimentacoes',
+        ];
+    }
+}
+
+if (!function_exists('rojex_kb_contexto_multi_tenant')) {
+    /**
+     * @return array{tenant_id:string, escritorio_id:int}
+     */
+    function rojex_kb_contexto_multi_tenant(): array
+    {
+        if (
+            !function_exists('rojexContextoTenantValido')
+            || !function_exists('rojexTenantId')
+            || !function_exists('rojexEscritorioId')
+            || !rojexContextoTenantValido()
+            || (function_exists('rojexModoPlataforma') && rojexModoPlataforma())
+        ) {
+            throw new RuntimeException(
+                'Contexto Multi-Tenant inválido para consulta da Base de Conhecimento.'
+            );
+        }
+
+        $tenantId = trim((string)rojexTenantId());
+        $escritorioId = (int)rojexEscritorioId();
+
+        if ($tenantId === '' || $escritorioId <= 0) {
+            throw new RuntimeException(
+                'Tenant ou escritório não identificado na Base de Conhecimento.'
+            );
+        }
+
+        return [
+            'tenant_id' => $tenantId,
+            'escritorio_id' => $escritorioId,
+        ];
+    }
+}
+
+if (!function_exists('rojex_kb_aplicar_escopo_multi_tenant')) {
+    /**
+     * Acrescenta o escopo na tabela principal de um SELECT operacional.
+     *
+     * @return array{sql:string, tipos:string, parametros:array}
+     */
+    function rojex_kb_aplicar_escopo_multi_tenant(
+        mysqli $conn,
+        string $sql,
+        string $tipos,
+        array $parametros
+    ): array {
+        $sqlTrim = ltrim($sql);
+
+        if (!preg_match('/^SELECT\b/i', $sqlTrim)) {
+            return [
+                'sql' => $sql,
+                'tipos' => $tipos,
+                'parametros' => $parametros,
+            ];
+        }
+
+        if (preg_match('/\bUNION(?:\s+ALL)?\b/i', $sqlTrim)) {
+            throw new RuntimeException(
+                'UNION não autorizado na Base de Conhecimento Multi-Tenant.'
+            );
+        }
+
+        if (!preg_match(
+            '/\bFROM\s+`?([A-Za-z0-9_]+)`?(?:\s+(?:AS\s+)?`?([A-Za-z0-9_]+)`?)?/i',
+            $sql,
+            $match
+        )) {
+            return [
+                'sql' => $sql,
+                'tipos' => $tipos,
+                'parametros' => $parametros,
+            ];
+        }
+
+        $tabela = strtolower((string)$match[1]);
+        $alias = isset($match[2]) ? (string)$match[2] : '';
+
+        $palavrasReservadas = [
+            'where', 'left', 'right', 'inner', 'outer', 'join',
+            'order', 'group', 'having', 'limit', 'for', 'union',
+        ];
+
+        if ($alias === '' || in_array(strtolower($alias), $palavrasReservadas, true)) {
+            $alias = $tabela;
+        }
+
+        if (!in_array($tabela, rojex_kb_tabelas_multi_tenant(), true)) {
+            return [
+                'sql' => $sql,
+                'tipos' => $tipos,
+                'parametros' => $parametros,
+            ];
+        }
+
+        if (
+            !rojex_kb_coluna_existe($conn, $tabela, 'tenant_id')
+            || !rojex_kb_coluna_existe($conn, $tabela, 'escritorio_id')
+        ) {
+            throw new RuntimeException(
+                "A tabela operacional {$tabela} não possui isolamento Multi-Tenant completo."
+            );
+        }
+
+        $contexto = rojex_kb_contexto_multi_tenant();
+        $prefixo = '`' . str_replace('`', '``', $alias) . '`';
+
+        $condicao = "{$prefixo}.`tenant_id` = ?"
+            . " AND {$prefixo}.`escritorio_id` = ?";
+
+        /*
+         * Insere o escopo antes de ORDER BY, GROUP BY, HAVING, LIMIT ou
+         * FOR UPDATE. As consultas atuais da Base não possuem subconsultas
+         * operacionais, portanto a inserção ocorre no SELECT principal.
+         */
+        $posicao = strlen($sql);
+        if (preg_match(
+            '/\b(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|FOR\s+UPDATE)\b/i',
+            $sql,
+            $clausula,
+            PREG_OFFSET_CAPTURE
+        )) {
+            $posicao = (int)$clausula[0][1];
+        }
+
+        $antes = substr($sql, 0, $posicao);
+        $depois = substr($sql, $posicao);
+        $temWhere = preg_match('/\bWHERE\b/i', $antes) === 1;
+
+        $separador = $temWhere ? ' AND ' : ' WHERE ';
+        $sqlEscopado = rtrim($antes) . $separador . $condicao . ' ' . ltrim($depois);
+
+        $tipos .= 'si';
+        $parametros[] = $contexto['tenant_id'];
+        $parametros[] = $contexto['escritorio_id'];
+
+        return [
+            'sql' => $sqlEscopado,
+            'tipos' => $tipos,
+            'parametros' => $parametros,
+        ];
+    }
+}
+
+
 if (!function_exists('rojex_kb_consultar')) {
     /**
      * Executa uma consulta SELECT preparada e retorna todas as linhas.
@@ -221,6 +405,17 @@ if (!function_exists('rojex_kb_consultar')) {
         array $parametros = []
     ): array {
         try {
+            $escopo = rojex_kb_aplicar_escopo_multi_tenant(
+                $conn,
+                $sql,
+                $tipos,
+                $parametros
+            );
+
+            $sql = $escopo['sql'];
+            $tipos = $escopo['tipos'];
+            $parametros = $escopo['parametros'];
+
             $stmt = $conn->prepare($sql);
             if (!$stmt) {
                 error_log('[ROJEX KB prepare] ' . $conn->error);
@@ -2315,7 +2510,7 @@ if (!function_exists('rojex_kb_status')) {
 
         return [
             'nome' => 'Base de Conhecimento ROJEX.AI',
-            'versao' => '4.1.1-fundacao',
+            'versao' => '4.6-multi-tenant',
             'somente_leitura' => true,
             'tabelas' => $disponiveis,
         ];

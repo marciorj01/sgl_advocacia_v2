@@ -208,192 +208,10 @@ function sgl_link_active(string $atual, string $item): string {
     return $atual === $item ? 'active' : '';
 }
 
-function sgl_table_exists(mysqli $conn, string $tabela): bool {
-    if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela)) { return false; }
-    $stmt = $conn->prepare("SELECT COUNT(*) AS total FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
-    $stmt->bind_param('s', $tabela);
-    $stmt->execute();
-    $row = $stmt->get_result()->fetch_assoc();
-    $stmt->close();
-    return ((int)($row['total'] ?? 0)) > 0;
-}
-
-function sgl_table_columns(mysqli $conn, string $tabela): array {
-    if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela)) { return []; }
-    $stmt = $conn->prepare("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?");
-    $stmt->bind_param('s', $tabela);
-    $stmt->execute();
-    $res = $stmt->get_result();
-    $cols = [];
-    while ($row = $res->fetch_assoc()) { $cols[] = $row['COLUMN_NAME']; }
-    $stmt->close();
-    return $cols;
-}
-
-function sgl_busca_global(mysqli $conn, string $termo): array {
-    if (function_exists('rojexContextoTenantValido') && !rojexContextoTenantValido()) { return []; }
-    $termo = mb_substr(trim($termo), 0, 160, 'UTF-8');
-    if ($termo === '') { return []; }
-
-    $digitos = preg_replace('/\D+/', '', $termo);
-    $like = '%' . $termo . '%';
-    $likeDigitos = $digitos !== '' ? '%' . $digitos . '%' : '';
-
-    $config = [
-        'clientes' => [
-            'titulo' => 'Clientes',
-            'mod' => 'clientes',
-            'campos' => ['id','nome','cpf_cnpj','email','telefone','celular','whatsapp','cidade','estado'],
-            'principal' => ['nome','cpf_cnpj','id'],
-            'numericos' => ['cpf_cnpj','telefone','celular','whatsapp']
-        ],
-        'processos' => [
-            'titulo' => 'Processos',
-            'mod' => 'processos',
-            'campos' => ['id','numero_processo','num_processo','titulo','cliente','tipo_processo','comarca','vara','status'],
-            'principal' => ['numero_processo','num_processo','titulo','id'],
-            'numericos' => ['numero_processo','num_processo']
-        ],
-        'advogados' => [
-            'titulo' => 'Advogados',
-            'mod' => 'advogados',
-            'campos' => ['id','nome','cpf','oab','email','telefone','celular'],
-            'principal' => ['nome','oab','id'],
-            'numericos' => ['cpf','oab','telefone','celular']
-        ],
-        'agenda' => [
-            'titulo' => 'Agenda',
-            'mod' => 'agenda',
-            'campos' => ['id','titulo','descricao','cliente','nome_cliente','data','data_evento','numero_processo','status'],
-            'principal' => ['titulo','descricao','nome_cliente','id'],
-            'numericos' => ['numero_processo']
-        ],
-        'honorarios' => [
-            'titulo' => 'Honorários',
-            'mod' => 'honorarios',
-            'campos' => ['id','cliente','nome_cliente','descricao','status','numero_processo'],
-            'principal' => ['descricao','nome_cliente','cliente','id'],
-            'numericos' => ['numero_processo']
-        ],
-        'documentos_arquivos' => [
-            'titulo' => 'Documentos',
-            'mod' => 'documentos',
-            'campos' => ['id','codigo','nome_arquivo','nome_original','titulo','descricao','categoria'],
-            'principal' => ['titulo','nome_original','nome_arquivo','codigo','id'],
-            'numericos' => ['codigo']
-        ],
-        'modelos_documentos' => [
-            'titulo' => 'Modelos',
-            'mod' => 'modelos',
-            'campos' => ['id','codigo','titulo','nome','descricao','categoria','area_direito'],
-            'principal' => ['titulo','nome','codigo','id'],
-            'numericos' => ['codigo']
-        ],
-    ];
-
-    $saida = [];
-    $vistos = [];
-
-    foreach ($config as $tabela => $cfg) {
-        if (!sgl_table_exists($conn, $tabela)) { continue; }
-
-        $cols = sgl_table_columns($conn, $tabela);
-        if (!in_array('id', $cols, true)) { continue; }
-
-        $campos = array_values(array_intersect($cfg['campos'], $cols));
-        $camposNumericos = array_values(array_intersect($cfg['numericos'] ?? [], $cols));
-        if (!$campos && !$camposNumericos) { continue; }
-
-        $wheres = [];
-        $params = [];
-        $types = '';
-
-        foreach ($campos as $campo) {
-            $wheres[] = "`{$campo}` LIKE ?";
-            $params[] = $like;
-            $types .= 's';
-        }
-
-        if ($digitos !== '') {
-            foreach ($camposNumericos as $campo) {
-                $expr = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(`{$campo}`, '.', ''), '-', ''), '/', ''), '(', ''), ')', ''), ' ', ''), '+', '')";
-                $wheres[] = "{$expr} LIKE ?";
-                $params[] = $likeDigitos;
-                $types .= 's';
-            }
-        }
-
-        if (!$wheres) { continue; }
-
-        $principal = 'id';
-        foreach (($cfg['principal'] ?? []) as $possivel) {
-            if (in_array($possivel, $cols, true)) { $principal = $possivel; break; }
-        }
-
-        $whereDeletado = in_array('deletado', $cols, true)
-            ? " AND COALESCE(`deletado`,0)=0"
-            : '';
-
-        $camposSelect = array_values(array_unique(array_merge(
-            ['id', $principal],
-            $tabela === 'clientes' && in_array('cpf_cnpj', $cols, true)
-                ? ['cpf_cnpj']
-                : []
-        )));
-
-        $selectSql = implode(
-            ', ',
-            array_map(
-                static fn(string $campo): string => "`{$campo}`",
-                $camposSelect
-            )
-        );
-
-        $sql = "SELECT {$selectSql}
-                FROM `{$tabela}`
-                WHERE (" . implode(' OR ', $wheres) . ")
-                {$whereDeletado}
-                ORDER BY id DESC
-                LIMIT 10";
-
-        try {
-            $stmt = $conn->prepare($sql);
-            if ($types !== '') { $stmt->bind_param($types, ...$params); }
-            $stmt->execute();
-            $res = $stmt->get_result();
-
-            while ($row = $res->fetch_assoc()) {
-                $chave = $tabela . ':' . (string)$row['id'];
-                if (isset($vistos[$chave])) { continue; }
-                $vistos[$chave] = true;
-
-                $texto = (string)($row[$principal] ?? '');
-                if ($texto === '') { $texto = 'Registro sem descrição'; }
-
-                if ($tabela === 'clientes') {
-                    $doc = (string)($row['cpf_cnpj'] ?? '');
-                    if ($doc !== '') { $texto .= ' — ' . $doc; }
-                }
-
-                $saida[] = [
-                    'modulo' => $cfg['titulo'],
-                    'mod' => $cfg['mod'],
-                    'id' => (string)$row['id'],
-                    'texto' => $texto,
-                ];
-            }
-            $stmt->close();
-        } catch (Throwable $e) {
-            error_log(
-                '[ROJEX BUSCA GLOBAL][' . $tabela . '] ' .
-                $e->getMessage()
-            );
-            continue;
-        }
-    }
-
-    return $saida;
-}
+/*
+ * A Busca Global oficial é executada exclusivamente por
+ * modules/busca_global.php. A rota pública permanece ?mod=busca.
+ */
 
 
 ?>
@@ -626,59 +444,19 @@ function sgl_busca_global(mysqli $conn, string $termo): array {
         <?php endif; ?>
 
         <?php
-        if ($modulo === 'busca') {
-            $q = mb_substr(
-                trim((string)($_GET['q'] ?? '')),
-                0,
-                160,
-                'UTF-8'
-            );
-            echo "<div class='mb-4'><h3 class='text-primary mb-1'><i class='bi bi-search me-2'></i>Busca Global</h3><p class='text-muted mb-0'>Pesquise clientes, processos, advogados, agenda, documentos e modelos em um único lugar.</p></div>";
+        $moduloExigeTenant = !in_array($modulo, ['master_saas', 'configuracoes'], true);
 
-            if ($q === '') {
-                echo "<div class='alert alert-info'>Digite um termo na barra de busca para iniciar a pesquisa.</div>";
-            } else {
-                try {
-                    $connBusca = conectar();
-                    $resultados = sgl_busca_global($connBusca, $q);
-                    $connBusca->close();
-
-                    echo "<div class='d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3'>";
-                    echo "<div><h5 class='mb-0'>Resultado para: <strong>" . htmlspecialchars($q, ENT_QUOTES, 'UTF-8') . "</strong></h5><div class='text-muted small'>" . count($resultados) . " resultado(s) encontrado(s).</div></div>";
-                    echo "<a href='?mod=busca' class='btn btn-outline-secondary btn-sm'><i class='bi bi-x-lg me-1'></i>LIMPAR PESQUISA</a>";
-                    echo "</div>";
-                    echo "<div class='card shadow-sm border-0'><div class='card-header bg-dark text-white d-flex justify-content-between'><span><i class='bi bi-list-search me-1'></i>Resultados da Busca Global</span><span>" . count($resultados) . " resultado(s)</span></div><div class='card-body'>";
-                    if (!$resultados) {
-                        echo "<div class='text-center py-4 text-muted'><i class='bi bi-search fs-1 d-block mb-3 opacity-25'></i>Nenhum resultado encontrado.</div>";
-                    } else {
-                        echo "<div class='table-responsive'><table class='table table-hover align-middle mb-0'><thead class='table-light'><tr><th>Módulo</th><th>ID</th><th>Registro</th><th class='text-end'>Ação</th></tr></thead><tbody>";
-                        foreach ($resultados as $r) {
-                            echo "<tr>";
-                            echo "<td><span class='badge bg-secondary'>" . htmlspecialchars($r['modulo'], ENT_QUOTES, 'UTF-8') . "</span></td>";
-                            echo "<td><code>" . htmlspecialchars($r['id'], ENT_QUOTES, 'UTF-8') . "</code></td>";
-                            echo "<td><strong>" . htmlspecialchars($r['texto'], ENT_QUOTES, 'UTF-8') . "</strong></td>";
-                            echo "<td class='text-end'><a class='btn btn-sm btn-outline-primary' href='?mod=" . htmlspecialchars($r['mod'], ENT_QUOTES, 'UTF-8') . "'>Abrir módulo</a></td>";
-                            echo "</tr>";
-                        }
-                        echo "</tbody></table></div>";
-                    }
-                    echo "</div></div>";
-                } catch (Throwable $e) {
-                    echo "<div class='alert alert-danger'>Não foi possível executar a busca global.</div>";
-                }
-            }
+        if ($moduloExigeTenant && !$contextoTenantValido) {
+            echo "<div class='alert alert-danger'><strong>Acesso bloqueado:</strong> nenhum contexto de escritório válido está ativo.</div>";
         } else {
-            $moduloExigeTenant = !in_array($modulo, ['master_saas', 'configuracoes'], true);
+            // A URL pública continua ?mod=busca, mas o arquivo oficial é busca_global.php.
+            $arquivoModulo = $modulo === 'busca' ? 'busca_global' : $modulo;
+            $arquivo = __DIR__ . "/modules/{$arquivoModulo}.php";
 
-            if ($moduloExigeTenant && !$contextoTenantValido) {
-                echo "<div class='alert alert-danger'><strong>Acesso bloqueado:</strong> nenhum contexto de escritório válido está ativo.</div>";
+            if (file_exists($arquivo)) {
+                include $arquivo;
             } else {
-                $arquivo = __DIR__ . "/modules/{$modulo}.php";
-                if (file_exists($arquivo)) {
-                    include $arquivo;
-                } else {
-                    echo "<div class='alert alert-danger'><strong>Módulo não encontrado:</strong> " . htmlspecialchars($modulo) . "</div>";
-                }
+                echo "<div class='alert alert-danger'><strong>Módulo não encontrado:</strong> " . htmlspecialchars($modulo, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . "</div>";
             }
         }
         ?>

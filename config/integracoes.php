@@ -165,7 +165,7 @@ if (!function_exists('sgl_log_contexto_multi_tenant')) {
 }
 
 if (!function_exists('sgl_log_normalizar_json')) {
-    function sgl_log_normalizar_json($dados): ?string
+    function sgl_log_normalizar_json(mixed $dados): ?string
     {
         if ($dados === null || $dados === '') {
             return null;
@@ -1466,14 +1466,26 @@ if (!function_exists('marcarContaPagarPaga')) {
     /**
      * Informa se a sessão MySQL/MariaDB já está dentro de uma transação.
      *
-     * mysqli não expõe a propriedade in_transaction. O estado oficial da
-     * conexão é disponibilizado por server_status e pelo sinalizador
-     * MYSQLI_SERVER_STATUS_IN_TRANS, compatível com PHP 8+.
+     * mysqli não expõe uma propriedade pública e portável para esse estado.
+     * A variável de sessão In_transaction é consultada diretamente no servidor,
+     * mantendo compatibilidade com MySQL/MariaDB e PHP 8+.
      */
     function sgl_int_transacao_ativa(mysqli $conn): bool
     {
-        return defined('MYSQLI_SERVER_STATUS_IN_TRANS')
-            && (($conn->server_status & MYSQLI_SERVER_STATUS_IN_TRANS) !== 0);
+        try {
+            $resultado = $conn->query("SHOW SESSION STATUS LIKE 'In_transaction'");
+            if (!$resultado) {
+                return false;
+            }
+
+            $linha = $resultado->fetch_assoc();
+            $resultado->free();
+
+            return strtoupper((string)($linha['Value'] ?? 'OFF')) === 'ON';
+        } catch (Throwable $e) {
+            sgl_int_log_erro('VERIFICAR_TRANSACAO', $e);
+            return false;
+        }
     }
 
     /**

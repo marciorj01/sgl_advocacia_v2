@@ -1914,6 +1914,10 @@ $acoesExclusivasMaster = [
     'salvar_plano_saas',
     'alterar_status_plano_saas',
     'excluir_plano_saas',
+    'ativar_portal_escritorio',
+    'criar_conta_portal',
+    'alterar_status_conta_portal',
+    'reemitir_convite_portal',
     'simular_manutencao',
     'executar_manutencao',
     'simular_backup',
@@ -1931,7 +1935,7 @@ if ($acao_cfg !== '' && in_array($acao_cfg, $acoesExclusivasMaster, true) && !$e
     sgl_redirect_cfg('escritorio', 'erro', 'Ação permitida somente ao usuário MASTER.');
 }
 
-if (in_array($tab_ativa, ['usuarios', 'sistema', 'administracao', 'novo_escritorio', 'planos', 'modulos', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes', 'logs'], true) && !$ehUsuarioMaster) {
+if (in_array($tab_ativa, ['usuarios', 'sistema', 'administracao', 'novo_escritorio', 'planos', 'modulos', 'portal', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes', 'logs'], true) && !$ehUsuarioMaster) {
     sgl_redirect_cfg('escritorio', 'erro', 'Área restrita ao usuário MASTER.');
 }
 
@@ -3184,6 +3188,137 @@ if ($acao_cfg === 'excluir_plano_saas') {
     }
 }
 
+
+// -----------------------------------------------------------------------------
+// Portal do Cliente — Sprint 4.7.4
+// Ativação por escritório, conta isolada e convite de uso único.
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'ativar_portal_escritorio') {
+    $escritorioPortalId = max(0, (int)($_POST['portal_escritorio_id'] ?? 0));
+    if ($escritorioPortalId <= 0) sgl_redirect_cfg('portal', 'erro', 'Selecione um escritório válido.');
+
+    try {
+        $conn->begin_transaction();
+        $stmt = $conn->prepare("SELECT id,tenant_id,nome,status FROM escritorios_saas WHERE id=? LIMIT 1 FOR UPDATE");
+        $stmt->bind_param('i', $escritorioPortalId); $stmt->execute();
+        $escritorioPortal = $stmt->get_result()->fetch_assoc(); $stmt->close();
+        if (!$escritorioPortal || trim((string)$escritorioPortal['tenant_id']) === '') throw new RuntimeException('Escritório ou tenant inválido.');
+        if ((string)$escritorioPortal['status'] !== 'ativo') throw new RuntimeException('Ative o escritório antes de liberar o Portal do Cliente.');
+
+        $stmt = $conn->prepare("SELECT id FROM modulos_saas WHERE codigo='portal_cliente' AND ativo=1 AND status_lancamento='producao' LIMIT 1");
+        $stmt->execute(); $moduloPortalId = (int)($stmt->get_result()->fetch_assoc()['id'] ?? 0); $stmt->close();
+        if ($moduloPortalId <= 0) throw new RuntimeException('O módulo portal_cliente não está disponível em produção.');
+
+        $origemPortal = 'administrativo';
+        $stmt = $conn->prepare("INSERT INTO escritorios_modulos_saas (escritorio_id,modulo_id,origem,ativo,valor_ajuste) VALUES (?,?,?,1,0) ON DUPLICATE KEY UPDATE origem=VALUES(origem),ativo=1,atualizado_em=CURRENT_TIMESTAMP");
+        $stmt->bind_param('iis', $escritorioPortalId, $moduloPortalId, $origemPortal); $stmt->execute(); $stmt->close();
+        $conn->commit();
+        sgl_log($conn, 'Ativou Portal do Cliente para escritório', 'escritorios_modulos_saas', (string)$escritorioPortalId, 'Tenant: ' . $escritorioPortal['tenant_id']);
+        sgl_redirect_cfg('portal', 'sucesso', 'Portal ativado para o escritório. Nenhum conteúdo foi publicado.');
+    } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        sgl_redirect_cfg('portal', 'erro', $e->getMessage());
+    }
+}
+
+if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal') {
+    $contaPortalId = max(0, (int)($_POST['portal_conta_id'] ?? 0));
+    $escritorioPortalId = max(0, (int)($_POST['portal_escritorio_id'] ?? 0));
+    $clientePortalId = trim((string)($_POST['portal_cliente_id'] ?? ''));
+    $emailPortal = mb_strtolower(trim((string)($_POST['portal_email'] ?? '')), 'UTF-8');
+    $reemitirConvite = $acao_cfg === 'reemitir_convite_portal';
+    if (!$reemitirConvite && ($escritorioPortalId <= 0 || $clientePortalId === '' || !filter_var($emailPortal, FILTER_VALIDATE_EMAIL))) {
+        sgl_redirect_cfg('portal', 'erro', 'Informe escritório, cliente e e-mail válidos.');
+    }
+
+    try {
+        $conn->begin_transaction();
+        if ($reemitirConvite) {
+            $stmt = $conn->prepare("SELECT pc.id,pc.tenant_id,pc.escritorio_id,pc.cliente_id,pc.email,e.subdominio FROM portal_clientes_contas pc INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id WHERE pc.id=? LIMIT 1 FOR UPDATE");
+            $stmt->bind_param('i', $contaPortalId); $stmt->execute(); $contaPortal = $stmt->get_result()->fetch_assoc(); $stmt->close();
+            if (!$contaPortal) throw new RuntimeException('Conta do Portal não encontrada.');
+            $escritorioPortalId = (int)$contaPortal['escritorio_id']; $clientePortalId = (string)$contaPortal['cliente_id']; $emailPortal = (string)$contaPortal['email']; $tenantPortal = (string)$contaPortal['tenant_id'];
+        } else {
+            $stmt = $conn->prepare("SELECT e.tenant_id,e.subdominio,e.status,c.id,c.nome,c.email FROM escritorios_saas e INNER JOIN clientes c ON c.escritorio_id=e.id AND c.tenant_id=e.tenant_id AND c.id=? AND c.deletado=0 AND c.status='Ativo' INNER JOIN escritorios_modulos_saas em ON em.escritorio_id=e.id AND em.ativo=1 INNER JOIN modulos_saas m ON m.id=em.modulo_id AND m.codigo='portal_cliente' AND m.ativo=1 AND m.status_lancamento='producao' WHERE e.id=? AND e.status='ativo' LIMIT 1 FOR UPDATE");
+            $stmt->bind_param('si', $clientePortalId, $escritorioPortalId); $stmt->execute(); $clientePortal = $stmt->get_result()->fetch_assoc(); $stmt->close();
+            if (!$clientePortal) throw new RuntimeException('Cliente não pertence ao escritório selecionado ou o Portal ainda não está ativo.');
+            $tenantPortal = trim((string)$clientePortal['tenant_id']);
+            if ($tenantPortal === '') throw new RuntimeException('Contexto Multi-Tenant inválido.');
+
+            $statusContaPortal = 'CONVITE_PENDENTE';
+            $usuarioAtivadorPortal = (int)($_SESSION['user_id'] ?? 0);
+            $stmt = $conn->prepare("INSERT INTO portal_clientes_contas (tenant_id,escritorio_id,cliente_id,email,email_normalizado,senha_hash,status,primeiro_acesso_pendente,ativado_por_usuario_id,ativado_em) VALUES (?,?,?,?,?,NULL,?,1,?,NOW())");
+            $stmt->bind_param('sissssi', $tenantPortal, $escritorioPortalId, $clientePortalId, $emailPortal, $emailPortal, $statusContaPortal, $usuarioAtivadorPortal);
+            $stmt->execute(); $contaPortalId = (int)$conn->insert_id; $stmt->close();
+
+            $zeroPortal = 0;
+            $stmt = $conn->prepare("INSERT INTO portal_clientes_permissoes (conta_id,tenant_id,escritorio_id,cliente_id,ver_processos,ver_documentos,enviar_documentos,ver_honorarios,ver_recibos,ver_agenda,receber_notificacoes,atualizado_por_usuario_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
+            $stmt->bind_param('isisiiiiiiii', $contaPortalId, $tenantPortal, $escritorioPortalId, $clientePortalId, $zeroPortal, $zeroPortal, $zeroPortal, $zeroPortal, $zeroPortal, $zeroPortal, $zeroPortal, $usuarioAtivadorPortal);
+            $stmt->execute(); $stmt->close();
+        }
+
+        $stmt = $conn->prepare("UPDATE portal_clientes_tokens SET revogado_em=NOW() WHERE conta_id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND tipo='CONVITE' AND utilizado_em IS NULL AND revogado_em IS NULL");
+        $stmt->bind_param('isis', $contaPortalId, $tenantPortal, $escritorioPortalId, $clientePortalId); $stmt->execute(); $stmt->close();
+
+        $tokenPortal = bin2hex(random_bytes(32));
+        $tokenHashPortal = hash('sha256', $tokenPortal);
+        $expiraPortal = date('Y-m-d H:i:s', time() + 172800);
+        $tipoTokenPortal = 'CONVITE';
+        $ipPortal = filter_var((string)($_SERVER['REMOTE_ADDR'] ?? ''), FILTER_VALIDATE_IP) ? (string)$_SERVER['REMOTE_ADDR'] : '';
+        $uaPortal = mb_substr((string)($_SERVER['HTTP_USER_AGENT'] ?? ''), 0, 255, 'UTF-8');
+        $stmt = $conn->prepare("INSERT INTO portal_clientes_tokens (conta_id,tenant_id,escritorio_id,cliente_id,tipo,token_hash,expira_em,solicitado_ip,user_agent) VALUES (?,?,?,?,?,?,?,?,?)");
+        $stmt->bind_param('isissssss', $contaPortalId, $tenantPortal, $escritorioPortalId, $clientePortalId, $tipoTokenPortal, $tokenHashPortal, $expiraPortal, $ipPortal, $uaPortal);
+        $stmt->execute(); $stmt->close();
+        $conn->commit();
+
+        $scriptPortal = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? '/index.php'));
+        $basePortal = rtrim(str_replace('\\', '/', dirname($scriptPortal)), '/.');
+        $hostPortal = trim((string)($_SERVER['HTTP_HOST'] ?? ''));
+        if (!preg_match('/^(?:localhost|127\.0\.0\.1|\[::1\]|[a-z0-9.-]+)(?::\d{1,5})?$/i', $hostPortal)) {
+            $hostPortal = '';
+        }
+        $httpsPortal = (!empty($_SERVER['HTTPS']) && strtolower((string)$_SERVER['HTTPS']) !== 'off')
+            || (string)($_SERVER['SERVER_PORT'] ?? '') === '443';
+        $origemPortal = $hostPortal !== '' ? (($httpsPortal ? 'https' : 'http') . '://' . $hostPortal) : '';
+        $baseConvitePortal = $origemPortal . $basePortal;
+        if (defined('ROJEX_APP_URL') && trim((string)ROJEX_APP_URL) !== '') {
+            $baseConvitePortal = rtrim((string)ROJEX_APP_URL, '/');
+        }
+        $_SESSION['rojex_portal_convite'] = [
+            'email' => $emailPortal,
+            'expira_em' => $expiraPortal,
+            'url' => $baseConvitePortal . '/portal/primeiro_acesso.php?token=' . rawurlencode($tokenPortal) . '&tenant=' . rawurlencode($tenantPortal),
+        ];
+        sgl_log($conn, $reemitirConvite ? 'Reemitiu convite do Portal' : 'Criou conta do Portal', 'portal_clientes_contas', (string)$contaPortalId, 'Tenant: ' . $tenantPortal . '; Cliente: ' . $clientePortalId . '; permissões iniciais desativadas.');
+        sgl_redirect_cfg('portal', 'sucesso', $reemitirConvite ? 'Novo convite gerado com validade de 48 horas.' : 'Conta criada e convite seguro gerado. Nenhum conteúdo foi publicado.');
+    } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        sgl_redirect_cfg('portal', 'erro', $e->getCode() === 1062 ? 'Já existe uma conta para este cliente ou e-mail neste escritório.' : $e->getMessage());
+    }
+}
+
+if ($acao_cfg === 'alterar_status_conta_portal') {
+    $contaPortalId = max(0, (int)($_POST['portal_conta_id'] ?? 0));
+    $novoStatusPortal = (string)($_POST['portal_novo_status'] ?? '');
+    if ($contaPortalId <= 0 || !in_array($novoStatusPortal, ['ATIVA','DESATIVADA'], true)) sgl_redirect_cfg('portal', 'erro', 'Conta ou status inválido.');
+    try {
+        $usuarioPortal = (int)($_SESSION['user_id'] ?? 0);
+        if ($novoStatusPortal === 'DESATIVADA') {
+            $stmt = $conn->prepare("UPDATE portal_clientes_contas SET status='DESATIVADA',desativado_por_usuario_id=?,desativado_em=NOW() WHERE id=?");
+            $stmt->bind_param('ii', $usuarioPortal, $contaPortalId);
+        } else {
+            $stmt = $conn->prepare("UPDATE portal_clientes_contas SET status='ATIVA',desativado_por_usuario_id=NULL,desativado_em=NULL,motivo_desativacao=NULL WHERE id=?");
+            $stmt->bind_param('i', $contaPortalId);
+        }
+        $stmt->execute(); $stmt->close();
+        if ($novoStatusPortal === 'DESATIVADA') {
+            $stmt = $conn->prepare("UPDATE portal_clientes_sessoes SET encerrada_em=NOW(),motivo_encerramento='CONTA_DESATIVADA' WHERE conta_id=? AND encerrada_em IS NULL");
+            $stmt->bind_param('i', $contaPortalId); $stmt->execute(); $stmt->close();
+        }
+        sgl_log($conn, 'Alterou status de conta do Portal', 'portal_clientes_contas', (string)$contaPortalId, 'Novo status: ' . $novoStatusPortal);
+        sgl_redirect_cfg('portal', 'sucesso', 'Status da conta atualizado.');
+    } catch (Throwable $e) { sgl_redirect_cfg('portal', 'erro', 'Não foi possível alterar o status da conta.'); }
+}
 
 // -----------------------------------------------------------------------------
 // Cadastro e Configurador de Módulos SaaS — Sprint 4.5 / Etapa 3.3
@@ -5221,7 +5356,7 @@ if ($tenantAtualSaas !== '' && sgl_tabela_existe($conn, 'escritorios_saas')) {
         $statusEscritorioSaas = in_array(($cfg['status_operacional_escritorio'] ?? ''), ['ativo','implantacao','suspenso'], true) ? (string)$cfg['status_operacional_escritorio'] : 'implantacao';
         $planoAtualSaas = in_array(($cfg['plano_licenca'] ?? ''), ['starter','professional','enterprise'], true) ? (string)$cfg['plano_licenca'] : 'enterprise';
 
-        $stmt = $conn->prepare("INSERT INTO escritorios_saas (tenant_id, nome, documento, responsavel, email, subdominio, status, plano) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE nome = VALUES(nome), documento = VALUES(documento), responsavel = VALUES(responsavel), email = VALUES(email), subdominio = VALUES(subdominio), status = VALUES(status), plano = VALUES(plano)");
+        $stmt = $conn->prepare("INSERT INTO escritorios_saas (tenant_id, nome, documento, responsavel, email, subdominio, status, plano) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE nome = VALUES(nome), documento = VALUES(documento), responsavel = VALUES(responsavel), email = VALUES(email), subdominio = CASE WHEN VALUES(subdominio) IS NULL OR TRIM(VALUES(subdominio)) = '' THEN escritorios_saas.subdominio ELSE VALUES(subdominio) END, status = VALUES(status), plano = VALUES(plano)");
         $stmt->bind_param('ssssssss', $tenantAtualSaas, $nomeSaas, $documentoSaas, $responsavelSaas, $emailSaas, $subdominioSaas, $statusEscritorioSaas, $planoAtualSaas);
         $stmt->execute();
         $stmt->close();
@@ -5373,6 +5508,31 @@ if($ehUsuarioMaster && sgl_tabela_existe($conn,'modulos_saas')){
 }
 $totalModulosSaas=count($modulosSaas); $totalModulosAtivos=0; $totalModulosIa=0; $totalModulosBeta=0;
 foreach($modulosSaas as $modCont){if(!empty($modCont['ativo']))$totalModulosAtivos++;if(!empty($modCont['exige_ia_externa']))$totalModulosIa++;if(($modCont['status_lancamento']??'producao')==='beta')$totalModulosBeta++;}
+
+// Dados administrativos do Portal. A consulta é global apenas para o MASTER
+// e sempre exibe o contexto completo para impedir associações ambíguas.
+$portalEscritorios = [];
+$portalClientes = [];
+$portalContas = [];
+$portalConviteGerado = null;
+if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'portal_clientes_contas')) {
+    try {
+        $res = $conn->query("SELECT e.id,e.tenant_id,e.nome,e.status,COALESCE(em.ativo,0) AS portal_ativo FROM escritorios_saas e LEFT JOIN modulos_saas m ON m.codigo='portal_cliente' LEFT JOIN escritorios_modulos_saas em ON em.escritorio_id=e.id AND em.modulo_id=m.id ORDER BY e.nome");
+        while ($res && ($row = $res->fetch_assoc())) $portalEscritorios[] = $row;
+
+        $res = $conn->query("SELECT c.id,c.tenant_id,c.escritorio_id,c.nome,c.email FROM clientes c INNER JOIN escritorios_saas e ON e.id=c.escritorio_id AND e.tenant_id=c.tenant_id WHERE c.deletado=0 AND c.status='Ativo' ORDER BY e.nome,c.nome");
+        while ($res && ($row = $res->fetch_assoc())) $portalClientes[] = $row;
+
+        $res = $conn->query("SELECT pc.*,c.nome AS cliente_nome,e.nome AS escritorio_nome,pp.ver_processos,pp.ver_documentos,pp.enviar_documentos,pp.ver_honorarios,pp.ver_recibos,pp.ver_agenda,pp.receber_notificacoes FROM portal_clientes_contas pc INNER JOIN clientes c ON c.id=pc.cliente_id AND c.tenant_id=pc.tenant_id AND c.escritorio_id=pc.escritorio_id INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id LEFT JOIN portal_clientes_permissoes pp ON pp.conta_id=pc.id ORDER BY pc.id DESC");
+        while ($res && ($row = $res->fetch_assoc())) $portalContas[] = $row;
+    } catch (Throwable $e) {
+        $portalEscritorios = []; $portalClientes = []; $portalContas = [];
+    }
+    if (!empty($_SESSION['rojex_portal_convite']) && is_array($_SESSION['rojex_portal_convite'])) {
+        $portalConviteGerado = $_SESSION['rojex_portal_convite'];
+        unset($_SESSION['rojex_portal_convite']);
+    }
+}
 
 
 // Histórico de usuários desligados — Sprint 4.1.3 / Etapa 4.
@@ -5851,7 +6011,7 @@ foreach ($atualizacoesLista as $atualizacaoContador) {
     if ($atualizacaoContador['status'] === 'instalada') $totalAtualizacoesInstaladas++;
 }
 
-$tabs_validas = ['escritorio','marca','tema','usuarios','sistema','administracao','novo_escritorio','planos','modulos','desligados','relatorios','saude','manutencao','backup','atualizacoes','lixeira','logs'];
+$tabs_validas = ['escritorio','marca','tema','usuarios','sistema','administracao','novo_escritorio','planos','modulos','portal','desligados','relatorios','saude','manutencao','backup','atualizacoes','lixeira','logs'];
 
 if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 ?>
@@ -5892,6 +6052,7 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         'novo_escritorio' => ['Novo Escritório','bi-building-add'],
         'planos' => ['Planos SaaS','bi-tags-fill'],
         'modulos' => ['Módulos SaaS','bi-grid-3x3-gap-fill'],
+        'portal' => ['Portal do Cliente','bi-person-workspace'],
         'desligados' => ['Desligados','bi-person-x-fill'],
         'relatorios' => ['Relatórios','bi-file-earmark-bar-graph-fill'],
         'saude' => ['Saúde','bi-heart-pulse-fill'],
@@ -5902,7 +6063,7 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         'logs' => ['Logs','bi-clock-history'],
     ];
     foreach ($tabDefs as $id => $tab) :
-        if (in_array($id, ['usuarios','sistema','administracao','novo_escritorio','planos','modulos','desligados','relatorios','saude','manutencao','backup','atualizacoes','logs'], true) && !$ehUsuarioMaster) { continue; }
+        if (in_array($id, ['usuarios','sistema','administracao','novo_escritorio','planos','modulos','portal','desligados','relatorios','saude','manutencao','backup','atualizacoes','logs'], true) && !$ehUsuarioMaster) { continue; }
         $active = $tab_ativa === $id ? 'active' : '';
         $badge = ($id === 'lixeira' && $totalLixeira > 0) ? '<span class="badge bg-danger ms-1">' . $totalLixeira . '</span>' : '';
     ?>
@@ -6869,6 +7030,50 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
 </div></div>
 <?php endif; ?>
 
+
+<?php if ($tab_ativa === 'portal'): ?>
+<div class="alert alert-primary border-0 shadow-sm">
+    <strong><i class="bi bi-person-workspace me-1"></i> Portal do Cliente — ativação controlada</strong>
+    <div class="small">Ativar o módulo ou criar uma conta não publica processos, documentos, honorários, recibos ou agenda.</div>
+</div>
+
+<?php if ($portalConviteGerado): ?>
+<div class="alert alert-warning shadow-sm">
+    <strong>Convite gerado — copie agora.</strong>
+    <div class="small mb-2">E-mail: <?=htmlspecialchars((string)$portalConviteGerado['email'])?> · expira em <?=htmlspecialchars((string)$portalConviteGerado['expira_em'])?></div>
+    <div class="input-group"><input id="portalConviteUrl" class="form-control font-monospace" readonly value="<?=htmlspecialchars((string)$portalConviteGerado['url'])?>"><button type="button" class="btn btn-dark" onclick="navigator.clipboard.writeText(document.getElementById('portalConviteUrl').value)">Copiar link</button></div>
+    <div class="form-text">O token não é armazenado em texto aberto e este link será exibido somente agora.</div>
+</div>
+<?php endif; ?>
+
+<div class="row g-4 mb-4">
+    <div class="col-xl-5"><div class="card shadow-sm border-0 h-100"><div class="card-header bg-dark text-white">1. Ativar por escritório</div><div class="card-body">
+        <form method="post" class="row g-3">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="ativar_portal_escritorio">
+            <div class="col-12"><label class="form-label">Escritório</label><select name="portal_escritorio_id" class="form-select" required><option value="">Selecione</option><?php foreach($portalEscritorios as $pe): ?><option value="<?=(int)$pe['id']?>"><?=htmlspecialchars($pe['nome'])?> — <?=htmlspecialchars($pe['tenant_id'])?> (<?=!empty($pe['portal_ativo'])?'Portal ativo':'Portal inativo'?>)</option><?php endforeach; ?></select></div>
+            <div class="col-12"><button class="btn btn-primary" onclick="return confirm('Ativar o Portal para este escritório? Nenhum conteúdo será publicado.')"><i class="bi bi-check-circle me-1"></i>Ativar Portal</button></div>
+        </form>
+    </div></div></div>
+    <div class="col-xl-7"><div class="card shadow-sm border-0 h-100"><div class="card-header bg-primary text-white">2. Criar conta e convite</div><div class="card-body">
+        <form method="post" class="row g-3">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="criar_conta_portal">
+            <div class="col-md-6"><label class="form-label">Escritório</label><select name="portal_escritorio_id" id="portalEscritorioConta" class="form-select" required><option value="">Selecione</option><?php foreach($portalEscritorios as $pe): if(empty($pe['portal_ativo'])) continue; ?><option value="<?=(int)$pe['id']?>"><?=htmlspecialchars($pe['nome'])?></option><?php endforeach; ?></select></div>
+            <div class="col-md-6"><label class="form-label">Cliente ativo</label><select name="portal_cliente_id" id="portalClienteConta" class="form-select" required><option value="">Selecione</option><?php foreach($portalClientes as $pc): ?><option value="<?=htmlspecialchars($pc['id'])?>" data-escritorio="<?=(int)$pc['escritorio_id']?>" data-email="<?=htmlspecialchars((string)$pc['email'])?>"><?=htmlspecialchars($pc['nome'])?> — <?=htmlspecialchars($pc['id'])?></option><?php endforeach; ?></select></div>
+            <div class="col-12"><label class="form-label">E-mail de acesso</label><input type="email" name="portal_email" id="portalEmailConta" class="form-control" maxlength="190" required></div>
+            <div class="col-12"><div class="alert alert-light border small mb-0"><strong>Permissões iniciais:</strong> todas desativadas. A publicação de conteúdo será realizada apenas em etapa posterior e por ação expressa.</div></div>
+            <div class="col-12"><button class="btn btn-success" onclick="return confirm('Criar a conta com todas as permissões desativadas e gerar convite válido por 48 horas?')"><i class="bi bi-envelope-check me-1"></i>Criar conta e convite</button></div>
+        </form>
+    </div></div></div>
+</div>
+
+<div class="card shadow-sm border-0"><div class="card-header bg-dark text-white">Contas do Portal</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover align-middle mb-0"><thead><tr><th>Escritório</th><th>Cliente</th><th>E-mail</th><th>Permissões</th><th>Status</th><th class="text-end">Ações</th></tr></thead><tbody>
+<?php if(!$portalContas): ?><tr><td colspan="6" class="text-center text-muted py-4">Nenhuma conta criada.</td></tr><?php else: foreach($portalContas as $pc): ?>
+<tr><td><strong><?=htmlspecialchars($pc['escritorio_nome'])?></strong><br><code><?=htmlspecialchars($pc['tenant_id'])?></code></td><td><?=htmlspecialchars($pc['cliente_nome'])?><br><small><?=htmlspecialchars($pc['cliente_id'])?></small></td><td><?=htmlspecialchars($pc['email'])?></td><td><small><?php $qtdPermissoes=array_sum(array_map('intval',[$pc['ver_processos']??0,$pc['ver_documentos']??0,$pc['enviar_documentos']??0,$pc['ver_honorarios']??0,$pc['ver_recibos']??0,$pc['ver_agenda']??0,$pc['receber_notificacoes']??0])); ?><?=$qtdPermissoes?> de 7 habilitadas</small></td><td><span class="badge <?=($pc['status']==='ATIVA')?'bg-success':(($pc['status']==='CONVITE_PENDENTE')?'bg-warning text-dark':'bg-secondary')?>"><?=htmlspecialchars($pc['status'])?></span></td><td class="text-end">
+    <?php if($pc['status']==='CONVITE_PENDENTE'): ?><form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="reemitir_convite_portal"><input type="hidden" name="portal_conta_id" value="<?=(int)$pc['id']?>"><button class="btn btn-sm btn-outline-primary" onclick="return confirm('Revogar o convite anterior e gerar um novo?')">Novo convite</button></form><?php endif; ?>
+    <?php if(in_array($pc['status'],['ATIVA','DESATIVADA'],true)): ?><form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_conta_portal"><input type="hidden" name="portal_conta_id" value="<?=(int)$pc['id']?>"><input type="hidden" name="portal_novo_status" value="<?=$pc['status']==='ATIVA'?'DESATIVADA':'ATIVA'?>"><button class="btn btn-sm <?=$pc['status']==='ATIVA'?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Confirmar alteração do status desta conta?')"><?=$pc['status']==='ATIVA'?'Desativar':'Ativar'?></button></form><?php endif; ?>
+</td></tr><?php endforeach; endif; ?></tbody></table></div></div></div>
+<script>(function(){const e=document.getElementById('portalEscritorioConta'),c=document.getElementById('portalClienteConta'),m=document.getElementById('portalEmailConta');function f(){const id=e.value;for(const o of c.options){if(!o.value)continue;o.hidden=o.dataset.escritorio!==id;}if(c.selectedOptions[0]?.hidden)c.value='';m.value=c.selectedOptions[0]?.dataset.email||'';}e?.addEventListener('change',f);c?.addEventListener('change',()=>{m.value=c.selectedOptions[0]?.dataset.email||'';});f();})();</script>
+<?php endif; ?>
 
 <?php if ($tab_ativa === 'administracao'): ?>
 <div class="alert alert-primary border-0 shadow-sm d-flex align-items-start gap-2">

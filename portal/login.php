@@ -142,8 +142,10 @@ function rojexPortalLoginCarregarMarca(mysqli $conn, array $escritorio): array
         $logo = '';
     }
 
+    $nomeConfigurado = trim((string) ($configuracoes['nome_escritorio'] ?? ''));
+
     return [
-        'nome' => (string) ($configuracoes['nome_escritorio'] ?: $escritorio['nome']),
+        'nome' => $nomeConfigurado !== '' ? $nomeConfigurado : (string) $escritorio['nome'],
         'logo' => $logo,
         'cor_primaria' => $corValida((string) ($configuracoes['cor_primaria'] ?? ''), '#163a5f'),
         'cor_secundaria' => $corValida((string) ($configuracoes['cor_secundaria'] ?? ''), '#2c6fad'),
@@ -399,7 +401,18 @@ try {
 
 $csrfToken = rojexPortalTokenCsrf();
 $acaoFormulario = 'login.php' . ($slug !== '' ? '?escritorio=' . rawurlencode($slug) : '');
-$logoUrl = $marca['logo'] !== '' ? '../' . $marca['logo'] : '';
+$logoUrl = '';
+foreach ([
+    '../assets/img/logo_rojex_ai.png',
+    '../assets/img/logo_rojex.png',
+    '../assets/img/logo.png',
+    '../assets/img/logo_custom.png',
+] as $logoRojexCandidato) {
+    if (is_file(__DIR__ . '/' . $logoRojexCandidato)) {
+        $logoUrl = $logoRojexCandidato;
+        break;
+    }
+}
 $iniciais = mb_strtoupper(mb_substr(trim((string) $marca['nome']), 0, 2, 'UTF-8'), 'UTF-8');
 ?>
 <!DOCTYPE html>
@@ -545,7 +558,7 @@ $iniciais = mb_strtoupper(mb_substr(trim((string) $marca['nome']), 0, 2, 'UTF-8'
         <section class="brand" aria-label="Identidade do escritorio">
             <div class="logo-box">
                 <?php if ($logoUrl !== ''): ?>
-                    <img src="<?= rojexPortalLoginH($logoUrl) ?>" alt="Logomarca de <?= rojexPortalLoginH((string) $marca['nome']) ?>">
+                    <img src="<?= rojexPortalLoginH($logoUrl) ?>" alt="Logomarca ROJEX.AI">
                 <?php else: ?>
                     <span class="monogram" aria-hidden="true"><?= rojexPortalLoginH($iniciais) ?></span>
                 <?php endif; ?>

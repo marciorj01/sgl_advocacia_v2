@@ -57,6 +57,9 @@ if (!function_exists('sgl_garantir_logs')) {
         try {
             if (!$conn->query("CREATE TABLE IF NOT EXISTS logs_sistema (
                 id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                tenant_id VARCHAR(80) NULL,
+                escritorio_id BIGINT NULL,
+                escopo VARCHAR(20) NOT NULL DEFAULT 'PLATAFORMA',
                 usuario_id INT NULL,
                 usuario_nome VARCHAR(150) NULL,
                 usuario_login VARCHAR(80) NULL,
@@ -83,12 +86,17 @@ if (!function_exists('sgl_garantir_logs')) {
                 INDEX idx_logs_tabela (tabela),
                 INDEX idx_logs_registro (registro_id),
                 INDEX idx_logs_resultado (resultado),
-                INDEX idx_logs_data (criado_em)
+                INDEX idx_logs_data (criado_em),
+                INDEX idx_logs_escopo (escopo),
+                INDEX idx_logs_tenant_escritorio_data (tenant_id, escritorio_id, criado_em)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")) {
                 throw new RuntimeException($conn->error ?: 'Falha ao garantir a tabela de logs.');
             }
 
             if (function_exists('sgl_int_add_coluna')) {
+                sgl_int_add_coluna($conn, 'logs_sistema', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'escritorio_id', "escritorio_id BIGINT NULL AFTER tenant_id");
+                sgl_int_add_coluna($conn, 'logs_sistema', 'escopo', "escopo VARCHAR(20) NOT NULL DEFAULT 'LEGADO' AFTER escritorio_id");
                 sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_nome', "usuario_nome VARCHAR(150) NULL");
                 sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_login', "usuario_login VARCHAR(80) NULL");
                 sgl_int_add_coluna($conn, 'logs_sistema', 'usuario_perfil', "usuario_perfil VARCHAR(80) NULL");
@@ -107,6 +115,52 @@ if (!function_exists('sgl_garantir_logs')) {
         } catch (Throwable $e) {
             sgl_int_log_erro('GARANTIR_LOGS', $e);
         }
+    }
+}
+
+if (!function_exists('sgl_log_contexto_multi_tenant')) {
+    /**
+     * O escopo do LOG é obtido exclusivamente do servidor e da sessão.
+     * Dados enviados pelo navegador ou pelo chamador nunca definem o tenant.
+     *
+     * @return array{tenant_id:?string,escritorio_id:?int,escopo:string}
+     */
+    function sgl_log_contexto_multi_tenant(): array
+    {
+        if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
+            return [
+                'tenant_id' => null,
+                'escritorio_id' => null,
+                'escopo' => 'PLATAFORMA',
+            ];
+        }
+
+        $tenantId = function_exists('rojexTenantId')
+            ? trim((string)rojexTenantId())
+            : trim((string)($_SESSION['tenant_id'] ?? ''));
+        $escritorioId = function_exists('rojexEscritorioId')
+            ? (int)rojexEscritorioId()
+            : (int)($_SESSION['escritorio_id'] ?? 0);
+
+        $contextoValido = function_exists('rojexContextoTenantValido')
+            ? rojexContextoTenantValido()
+            : ($tenantId !== '' && $escritorioId > 0);
+
+        if ($contextoValido && $tenantId !== '' && $escritorioId > 0) {
+            return [
+                'tenant_id' => $tenantId,
+                'escritorio_id' => $escritorioId,
+                'escopo' => 'TENANT',
+            ];
+        }
+
+        // Tentativas pré-login e eventos sem escritório identificado pertencem
+        // exclusivamente à auditoria da plataforma.
+        return [
+            'tenant_id' => null,
+            'escritorio_id' => null,
+            'escopo' => 'PLATAFORMA',
+        ];
     }
 }
 
@@ -182,6 +236,10 @@ if (!function_exists('sgl_registrar_log')) {
 
             $dados_anteriores = sgl_log_normalizar_json($contexto['dados_anteriores'] ?? null);
             $dados_novos = sgl_log_normalizar_json($contexto['dados_novos'] ?? null);
+            $contextoMultiTenant = sgl_log_contexto_multi_tenant();
+            $tenant_id = $contextoMultiTenant['tenant_id'];
+            $escritorio_id = $contextoMultiTenant['escritorio_id'];
+            $escopo = $contextoMultiTenant['escopo'];
 
             $acao = mb_substr(trim($acao), 0, 120, 'UTF-8');
             $tabela = $tabela !== null ? mb_substr(trim($tabela), 0, 80, 'UTF-8') : null;
@@ -191,19 +249,24 @@ if (!function_exists('sgl_registrar_log')) {
             $origem = mb_substr($origem, 0, 80, 'UTF-8');
 
             $sql = "INSERT INTO logs_sistema (
+                        tenant_id, escritorio_id, escopo,
                         usuario_id, usuario_nome, usuario_login, usuario_perfil,
                         acao, tipo_acao, modulo, tabela, registro_id, detalhes,
                         dados_anteriores, dados_novos, origem, resultado, nivel,
                         ip, sessao_id, user_agent
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
             $stmt = $conn->prepare($sql);
             if (!$stmt) {
                 throw new RuntimeException('Falha ao preparar o registro de auditoria.');
             }
 
+            $tiposBind = 'sisi' . str_repeat('s', 17);
             $stmt->bind_param(
-                'isssssssssssssssss',
+                $tiposBind,
+                $tenant_id,
+                $escritorio_id,
+                $escopo,
                 $usuario_id,
                 $usuario_nome,
                 $usuario_login,
@@ -1401,6 +1464,19 @@ if (!function_exists('sgl_buscar_recibo_por_conta_receber')) {
 
 if (!function_exists('marcarContaPagarPaga')) {
     /**
+     * Informa se a sessão MySQL/MariaDB já está dentro de uma transação.
+     *
+     * mysqli não expõe a propriedade in_transaction. O estado oficial da
+     * conexão é disponibilizado por server_status e pelo sinalizador
+     * MYSQLI_SERVER_STATUS_IN_TRANS, compatível com PHP 8+.
+     */
+    function sgl_int_transacao_ativa(mysqli $conn): bool
+    {
+        return defined('MYSQLI_SERVER_STATUS_IN_TRANS')
+            && (($conn->server_status & MYSQLI_SERVER_STATUS_IN_TRANS) !== 0);
+    }
+
+    /**
      * Marca uma conta a pagar como paga, atualizando também suas parcelas quando existirem.
      */
     function marcarContaPagarPaga(mysqli $conn, string $conta_id, ?string $data_pagamento = null): bool
@@ -1409,7 +1485,7 @@ if (!function_exists('marcarContaPagarPaga')) {
         $transacaoIniciadaAqui = false;
 
         try {
-            if (!$conn->in_transaction) {
+            if (!sgl_int_transacao_ativa($conn)) {
                 $conn->begin_transaction();
                 $transacaoIniciadaAqui = true;
             }

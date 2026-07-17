@@ -10,7 +10,24 @@
 date_default_timezone_set('America/Sao_Paulo');
 
 $conn = conectar();
+require_once __DIR__ . '/../config/base_conhecimento.php';
 require_once __DIR__ . '/../config/integracoes.php';
+
+try {
+    if (!function_exists('rojex_kb_contexto_multi_tenant')) {
+        throw new RuntimeException('A camada Multi-Tenant do Dashboard não está disponível.');
+    }
+    $dashboardContextoTenant = rojex_kb_contexto_multi_tenant();
+} catch (Throwable $e) {
+    error_log('[ROJEX DASHBOARD][CONTEXTO] ' . $e->getMessage());
+    http_response_code(403);
+    echo '<div class="container-fluid"><div class="alert alert-danger">'
+        . '<strong>Dashboard bloqueado:</strong> '
+        . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8')
+        . '</div></div>';
+    return;
+}
+
 if (function_exists('sgl_integracao_garantir_financeiro')) {
     sgl_integracao_garantir_financeiro($conn);
 }
@@ -48,27 +65,25 @@ function horaBr(?string $hora): string
 
 function totalScalar(mysqli $conn, string $sql): float
 {
-    $res = $conn->query($sql);
-    if (!$res) {
-        error_log('[SGL Dashboard] SQL scalar: ' . $conn->error . ' | ' . $sql);
-        return 0.0;
+    if (!function_exists('rojex_kb_consultar_um')) {
+        throw new RuntimeException(
+            'Consulta do Dashboard bloqueada: Base Multi-Tenant indisponível.'
+        );
     }
-    $row = $res->fetch_assoc();
+
+    $row = rojex_kb_consultar_um($conn, $sql);
     return (float)($row['total'] ?? 0);
 }
 
 function queryRows(mysqli $conn, string $sql): array
 {
-    $res = $conn->query($sql);
-    if (!$res) {
-        error_log('[SGL Dashboard] SQL rows: ' . $conn->error . ' | ' . $sql);
-        return [];
+    if (!function_exists('rojex_kb_consultar')) {
+        throw new RuntimeException(
+            'Consulta do Dashboard bloqueada: Base Multi-Tenant indisponível.'
+        );
     }
-    $dados = [];
-    while ($row = $res->fetch_assoc()) {
-        $dados[] = $row;
-    }
-    return $dados;
+
+    return rojex_kb_consultar($conn, $sql);
 }
 
 function dashboardTabelaExiste(mysqli $conn, string $tabela): bool
@@ -189,6 +204,8 @@ $recebidoHonorariosSemContaMes = totalScalar($conn, "
           SELECT 1 FROM contas_receber cr
           WHERE cr.parcela_id = hp.id
             AND cr.deletado = 0
+            AND cr.tenant_id = hp.tenant_id
+            AND cr.escritorio_id = hp.escritorio_id
       )
 ");
 
@@ -209,6 +226,8 @@ $previsaoHonorariosSemConta = totalScalar($conn, "
           SELECT 1 FROM contas_receber cr
           WHERE cr.parcela_id = hp.id
             AND cr.deletado = 0
+            AND cr.tenant_id = hp.tenant_id
+            AND cr.escritorio_id = hp.escritorio_id
       )
 ");
 
@@ -236,6 +255,8 @@ $entradasCaixaRecebimentosHoje = totalScalar($conn, "
     SELECT COALESCE(SUM(CASE WHEN cr.valor_pago > 0 THEN cr.valor_pago ELSE cr.valor END), 0) AS total
     FROM contas_receber cr
     LEFT JOIN bancos_caixa b ON b.id = cr.banco_id
+        AND b.tenant_id = cr.tenant_id
+        AND b.escritorio_id = cr.escritorio_id
     WHERE cr.deletado = 0
       AND (
           cr.status IN ('Recebido','Pago','Quitada')
@@ -248,6 +269,8 @@ $saidasCaixaDespesasHoje = totalScalar($conn, "
     SELECT COALESCE(SUM(CASE WHEN cp.valor_pago > 0 THEN cp.valor_pago ELSE cp.valor END), 0) AS total
     FROM contas_pagar cp
     LEFT JOIN bancos_caixa b ON b.id = cp.banco_id
+        AND b.tenant_id = cp.tenant_id
+        AND b.escritorio_id = cp.escritorio_id
     WHERE cp.deletado = 0
       AND cp.status IN ('Pago','Quitada')
       AND COALESCE(cp.data_pagamento, DATE(cp.atualizado_em), cp.data_vencimento) = '{$hoje}'
@@ -257,6 +280,8 @@ $transferenciasEntradaCaixaHoje = dashboardTabelaExiste($conn, 'bancos_movimenta
     SELECT COALESCE(SUM(m.valor),0) AS total
     FROM bancos_movimentacoes m
     LEFT JOIN bancos_caixa b ON b.id = m.banco_destino_id
+        AND b.tenant_id = m.tenant_id
+        AND b.escritorio_id = m.escritorio_id
     WHERE m.data_movimento = '{$hoje}'
       AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
 ") : 0.0;
@@ -264,6 +289,8 @@ $transferenciasSaidaCaixaHoje = dashboardTabelaExiste($conn, 'bancos_movimentaco
     SELECT COALESCE(SUM(m.valor),0) AS total
     FROM bancos_movimentacoes m
     LEFT JOIN bancos_caixa b ON b.id = m.banco_origem_id
+        AND b.tenant_id = m.tenant_id
+        AND b.escritorio_id = m.escritorio_id
     WHERE m.data_movimento = '{$hoje}'
       AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
 ") : 0.0;
@@ -272,6 +299,8 @@ $entradasCaixaRecebimentosMes = totalScalar($conn, "
     SELECT COALESCE(SUM(CASE WHEN cr.valor_pago > 0 THEN cr.valor_pago ELSE cr.valor END), 0) AS total
     FROM contas_receber cr
     LEFT JOIN bancos_caixa b ON b.id = cr.banco_id
+        AND b.tenant_id = cr.tenant_id
+        AND b.escritorio_id = cr.escritorio_id
     WHERE cr.deletado = 0
       AND (
           cr.status IN ('Recebido','Pago','Quitada')
@@ -284,6 +313,8 @@ $saidasCaixaDespesasMes = totalScalar($conn, "
     SELECT COALESCE(SUM(CASE WHEN cp.valor_pago > 0 THEN cp.valor_pago ELSE cp.valor END), 0) AS total
     FROM contas_pagar cp
     LEFT JOIN bancos_caixa b ON b.id = cp.banco_id
+        AND b.tenant_id = cp.tenant_id
+        AND b.escritorio_id = cp.escritorio_id
     WHERE cp.deletado = 0
       AND cp.status IN ('Pago','Quitada')
       AND COALESCE(cp.data_pagamento, DATE(cp.atualizado_em), cp.data_vencimento) BETWEEN '{$inicioMes}' AND '{$fimMes}'
@@ -293,6 +324,8 @@ $transferenciasEntradaCaixaMes = dashboardTabelaExiste($conn, 'bancos_movimentac
     SELECT COALESCE(SUM(m.valor),0) AS total
     FROM bancos_movimentacoes m
     LEFT JOIN bancos_caixa b ON b.id = m.banco_destino_id
+        AND b.tenant_id = m.tenant_id
+        AND b.escritorio_id = m.escritorio_id
     WHERE m.data_movimento BETWEEN '{$inicioMes}' AND '{$fimMes}'
       AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
 ") : 0.0;
@@ -300,6 +333,8 @@ $transferenciasSaidaCaixaMes = dashboardTabelaExiste($conn, 'bancos_movimentacoe
     SELECT COALESCE(SUM(m.valor),0) AS total
     FROM bancos_movimentacoes m
     LEFT JOIN bancos_caixa b ON b.id = m.banco_origem_id
+        AND b.tenant_id = m.tenant_id
+        AND b.escritorio_id = m.escritorio_id
     WHERE m.data_movimento BETWEEN '{$inicioMes}' AND '{$fimMes}'
       AND (UPPER(COALESCE(b.tipo,''))='CAIXA' OR UPPER(COALESCE(b.nome,''))='CAIXA')
 ") : 0.0;
@@ -351,6 +386,8 @@ $honorariosVencidos = (int)totalScalar($conn, "
     SELECT COUNT(*) AS total
     FROM honorarios_parcelas hp
     LEFT JOIN honorarios h ON h.id = hp.honorario_id
+        AND h.tenant_id = hp.tenant_id
+        AND h.escritorio_id = hp.escritorio_id
     WHERE COALESCE(h.deletado,0) = 0
       AND hp.data_vencimento < '{$hoje}'
       AND COALESCE(hp.saldo_devedor, hp.valor_parcela, 0) > 0
@@ -411,6 +448,8 @@ $honorariosPendentes = queryRows($conn, "
            hp.status_pagamento
     FROM honorarios_parcelas hp
     LEFT JOIN honorarios h ON hp.honorario_id = h.id
+        AND h.tenant_id = hp.tenant_id
+        AND h.escritorio_id = hp.escritorio_id
     WHERE COALESCE(h.deletado,0) = 0
       AND hp.data_vencimento IS NOT NULL
       AND COALESCE(hp.status_pagamento,'Pendente') NOT IN ('Pago','Quitada','Recebido','Cancelado')

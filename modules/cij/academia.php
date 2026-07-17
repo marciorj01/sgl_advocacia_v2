@@ -20,9 +20,36 @@ if (is_file($arquivoIa)) {
     require_once $arquivoIa;
 }
 
+$arquivoBaseConhecimento = __DIR__ . '/../../config/base_conhecimento.php';
+if (is_file($arquivoBaseConhecimento)) {
+    require_once $arquivoBaseConhecimento;
+}
+
 function cij_academia_h($valor): string
 {
     return htmlspecialchars((string)($valor ?? ''), ENT_QUOTES, 'UTF-8');
+}
+
+function cij_academia_limitar(string $valor, int $maximo): string
+{
+    $valor = trim($valor);
+    return function_exists('mb_substr')
+        ? mb_substr($valor, 0, $maximo, 'UTF-8')
+        : substr($valor, 0, $maximo);
+}
+
+/**
+ * @return array{tenant_id:string, escritorio_id:int}
+ */
+function cij_academia_contexto_multi_tenant(): array
+{
+    if (!function_exists('rojex_kb_contexto_multi_tenant')) {
+        throw new RuntimeException(
+            'A camada Multi-Tenant da Academia não está disponível.'
+        );
+    }
+
+    return rojex_kb_contexto_multi_tenant();
 }
 
 function cij_academia_ia_disponivel(): bool
@@ -239,22 +266,43 @@ function cij_academia_relatorio(array $resultados, string $busca, string $catego
     return implode("\n", $linhas);
 }
 
-$conteudos = cij_academia_conteudos();
-$busca = trim((string)($_GET['busca'] ?? ''));
-$categoria = trim((string)($_GET['categoria'] ?? ''));
-$perfil = trim((string)($_GET['perfil'] ?? ''));
-$visualizar = max(0, (int)($_GET['visualizar'] ?? 0));
+$contextoAcademia = null;
+$erroContextoTenant = '';
 
-$resultados = cij_academia_filtrar($conteudos, $busca, $categoria, $perfil);
-$itemVisualizado = $resultados[$visualizar] ?? null;
-$relatorio = cij_academia_relatorio($resultados, $busca, $categoria, $perfil);
+try {
+    $contextoAcademia = cij_academia_contexto_multi_tenant();
+} catch (Throwable $e) {
+    error_log('[ROJEX CIJ ACADEMIA][CONTEXTO] ' . $e->getMessage());
+    $erroContextoTenant = $e->getMessage();
+}
+
+$conteudos = $contextoAcademia !== null ? cij_academia_conteudos() : [];
+$busca = cij_academia_limitar((string)($_GET['busca'] ?? ''), 200);
+$categoria = cij_academia_limitar((string)($_GET['categoria'] ?? ''), 100);
+$perfil = cij_academia_limitar((string)($_GET['perfil'] ?? ''), 100);
+$visualizar = max(0, (int)($_GET['visualizar'] ?? 0));
 
 $categorias = array_values(array_unique(array_column($conteudos, 'categoria')));
 $perfis = array_values(array_unique(array_column($conteudos, 'perfil')));
 sort($categorias);
 sort($perfis);
 
-if (($busca !== '' || $categoria !== '' || $perfil !== '') && function_exists('sgl_registrar_log')) {
+if ($categoria !== '' && !in_array($categoria, $categorias, true)) {
+    $categoria = '';
+}
+if ($perfil !== '' && !in_array($perfil, $perfis, true)) {
+    $perfil = '';
+}
+
+$resultados = cij_academia_filtrar($conteudos, $busca, $categoria, $perfil);
+$itemVisualizado = $resultados[$visualizar] ?? null;
+$relatorio = cij_academia_relatorio($resultados, $busca, $categoria, $perfil);
+
+if (
+    $contextoAcademia !== null
+    && ($busca !== '' || $categoria !== '' || $perfil !== '')
+    && function_exists('sgl_registrar_log')
+) {
     sgl_registrar_log(
         $conn,
         'CONSULTA_ACADEMIA_CIJ',
@@ -262,7 +310,21 @@ if (($busca !== '' || $categoria !== '' || $perfil !== '') && function_exists('s
         '0',
         'Busca: ' . ($busca !== '' ? $busca : '-')
             . '; Categoria: ' . ($categoria !== '' ? $categoria : '-')
-            . '; Perfil: ' . ($perfil !== '' ? $perfil : '-')
+            . '; Perfil: ' . ($perfil !== '' ? $perfil : '-'),
+        [
+            'tipo_acao' => 'CONSULTA',
+            'modulo' => 'CIJ / Academia ROJEX.AI',
+            'origem' => 'Academia ROJEX.AI',
+            'resultado' => 'SUCESSO',
+            'nivel' => 'INFO',
+            'dados_novos' => [
+                'tenant_id' => $contextoAcademia['tenant_id'],
+                'escritorio_id' => $contextoAcademia['escritorio_id'],
+                'categoria' => $categoria,
+                'perfil' => $perfil,
+                'quantidade_resultados' => count($resultados),
+            ],
+        ]
     );
 }
 ?>
@@ -281,6 +343,13 @@ if (($busca !== '' || $categoria !== '' || $perfil !== '') && function_exists('s
             <i class="bi bi-arrow-left me-1"></i>Voltar ao CIJ
         </a>
     </div>
+
+    <?php if ($erroContextoTenant !== ''): ?>
+        <div class="alert alert-danger border-0 shadow-sm">
+            <i class="bi bi-shield-exclamation me-1"></i>
+            <?= cij_academia_h($erroContextoTenant) ?>
+        </div>
+    <?php endif; ?>
 
     <div class="alert <?= cij_academia_ia_disponivel() ? 'alert-success' : 'alert-warning' ?> border-0 shadow-sm">
         <?php if (cij_academia_ia_disponivel()): ?>

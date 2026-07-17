@@ -1,4 +1,10 @@
 <?php
+// Mantém os cabeçalhos disponíveis para downloads autenticados disparados por
+// módulos (por exemplo, o ZIP isolado do LOG da Sprint 4.6.5).
+if (ob_get_level() === 0) {
+    ob_start();
+}
+
 require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/config/auth.php';
 require_once __DIR__ . '/config/integracoes.php';
@@ -200,6 +206,109 @@ $nomeContexto = $modoPlataforma
     ? 'ROJEX.AI Plataforma SaaS'
     : trim((string)($contextoTenant['escritorio_nome'] ?? $contextoTenant['nome_escritorio'] ?? $nome_escritorio ?? 'Escritório'));
 
+/*
+ * Downloads binários precisam ser processados antes do DOCTYPE, da barra
+ * lateral e de config/tema.php. O módulo valida novamente MASTER, arquivo e
+ * SHA-256 antes de enviar qualquer byte.
+ */
+if (
+    $modulo === 'configuracoes'
+    && $_SERVER['REQUEST_METHOD'] === 'GET'
+    && ($_GET['acao_cfg'] ?? '') === 'baixar_log_backup'
+) {
+    require __DIR__ . '/modules/configuracoes.php';
+    exit;
+}
+
+/**
+ * Resolve a logo do ambiente autenticado sem reutilizar a configuração de
+ * outro tenant. A tela de login não passa por este arquivo e permanece ROJEX.
+ */
+function rojexLogoSidebar(bool $modoPlataforma, array $contextoTenant): array
+{
+    $logoPadrao = 'assets/img/logo_rojex_ai.png';
+    if (!is_file(__DIR__ . '/' . $logoPadrao)) {
+        $logoPadrao = 'assets/img/logo_custom.png';
+    }
+
+    $resultado = [
+        'src' => $logoPadrao,
+        'versao' => is_file(__DIR__ . '/' . $logoPadrao)
+            ? (string)filemtime(__DIR__ . '/' . $logoPadrao)
+            : '1',
+    ];
+
+    try {
+        $connLogo = conectar();
+        $logoArquivo = '';
+
+        if ($modoPlataforma) {
+            $stmtLogo = $connLogo->prepare(
+                "SELECT valor
+                   FROM configuracoes
+                  WHERE chave = 'logo_arquivo'
+                  LIMIT 1"
+            );
+            if ($stmtLogo) {
+                $stmtLogo->execute();
+                $logoArquivo = trim((string)(
+                    $stmtLogo->get_result()->fetch_assoc()['valor'] ?? ''
+                ));
+                $stmtLogo->close();
+            }
+        } else {
+            $tenantId = function_exists('rojexTenantId')
+                ? trim((string)rojexTenantId())
+                : trim((string)($contextoTenant['tenant_id'] ?? ''));
+            $escritorioId = function_exists('rojexEscritorioId')
+                ? (int)rojexEscritorioId()
+                : (int)($contextoTenant['escritorio_id'] ?? 0);
+
+            if ($tenantId !== '' && $escritorioId > 0) {
+                $stmtLogo = $connLogo->prepare(
+                    "SELECT valor
+                       FROM escritorios_configuracoes_saas
+                      WHERE tenant_id = ?
+                        AND escritorio_id = ?
+                        AND chave = 'logo_arquivo'
+                      LIMIT 1"
+                );
+                if ($stmtLogo) {
+                    $stmtLogo->bind_param('si', $tenantId, $escritorioId);
+                    $stmtLogo->execute();
+                    $logoArquivo = trim((string)(
+                        $stmtLogo->get_result()->fetch_assoc()['valor'] ?? ''
+                    ));
+                    $stmtLogo->close();
+                }
+            }
+        }
+
+        $connLogo->close();
+
+        if (
+            $logoArquivo !== ''
+            && !str_contains($logoArquivo, '..')
+            && preg_match('/^[A-Za-z0-9_\/-]+\.(?:png|jpe?g|webp)$/i', $logoArquivo)
+        ) {
+            $caminhoRelativo = 'assets/img/' . $logoArquivo;
+            $caminhoAbsoluto = __DIR__ . '/' . $caminhoRelativo;
+            if (is_file($caminhoAbsoluto)) {
+                $resultado = [
+                    'src' => $caminhoRelativo,
+                    'versao' => (string)filemtime($caminhoAbsoluto),
+                ];
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('[ROJEX LOGO SIDEBAR] ' . $e->getMessage());
+    }
+
+    return $resultado;
+}
+
+$logoSidebar = rojexLogoSidebar($modoPlataforma, $contextoTenant);
+
 
 function sgl_menu_active(string $atual, array $itens): string {
     return in_array($atual, $itens, true) ? 'show' : '';
@@ -320,7 +429,7 @@ function sgl_link_active(string $atual, string $item): string {
 <div class="d-flex sgl-layout">
     <nav class="sgl-sidebar text-white">
         <div class="sgl-logo-wrap">
-            <img src="<?= htmlspecialchars($logo_src ?? 'assets/img/logo_custom.png') ?>?v=<?= time() ?>" alt="<?= htmlspecialchars($nomeContexto, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
+            <img src="<?= htmlspecialchars((string)$logoSidebar['src'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>?v=<?= htmlspecialchars((string)$logoSidebar['versao'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="<?= htmlspecialchars($nomeContexto, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
         </div>
         <div class="sgl-user-box">
             <div class="brand mb-1"><?= htmlspecialchars($nomeContexto, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>

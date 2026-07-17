@@ -58,6 +58,37 @@ function cij_gerador_table_exists(mysqli $conn, string $tabela): bool
     }
 }
 
+function cij_gerador_exigir_tabela_multi_tenant(mysqli $conn, string $tabela): void
+{
+    if (!cij_gerador_table_exists($conn, $tabela)) {
+        throw new RuntimeException("A tabela {$tabela} não está disponível.");
+    }
+
+    if (
+        !function_exists('rojex_kb_coluna_existe')
+        || !rojex_kb_coluna_existe($conn, $tabela, 'tenant_id')
+        || !rojex_kb_coluna_existe($conn, $tabela, 'escritorio_id')
+    ) {
+        throw new RuntimeException(
+            "A tabela {$tabela} não possui isolamento Multi-Tenant completo."
+        );
+    }
+}
+
+/**
+ * @return array{tenant_id:string, escritorio_id:int}
+ */
+function cij_gerador_contexto_multi_tenant(): array
+{
+    if (!function_exists('rojex_kb_contexto_multi_tenant')) {
+        throw new RuntimeException(
+            'A camada Multi-Tenant da Base de Conhecimento não está disponível.'
+        );
+    }
+
+    return rojex_kb_contexto_multi_tenant();
+}
+
 function cij_gerador_rows(mysqli $conn, string $sql): array
 {
     try {
@@ -412,8 +443,24 @@ $areasDireito = [
     'Contratual'
 ];
 
+$contextoGerador = null;
+$erroContextoTenant = '';
+
+try {
+    $contextoGerador = cij_gerador_contexto_multi_tenant();
+    cij_gerador_exigir_tabela_multi_tenant($conn, 'ia_consultas');
+    cij_gerador_exigir_tabela_multi_tenant($conn, 'modelos_documentos_gerados');
+} catch (Throwable $e) {
+    cij_gerador_log_erro('CONTEXTO_MULTI_TENANT', $e);
+    $erroContextoTenant = $e->getMessage();
+}
+
 $clientesSistema = [];
-if (function_exists('rojex_kb_tabela_existe') && rojex_kb_tabela_existe($conn, 'clientes')) {
+if (
+    $contextoGerador
+    && function_exists('rojex_kb_tabela_existe')
+    && rojex_kb_tabela_existe($conn, 'clientes')
+) {
     $colunasClientes = rojex_kb_colunas_tabela($conn, 'clientes');
     $filtroClientes = in_array('deletado', $colunasClientes, true)
         ? ' WHERE COALESCE(deletado, 0) = 0'
@@ -427,13 +474,19 @@ if (function_exists('rojex_kb_tabela_existe') && rojex_kb_tabela_existe($conn, '
 }
 
 $processosSistema = [];
-if (function_exists('rojex_kb_tabela_existe') && rojex_kb_tabela_existe($conn, 'processos')) {
+if (
+    $contextoGerador
+    && function_exists('rojex_kb_tabela_existe')
+    && rojex_kb_tabela_existe($conn, 'processos')
+) {
     $colunasProcessos = rojex_kb_colunas_tabela($conn, 'processos');
     $temClientesGerador = rojex_kb_tabela_existe($conn, 'clientes')
         && in_array('cliente_id', $colunasProcessos, true);
 
     $joinClienteGerador = $temClientesGerador
         ? ' LEFT JOIN clientes c ON c.id = p.cliente_id'
+            . ' AND c.tenant_id = p.tenant_id'
+            . ' AND c.escritorio_id = p.escritorio_id'
         : '';
 
     $filtroProcessos = in_array('deletado', $colunasProcessos, true)
@@ -464,8 +517,8 @@ $tom = cij_gerador_limitar(
     (string)($_POST['tom_redacional'] ?? 'Técnico, objetivo, jurídico e profissional'),
     180
 );
-$clienteId = trim((string)($_POST['cliente_id'] ?? '0'));
-$processoId = max(0, (int)($_POST['processo_id'] ?? 0));
+$clienteId = cij_gerador_limitar((string)($_POST['cliente_id'] ?? '0'), 20);
+$processoId = cij_gerador_limitar((string)($_POST['processo_id'] ?? '0'), 20);
 
 if (!in_array($tipo, $tiposDocumento, true)) {
     $tipo = '';
@@ -473,30 +526,41 @@ if (!in_array($tipo, $tiposDocumento, true)) {
 if (!in_array($area, $areasDireito, true)) {
     $area = '';
 }
-if ($clienteId !== '0' && !preg_match('/^[0-9]+$/', $clienteId)) {
+if ($clienteId !== '0' && !preg_match('/^[a-zA-Z0-9_-]+$/', $clienteId)) {
     $clienteId = '0';
+}
+if ($processoId !== '0' && !preg_match('/^[a-zA-Z0-9_-]+$/', $processoId)) {
+    $processoId = '0';
 }
 
 $gerado = false;
 $respostaIa = '';
 $modoResposta = '';
-$erroIa = '';
+$erroIa = $erroContextoTenant;
 $sucessoIa = '';
 $consultaId = 0;
 $documentoSalvoId = 0;
 
 $historicoAbrirId = max(0, (int)($_GET['historico_id'] ?? 0));
-if ($historicoAbrirId > 0 && cij_gerador_id_usuario() > 0) {
+if ($historicoAbrirId > 0 && cij_gerador_id_usuario() > 0 && $contextoGerador) {
     $historicoAberto = cij_gerador_consultar_um(
         $conn,
         'SELECT id, tipo, titulo, entrada, pergunta, resposta, modo, criado_em
          FROM ia_consultas
          WHERE id = ?
            AND usuario_id = ?
+           AND tenant_id = ?
+           AND escritorio_id = ?
            AND modulo = ?
          LIMIT 1',
-        'iis',
-        [$historicoAbrirId, cij_gerador_id_usuario(), 'CIJ_GERADOR']
+        'iisis',
+        [
+            $historicoAbrirId,
+            cij_gerador_id_usuario(),
+            $contextoGerador['tenant_id'],
+            $contextoGerador['escritorio_id'],
+            'CIJ_GERADOR',
+        ]
     );
 
     if ($historicoAberto) {
@@ -511,8 +575,20 @@ if ($historicoAbrirId > 0 && cij_gerador_id_usuario() > 0) {
             (string)($entradaAberta['area_direito'] ?? ''),
             80
         );
-        $clienteId = (string)max(0, (int)($entradaAberta['cliente_id'] ?? 0));
-        $processoId = max(0, (int)($entradaAberta['processo_id'] ?? 0));
+        $clienteId = cij_gerador_limitar(
+            (string)($entradaAberta['cliente_id'] ?? '0'),
+            20
+        );
+        $processoId = cij_gerador_limitar(
+            (string)($entradaAberta['processo_id'] ?? '0'),
+            20
+        );
+        if ($clienteId !== '0' && !preg_match('/^[a-zA-Z0-9_-]+$/', $clienteId)) {
+            $clienteId = '0';
+        }
+        if ($processoId !== '0' && !preg_match('/^[a-zA-Z0-9_-]+$/', $processoId)) {
+            $processoId = '0';
+        }
         $clienteReferencia = cij_gerador_limitar(
             (string)($entradaAberta['cliente_referencia'] ?? ''),
             250
@@ -551,6 +627,27 @@ if ($historicoAbrirId > 0 && cij_gerador_id_usuario() > 0) {
 
         if ($gerado) {
             $sucessoIa = 'Minuta recuperada do histórico. Você pode editar e salvar novamente na Biblioteca.';
+
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'ABRIU_HISTORICO_PECA_CIJ',
+                    'ia_consultas',
+                    (string)$consultaId,
+                    'Minuta recuperada do histórico do Gerador de Peças.',
+                    [
+                        'tipo_acao' => 'VISUALIZACAO',
+                        'modulo' => 'CIJ / Gerador de Peças',
+                        'origem' => 'Histórico do Gerador Jurídico',
+                        'resultado' => 'SUCESSO',
+                        'nivel' => 'INFO',
+                        'dados_novos' => [
+                            'tenant_id' => $contextoGerador['tenant_id'],
+                            'escritorio_id' => $contextoGerador['escritorio_id'],
+                        ],
+                    ]
+                );
+            }
         }
     } else {
         $erroIa = 'O item solicitado não foi encontrado no seu histórico.';
@@ -562,6 +659,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
         $erroIa = 'A sessão de segurança expirou. Atualize a página e tente novamente.';
     } elseif (cij_gerador_id_usuario() <= 0) {
         $erroIa = 'Sua sessão não está autenticada. Entre novamente no sistema.';
+    } elseif (!$contextoGerador) {
+        $erroIa = $erroContextoTenant !== ''
+            ? $erroContextoTenant
+            : 'O contexto Multi-Tenant não está disponível.';
     } else {
         $consultaIdRecebida = max(0, (int)($_POST['consulta_id'] ?? 0));
         $conteudoEditado = cij_gerador_limitar((string)($_POST['conteudo_editado'] ?? ''), 250000);
@@ -575,9 +676,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
 
             $consulta = cij_gerador_consultar_um(
                 $conn,
-                'SELECT id, titulo, entrada FROM ia_consultas WHERE id = ? AND usuario_id = ? LIMIT 1',
-                'ii',
-                [$consultaIdRecebida, $uid]
+                'SELECT id, titulo, entrada
+                 FROM ia_consultas
+                 WHERE id = ?
+                   AND usuario_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
+                   AND modulo = ?
+                 LIMIT 1',
+                'iisis',
+                [
+                    $consultaIdRecebida,
+                    $uid,
+                    $contextoGerador['tenant_id'],
+                    $contextoGerador['escritorio_id'],
+                    'CIJ_GERADOR',
+                ]
             );
 
             if (!$consulta) {
@@ -586,24 +700,95 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
 
             $entradaConsulta = json_decode((string)($consulta['entrada'] ?? ''), true);
             $entradaConsulta = is_array($entradaConsulta) ? $entradaConsulta : [];
-            $clienteSalvar = max(0, (int)($entradaConsulta['cliente_id'] ?? 0));
-            $processoSalvar = max(0, (int)($entradaConsulta['processo_id'] ?? 0));
+            $clienteSalvar = cij_gerador_limitar(
+                (string)($entradaConsulta['cliente_id'] ?? '0'),
+                20
+            );
+            $processoSalvar = cij_gerador_limitar(
+                (string)($entradaConsulta['processo_id'] ?? '0'),
+                20
+            );
+            if ($clienteSalvar !== '0' && !preg_match('/^[a-zA-Z0-9_-]+$/', $clienteSalvar)) {
+                throw new RuntimeException('O identificador do cliente vinculado é inválido.');
+            }
+            if ($processoSalvar !== '0' && !preg_match('/^[a-zA-Z0-9_-]+$/', $processoSalvar)) {
+                throw new RuntimeException('O identificador do processo vinculado é inválido.');
+            }
+
+            $clienteValidado = null;
+            if ($clienteSalvar !== '0') {
+                $clienteValidado = rojex_kb_consultar_um(
+                    $conn,
+                    'SELECT id FROM clientes WHERE id = ? LIMIT 1',
+                    's',
+                    [$clienteSalvar]
+                );
+                if (!$clienteValidado) {
+                    throw new RuntimeException(
+                        'O cliente vinculado não pertence ao escritório autenticado.'
+                    );
+                }
+            }
+
+            if ($processoSalvar !== '0') {
+                $processoValidado = rojex_kb_consultar_um(
+                    $conn,
+                    'SELECT id, cliente_id FROM processos WHERE id = ? LIMIT 1',
+                    's',
+                    [$processoSalvar]
+                );
+                if (!$processoValidado) {
+                    throw new RuntimeException(
+                        'O processo vinculado não pertence ao escritório autenticado.'
+                    );
+                }
+
+                $clienteDoProcessoSalvar = trim(
+                    (string)($processoValidado['cliente_id'] ?? '0')
+                );
+                if ($clienteDoProcessoSalvar === '') {
+                    $clienteDoProcessoSalvar = '0';
+                }
+                if ($clienteSalvar === '0' && $clienteDoProcessoSalvar !== '0') {
+                    $clienteDerivado = rojex_kb_consultar_um(
+                        $conn,
+                        'SELECT id FROM clientes WHERE id = ? LIMIT 1',
+                        's',
+                        [$clienteDoProcessoSalvar]
+                    );
+                    if (!$clienteDerivado) {
+                        throw new RuntimeException(
+                            'O cliente do processo não pertence ao escritório autenticado.'
+                        );
+                    }
+                    $clienteSalvar = $clienteDoProcessoSalvar;
+                }
+
+                if (
+                    $clienteSalvar !== '0'
+                    && $clienteDoProcessoSalvar !== '0'
+                    && $clienteSalvar !== $clienteDoProcessoSalvar
+                ) {
+                    throw new RuntimeException(
+                        'O cliente e o processo vinculados não pertencem ao mesmo cadastro.'
+                    );
+                }
+            }
 
             $tituloFinal = $tituloDocumento !== ''
                 ? $tituloDocumento
                 : (trim((string)($consulta['titulo'] ?? '')) ?: 'Minuta jurídica - ' . date('d/m/Y H:i'));
 
-            if (!cij_gerador_table_exists($conn, 'modelos_documentos_gerados')) {
-                throw new RuntimeException('A tabela de documentos gerados não está disponível.');
-            }
+            cij_gerador_exigir_tabela_multi_tenant($conn, 'modelos_documentos_gerados');
 
             $conn->begin_transaction();
 
             try {
                 $stmtSalvar = $conn->prepare(
                     'INSERT INTO modelos_documentos_gerados
-                        (modelo_id, cliente_id, processo_id, titulo, conteudo_final, gerado_por)
-                     VALUES (0, ?, ?, ?, ?, ?)'
+                        (tenant_id, escritorio_id, modelo_id, cliente_id, processo_id,
+                         titulo, conteudo_final, gerado_por)
+                     VALUES (?, ?, 0, ?, ?, ?, ?, ?)'
                 );
 
                 if (!$stmtSalvar) {
@@ -611,7 +796,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                 }
 
                 $stmtSalvar->bind_param(
-                    'iissi',
+                    'sissssi',
+                    $contextoGerador['tenant_id'],
+                    $contextoGerador['escritorio_id'],
                     $clienteSalvar,
                     $processoSalvar,
                     $tituloFinal,
@@ -636,6 +823,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                          modo = ?
                      WHERE id = ?
                        AND usuario_id = ?
+                       AND tenant_id = ?
+                       AND escritorio_id = ?
                        AND modulo = ?'
                 );
 
@@ -646,12 +835,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                 }
 
                 $stmtAtualizarHistorico->bind_param(
-                    'sssiis',
+                    'sssiisis',
                     $conteudoEditado,
                     $tituloFinal,
                     $modoHistoricoAtualizado,
                     $consultaIdRecebida,
                     $uid,
+                    $contextoGerador['tenant_id'],
+                    $contextoGerador['escritorio_id'],
                     $moduloHistorico
                 );
 
@@ -696,6 +887,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                         'resultado' => 'SUCESSO',
                         'nivel' => 'INFO',
                         'dados_novos' => [
+                            'tenant_id' => $contextoGerador['tenant_id'],
+                            'escritorio_id' => $contextoGerador['escritorio_id'],
                             'consulta_id' => $consultaIdRecebida,
                             'cliente_id' => $clienteSalvar ?: null,
                             'processo_id' => $processoSalvar ?: null,
@@ -719,12 +912,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
         $erroIa = 'A sessão de segurança expirou. Atualize a página e tente novamente.';
     } elseif (cij_gerador_id_usuario() <= 0) {
         $erroIa = 'Sua sessão não está autenticada. Entre novamente no sistema.';
+    } elseif (!$contextoGerador) {
+        $erroIa = $erroContextoTenant !== ''
+            ? $erroContextoTenant
+            : 'O contexto Multi-Tenant não está disponível.';
     } elseif ($tipo === '' || $area === '' || $descricaoCaso === '') {
         $erroIa = 'Preencha o tipo de documento, a área do Direito e a descrição do caso.';
     } else {
         try {
             if (
-                $processoId > 0
+                $processoId !== '0'
                 && function_exists('rojex_kb_tabela_existe')
                 && rojex_kb_tabela_existe($conn, 'processos')
             ) {
@@ -734,6 +931,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
 
                 $joinClienteProcesso = $temClienteProcesso
                     ? ' LEFT JOIN clientes c ON c.id = p.cliente_id'
+                        . ' AND c.tenant_id = p.tenant_id'
+                        . ' AND c.escritorio_id = p.escritorio_id'
                     : '';
 
                 $campoNomeCliente = $temClienteProcesso
@@ -749,7 +948,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                     'SELECT p.*' . $campoNomeCliente
                     . ' FROM processos p' . $joinClienteProcesso
                     . ' WHERE p.id = ?' . $filtroProcessoSelecionado . ' LIMIT 1',
-                    'i',
+                    's',
                     [$processoId]
                 );
 
@@ -851,7 +1050,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                 );
                 $entradaHistorico = json_encode(
                     [
-                        'cliente_id' => $clienteId !== '0' ? (int)$clienteId : 0,
+                        'cliente_id' => $clienteId,
                         'processo_id' => $processoId,
                         'tipo_documento' => $tipo,
                         'area_direito' => $area,
@@ -875,15 +1074,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
 
                 $stmtHistorico = $conn->prepare(
                     'INSERT INTO ia_consultas
-                        (usuario_id, usuario_nome, pergunta, resposta, modulo, tipo, titulo, entrada, prompt_gerado, modo)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+                        (tenant_id, escritorio_id, usuario_id, usuario_nome, pergunta,
+                         resposta, modulo, tipo, titulo, entrada, prompt_gerado, modo)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
                 );
                 if (!$stmtHistorico) {
                     throw new RuntimeException($conn->error ?: 'Falha ao preparar registro do histórico.');
                 }
 
                 $stmtHistorico->bind_param(
-                    'isssssssss',
+                    'siisssssssss',
+                    $contextoGerador['tenant_id'],
+                    $contextoGerador['escritorio_id'],
                     $uid,
                     $usuarioNome,
                     $perguntaLegada,
@@ -916,10 +1118,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                         'resultado' => 'SUCESSO',
                         'nivel' => 'INFO',
                         'dados_novos' => [
+                            'tenant_id' => $contextoGerador['tenant_id'],
+                            'escritorio_id' => $contextoGerador['escritorio_id'],
                             'tipo_documento' => $tipo,
                             'area_direito' => $area,
                             'cliente_id' => $clienteId !== '0' ? $clienteId : null,
-                            'processo_id' => $processoId > 0 ? $processoId : null,
+                            'processo_id' => $processoId !== '0' ? $processoId : null,
                             'modo' => $modoResposta,
                         ],
                     ]
@@ -943,23 +1147,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                         'origem' => 'Gerador Jurídico',
                         'resultado' => 'FALHA',
                         'nivel' => 'ERRO',
+                        'dados_novos' => [
+                            'tenant_id' => $contextoGerador['tenant_id'],
+                            'escritorio_id' => $contextoGerador['escritorio_id'],
+                            'processo_id' => $processoId !== '0' ? $processoId : null,
+                        ],
                     ]
                 );
             }
         }
     }
 }
-$historicoGerador = cij_gerador_consultar(
-    $conn,
-    'SELECT id, tipo, titulo, modo, criado_em
-     FROM ia_consultas
-     WHERE usuario_id = ?
-       AND modulo = ?
-     ORDER BY id DESC
-     LIMIT 8',
-    'is',
-    [cij_gerador_id_usuario(), 'CIJ_GERADOR']
-);
+$historicoGerador = [];
+if ($contextoGerador && cij_gerador_id_usuario() > 0) {
+    $historicoGerador = cij_gerador_consultar(
+        $conn,
+        'SELECT id, tipo, titulo, modo, criado_em
+         FROM ia_consultas
+         WHERE usuario_id = ?
+           AND tenant_id = ?
+           AND escritorio_id = ?
+           AND modulo = ?
+         ORDER BY id DESC
+         LIMIT 8',
+        'isis',
+        [
+            cij_gerador_id_usuario(),
+            $contextoGerador['tenant_id'],
+            $contextoGerador['escritorio_id'],
+            'CIJ_GERADOR',
+        ]
+    );
+}
 
 
 ?>
@@ -1055,13 +1274,13 @@ $historicoGerador = cij_gerador_consultar(
                                     <option value="0">Não vincular processo</option>
                                     <?php foreach ($processosSistema as $processoOpcao): ?>
                                         <option
-                                            value="<?= (int)$processoOpcao['id'] ?>"
+                                            value="<?= cij_gerador_h($processoOpcao['id']) ?>"
                                             data-cliente="<?= cij_gerador_h($processoOpcao['cliente_id'] ?? '0') ?>"
                                             data-tipo="<?= cij_gerador_h($processoOpcao['tipo_processo'] ?? '') ?>"
                                             data-comarca="<?= cij_gerador_h($processoOpcao['comarca'] ?? '') ?>"
                                             data-fase="<?= cij_gerador_h($processoOpcao['fase_atual'] ?? '') ?>"
                                             data-status="<?= cij_gerador_h($processoOpcao['status'] ?? '') ?>"
-                                            <?= $processoId === (int)$processoOpcao['id'] ? 'selected' : '' ?>
+                                            <?= $processoId === (string)$processoOpcao['id'] ? 'selected' : '' ?>
                                         >
                                             <?= cij_gerador_h(($processoOpcao['numero_processo'] ?: 'Sem número') . ' - ' . ($processoOpcao['cliente_nome'] ?: 'Sem cliente')) ?>
                                         </option>
@@ -1619,4 +1838,3 @@ ${blocos}
     }
 })();
 </script>
-

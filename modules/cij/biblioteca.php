@@ -26,6 +26,28 @@ function cij_biblioteca_h($valor): string
     return htmlspecialchars((string)($valor ?? ''), ENT_QUOTES, 'UTF-8');
 }
 
+function cij_biblioteca_limitar(string $valor, int $maximo): string
+{
+    $valor = trim($valor);
+    return function_exists('mb_substr')
+        ? mb_substr($valor, 0, $maximo, 'UTF-8')
+        : substr($valor, 0, $maximo);
+}
+
+/**
+ * @return array{tenant_id:string, escritorio_id:int}
+ */
+function cij_biblioteca_contexto_multi_tenant(): array
+{
+    if (!function_exists('rojex_kb_contexto_multi_tenant')) {
+        throw new RuntimeException(
+            'A camada Multi-Tenant da Biblioteca não está disponível.'
+        );
+    }
+
+    return rojex_kb_contexto_multi_tenant();
+}
+
 function cij_biblioteca_tabela_disponivel(mysqli $conn): bool
 {
     if (function_exists('rojex_kb_tabela_existe')) {
@@ -59,20 +81,6 @@ function cij_biblioteca_colunas(mysqli $conn): array
     }
 
     return array_values(array_filter($colunas));
-}
-
-function cij_biblioteca_bind(mysqli_stmt $stmt, string $tipos, array $parametros): bool
-{
-    if ($tipos === '') {
-        return true;
-    }
-
-    $refs = [];
-    foreach ($parametros as $indice => $valor) {
-        $refs[$indice] = &$parametros[$indice];
-    }
-
-    return $stmt->bind_param($tipos, ...$refs);
 }
 
 function cij_biblioteca_consultar(
@@ -177,27 +185,13 @@ function cij_biblioteca_consultar(
         . ' ORDER BY ' . implode(', ', $ordem)
         . ' LIMIT ' . $limite;
 
-    try {
-        $stmt = $conn->prepare($sql);
-        if (!$stmt) {
-            return [];
-        }
-
-        if (!cij_biblioteca_bind($stmt, $types, $params)) {
-            $stmt->close();
-            return [];
-        }
-
-        $stmt->execute();
-        $res = $stmt->get_result();
-        $dados = $res ? $res->fetch_all(MYSQLI_ASSOC) : [];
-        $stmt->close();
-
-        return $dados;
-    } catch (Throwable $e) {
-        error_log('[CIJ Biblioteca] ' . $e->getMessage());
-        return [];
+    if (!function_exists('rojex_kb_consultar')) {
+        throw new RuntimeException(
+            'Consulta da Biblioteca bloqueada: Base Multi-Tenant indisponível.'
+        );
     }
+
+    return rojex_kb_consultar($conn, $sql, $types, $params);
 }
 
 function cij_biblioteca_opcoes(mysqli $conn, string $campo): array
@@ -214,33 +208,32 @@ function cij_biblioteca_opcoes(mysqli $conn, string $campo): array
 
     $filtro = in_array('deletado', $colunas, true)
         ? ' WHERE COALESCE(deletado, 0) = 0'
-        : '';
+        : ' WHERE 1 = 1';
 
-    try {
-        $res = $conn->query(
-            "SELECT DISTINCT `{$campo}` AS valor
-             FROM modelos_documentos
-             {$filtro}
-             AND COALESCE(`{$campo}`, '') <> ''
-             ORDER BY `{$campo}` ASC"
+    if (!function_exists('rojex_kb_consultar')) {
+        throw new RuntimeException(
+            'Filtros da Biblioteca bloqueados: Base Multi-Tenant indisponível.'
         );
-
-        if (!$res) {
-            return [];
-        }
-
-        $dados = [];
-        while ($row = $res->fetch_assoc()) {
-            $valor = trim((string)($row['valor'] ?? ''));
-            if ($valor !== '') {
-                $dados[] = $valor;
-            }
-        }
-
-        return $dados;
-    } catch (Throwable $e) {
-        return [];
     }
+
+    $linhas = rojex_kb_consultar(
+        $conn,
+        "SELECT DISTINCT `{$campo}` AS valor
+         FROM modelos_documentos
+         {$filtro}
+         AND COALESCE(`{$campo}`, '') <> ''
+         ORDER BY `{$campo}` ASC"
+    );
+
+    $dados = [];
+    foreach ($linhas as $row) {
+        $valor = trim((string)($row['valor'] ?? ''));
+        if ($valor !== '') {
+            $dados[] = $valor;
+        }
+    }
+
+    return $dados;
 }
 
 function cij_biblioteca_resumo(mysqli $conn): array
@@ -261,32 +254,46 @@ function cij_biblioteca_resumo(mysqli $conn): array
         ? ' WHERE COALESCE(deletado, 0) = 0'
         : ' WHERE 1 = 1';
 
+    if (!function_exists('rojex_kb_consultar_um')) {
+        throw new RuntimeException(
+            'Resumo da Biblioteca bloqueado: Base Multi-Tenant indisponível.'
+        );
+    }
+
     try {
-        $resumo['total'] = (int)(($conn->query(
+        $linha = rojex_kb_consultar_um(
+            $conn,
             "SELECT COUNT(*) AS total FROM modelos_documentos {$where}"
-        )->fetch_assoc()['total'] ?? 0));
+        );
+        $resumo['total'] = (int)($linha['total'] ?? 0);
 
         if (in_array('status', $colunas, true)) {
-            $resumo['ativos'] = (int)(($conn->query(
+            $linha = rojex_kb_consultar_um(
+                $conn,
                 "SELECT COUNT(*) AS total FROM modelos_documentos {$where} AND status = 'Ativo'"
-            )->fetch_assoc()['total'] ?? 0));
+            );
+            $resumo['ativos'] = (int)($linha['total'] ?? 0);
         } else {
             $resumo['ativos'] = $resumo['total'];
         }
 
         if (in_array('favorito', $colunas, true)) {
-            $resumo['favoritos'] = (int)(($conn->query(
+            $linha = rojex_kb_consultar_um(
+                $conn,
                 "SELECT COUNT(*) AS total FROM modelos_documentos {$where} AND COALESCE(favorito, 0) = 1"
-            )->fetch_assoc()['total'] ?? 0));
+            );
+            $resumo['favoritos'] = (int)($linha['total'] ?? 0);
         }
 
         if (in_array('area_direito', $colunas, true)) {
-            $resumo['areas'] = (int)(($conn->query(
+            $linha = rojex_kb_consultar_um(
+                $conn,
                 "SELECT COUNT(DISTINCT area_direito) AS total
                  FROM modelos_documentos
                  {$where}
                  AND COALESCE(area_direito, '') <> ''"
-            )->fetch_assoc()['total'] ?? 0));
+            );
+            $resumo['areas'] = (int)($linha['total'] ?? 0);
         }
     } catch (Throwable $e) {
         return $resumo;
@@ -295,46 +302,96 @@ function cij_biblioteca_resumo(mysqli $conn): array
     return $resumo;
 }
 
-$termo = trim((string)($_GET['q'] ?? ''));
-$categoria = trim((string)($_GET['categoria'] ?? ''));
-$area = trim((string)($_GET['area_direito'] ?? ''));
-$status = trim((string)($_GET['status'] ?? 'Ativo'));
+function cij_biblioteca_buscar_por_id(mysqli $conn, int $id): ?array
+{
+    if ($id < 1 || !cij_biblioteca_tabela_disponivel($conn)) {
+        return null;
+    }
+
+    $colunas = cij_biblioteca_colunas($conn);
+    if (!in_array('id', $colunas, true)) {
+        return null;
+    }
+
+    $campos = array_values(array_intersect([
+        'id', 'codigo', 'titulo', 'categoria', 'area_direito', 'conteudo',
+        'observacoes', 'status', 'favorito', 'versao_atual',
+        'ultimo_uso_em', 'criado_em', 'atualizado_em'
+    ], $colunas));
+
+    if ($campos === [] || !function_exists('rojex_kb_consultar_um')) {
+        throw new RuntimeException(
+            'Visualização da Biblioteca bloqueada: Base Multi-Tenant indisponível.'
+        );
+    }
+
+    $select = implode(', ', array_map(
+        static fn(string $campo): string => "`{$campo}`",
+        $campos
+    ));
+    $sql = "SELECT {$select} FROM modelos_documentos WHERE id = ?";
+    if (in_array('deletado', $colunas, true)) {
+        $sql .= ' AND COALESCE(deletado, 0) = 0';
+    }
+    $sql .= ' LIMIT 1';
+
+    return rojex_kb_consultar_um($conn, $sql, 'i', [$id]);
+}
+
+$termo = cij_biblioteca_limitar((string)($_GET['q'] ?? ''), 200);
+$categoria = cij_biblioteca_limitar((string)($_GET['categoria'] ?? ''), 100);
+$area = cij_biblioteca_limitar((string)($_GET['area_direito'] ?? ''), 100);
+$status = cij_biblioteca_limitar((string)($_GET['status'] ?? 'Ativo'), 100);
 $somenteFavoritos = (string)($_GET['favoritos'] ?? '') === '1';
 
-$modelos = cij_biblioteca_consultar(
-    $conn,
-    $termo,
-    $categoria,
-    $area,
-    $status,
-    $somenteFavoritos,
-    100
-);
+$contextoBiblioteca = null;
+$erroContextoTenant = '';
+$modelos = [];
+$categorias = [];
+$areas = [];
+$statusDisponiveis = [];
+$resumo = ['total' => 0, 'ativos' => 0, 'favoritos' => 0, 'areas' => 0];
 
-$categorias = cij_biblioteca_opcoes($conn, 'categoria');
-$areas = cij_biblioteca_opcoes($conn, 'area_direito');
-$statusDisponiveis = cij_biblioteca_opcoes($conn, 'status');
-$resumo = cij_biblioteca_resumo($conn);
+try {
+    $contextoBiblioteca = cij_biblioteca_contexto_multi_tenant();
+    $categorias = cij_biblioteca_opcoes($conn, 'categoria');
+    $areas = cij_biblioteca_opcoes($conn, 'area_direito');
+    $statusDisponiveis = cij_biblioteca_opcoes($conn, 'status');
+
+    if ($categoria !== '' && !in_array($categoria, $categorias, true)) {
+        $categoria = '';
+    }
+    if ($area !== '' && !in_array($area, $areas, true)) {
+        $area = '';
+    }
+    if ($status !== '' && !in_array($status, $statusDisponiveis, true)) {
+        $status = '';
+    }
+
+    $modelos = cij_biblioteca_consultar(
+        $conn,
+        $termo,
+        $categoria,
+        $area,
+        $status,
+        $somenteFavoritos,
+        100
+    );
+    $resumo = cij_biblioteca_resumo($conn);
+} catch (Throwable $e) {
+    error_log('[ROJEX CIJ BIBLIOTECA][TENANT] ' . $e->getMessage());
+    $erroContextoTenant = $e->getMessage();
+}
 
 $visualizarId = (int)($_GET['visualizar'] ?? 0);
 $modeloVisualizado = null;
 
-if ($visualizarId > 0) {
-    foreach ($modelos as $modeloItem) {
-        if ((int)($modeloItem['id'] ?? 0) === $visualizarId) {
-            $modeloVisualizado = $modeloItem;
-            break;
-        }
-    }
-
-    if (!$modeloVisualizado) {
-        $todos = cij_biblioteca_consultar($conn, '', '', '', '', false, 200);
-        foreach ($todos as $modeloItem) {
-            if ((int)($modeloItem['id'] ?? 0) === $visualizarId) {
-                $modeloVisualizado = $modeloItem;
-                break;
-            }
-        }
+if ($visualizarId > 0 && $contextoBiblioteca !== null) {
+    try {
+        $modeloVisualizado = cij_biblioteca_buscar_por_id($conn, $visualizarId);
+    } catch (Throwable $e) {
+        error_log('[ROJEX CIJ BIBLIOTECA][VISUALIZACAO] ' . $e->getMessage());
+        $erroContextoTenant = 'Não foi possível abrir o modelo com segurança.';
     }
 
     if ($modeloVisualizado && function_exists('sgl_registrar_log')) {
@@ -344,7 +401,19 @@ if ($visualizarId > 0) {
             'modelos_documentos',
             (string)$visualizarId,
             'Modelo consultado pela Biblioteca Inteligente do CIJ: '
-                . (string)($modeloVisualizado['titulo'] ?? '')
+                . (string)($modeloVisualizado['titulo'] ?? ''),
+            [
+                'tipo_acao' => 'VISUALIZACAO',
+                'modulo' => 'CIJ / Biblioteca Inteligente',
+                'origem' => 'Biblioteca Inteligente',
+                'resultado' => 'SUCESSO',
+                'nivel' => 'INFO',
+                'dados_novos' => [
+                    'tenant_id' => $contextoBiblioteca['tenant_id'],
+                    'escritorio_id' => $contextoBiblioteca['escritorio_id'],
+                    'titulo' => (string)($modeloVisualizado['titulo'] ?? ''),
+                ],
+            ]
         );
     }
 }
@@ -364,6 +433,13 @@ if ($visualizarId > 0) {
             <i class="bi bi-arrow-left me-1"></i>Voltar ao CIJ
         </a>
     </div>
+
+    <?php if ($erroContextoTenant !== ''): ?>
+        <div class="alert alert-danger border-0 shadow-sm">
+            <i class="bi bi-shield-exclamation me-1"></i>
+            <?= cij_biblioteca_h($erroContextoTenant) ?>
+        </div>
+    <?php endif; ?>
 
     <?php if (!cij_biblioteca_tabela_disponivel($conn)): ?>
         <div class="alert alert-warning border-0 shadow-sm">

@@ -10,8 +10,12 @@ require_once __DIR__ . '/../config/integracoes.php';
 if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
 if (function_exists('sgl_completar_logs_sem_responsavel')) { sgl_completar_logs_sem_responsavel($conn); }
 $upload_dir = __DIR__ . '/../assets/img/';
+$upload_marca_dir = $upload_dir . 'branding/';
 if (!is_dir($upload_dir)) {
     @mkdir($upload_dir, 0755, true);
+}
+if (!is_dir($upload_marca_dir)) {
+    @mkdir($upload_marca_dir, 0755, true);
 }
 
 // -----------------------------------------------------------------------------
@@ -148,6 +152,63 @@ $conn->query("CREATE TABLE IF NOT EXISTS backups_sistema (
     INDEX idx_backups_status (status),
     INDEX idx_backups_criado (criado_em)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+// Sprint 4.6.5 — inventário imutável dos backups isolados do LOG.
+$conn->query("CREATE TABLE IF NOT EXISTS logs_backups (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_id VARCHAR(80) NOT NULL,
+    escritorio_id BIGINT NOT NULL,
+    escritorio_nome VARCHAR(180) NULL,
+    periodo_inicio DATETIME NOT NULL,
+    periodo_fim DATETIME NOT NULL,
+    arquivo VARCHAR(500) NOT NULL,
+    nome_arquivo VARCHAR(255) NOT NULL,
+    sha256 CHAR(64) NOT NULL,
+    tamanho_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    total_registros BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    ids_json LONGTEXT NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'GERADO',
+    verificado_em DATETIME NULL,
+    download_em DATETIME NULL,
+    arquivado_em DATETIME NULL,
+    criado_por INT NULL,
+    criado_por_nome VARCHAR(150) NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_lb_tenant_escritorio (tenant_id, escritorio_id),
+    INDEX idx_lb_status (status),
+    INDEX idx_lb_criado (criado_em)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+
+foreach ([
+    'tenant_id' => "VARCHAR(80) NOT NULL DEFAULT ''",
+    'escritorio_id' => "BIGINT NOT NULL DEFAULT 0",
+    'escritorio_nome' => "VARCHAR(180) NULL",
+    'periodo_inicio' => "DATETIME NULL",
+    'periodo_fim' => "DATETIME NULL",
+    'arquivo' => "VARCHAR(500) NULL",
+    'nome_arquivo' => "VARCHAR(255) NULL",
+    'sha256' => "CHAR(64) NULL",
+    'tamanho_bytes' => "BIGINT UNSIGNED NOT NULL DEFAULT 0",
+    'total_registros' => "BIGINT UNSIGNED NOT NULL DEFAULT 0",
+    'ids_json' => "LONGTEXT NULL",
+    'status' => "VARCHAR(30) NOT NULL DEFAULT 'GERADO'",
+    'verificado_em' => "DATETIME NULL",
+    'download_em' => "DATETIME NULL",
+    'arquivado_em' => "DATETIME NULL",
+    'criado_por' => "INT NULL",
+    'criado_por_nome' => "VARCHAR(150) NULL",
+    'criado_em' => "DATETIME NULL DEFAULT CURRENT_TIMESTAMP",
+    'atualizado_em' => "DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+] as $colunaLogBackup => $definicaoLogBackup) {
+    if (sgl_tabela_existe($conn, 'logs_backups') && !sgl_coluna_existe($conn, 'logs_backups', $colunaLogBackup)) {
+        try {
+            $conn->query("ALTER TABLE logs_backups ADD COLUMN `$colunaLogBackup` $definicaoLogBackup");
+        } catch (Throwable $e) {
+            // A migração oficial deve fornecer a estrutura; mantém a tela disponível.
+        }
+    }
+}
 
 // Complementos não destrutivos da Etapa 8 — Backup Enterprise.
 foreach ([
@@ -330,6 +391,176 @@ function sgl_cfg_set(mysqli $conn, string $chave, string $valor): void {
     $stmt->close();
 }
 
+/**
+ * Resolve o proprietário da identidade visual no servidor.
+ * O navegador nunca informa tenant_id ou escritorio_id para esta operação.
+ *
+ * @return array{tipo:string,tenant_id:string,escritorio_id:int}
+ */
+function rojex_marca_contexto_atual(bool $ehUsuarioMaster): array {
+    $modoPlataforma = function_exists('rojexModoPlataforma')
+        && rojexModoPlataforma();
+
+    if ($modoPlataforma) {
+        if (!$ehUsuarioMaster) {
+            throw new RuntimeException(
+                'Somente o MASTER pode alterar a identidade visual da plataforma.'
+            );
+        }
+
+        return [
+            'tipo' => 'plataforma',
+            'tenant_id' => '',
+            'escritorio_id' => 0,
+        ];
+    }
+
+    if (
+        !function_exists('rojexContextoTenantValido')
+        || !function_exists('rojexTenantId')
+        || !function_exists('rojexEscritorioId')
+        || !rojexContextoTenantValido()
+    ) {
+        throw new RuntimeException(
+            'Contexto Multi-Tenant inválido para alterar a identidade visual.'
+        );
+    }
+
+    $tenantId = trim((string)rojexTenantId());
+    $escritorioId = (int)rojexEscritorioId();
+    if ($tenantId === '' || $escritorioId <= 0) {
+        throw new RuntimeException(
+            'Tenant ou escritório não identificado para a identidade visual.'
+        );
+    }
+
+    return [
+        'tipo' => 'tenant',
+        'tenant_id' => $tenantId,
+        'escritorio_id' => $escritorioId,
+    ];
+}
+
+function rojex_marca_cfg_get(
+    mysqli $conn,
+    array $contexto,
+    string $chave,
+    string $default = ''
+): string {
+    if (($contexto['tipo'] ?? '') === 'plataforma') {
+        return sgl_cfg_get($conn, $chave, $default);
+    }
+
+    $tenantId = (string)($contexto['tenant_id'] ?? '');
+    $escritorioId = (int)($contexto['escritorio_id'] ?? 0);
+    if ($tenantId === '' || $escritorioId <= 0) {
+        return $default;
+    }
+
+    $stmt = $conn->prepare(
+        "SELECT valor
+           FROM escritorios_configuracoes_saas
+          WHERE tenant_id = ?
+            AND escritorio_id = ?
+            AND chave = ?
+          LIMIT 1"
+    );
+    if (!$stmt) {
+        return $default;
+    }
+
+    $stmt->bind_param('sis', $tenantId, $escritorioId, $chave);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+
+    return $row ? (string)($row['valor'] ?? '') : $default;
+}
+
+function rojex_marca_cfg_set(
+    mysqli $conn,
+    array $contexto,
+    string $chave,
+    string $valor
+): void {
+    if (($contexto['tipo'] ?? '') === 'plataforma') {
+        sgl_cfg_set($conn, $chave, $valor);
+        return;
+    }
+
+    $tenantId = (string)($contexto['tenant_id'] ?? '');
+    $escritorioId = (int)($contexto['escritorio_id'] ?? 0);
+    if ($tenantId === '' || $escritorioId <= 0) {
+        throw new RuntimeException('Escopo inválido para salvar a identidade visual.');
+    }
+
+    $stmt = $conn->prepare(
+        "INSERT INTO escritorios_configuracoes_saas
+            (escritorio_id, tenant_id, chave, valor)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+            escritorio_id = VALUES(escritorio_id),
+            valor = VALUES(valor)"
+    );
+    if (!$stmt) {
+        throw new RuntimeException('Não foi possível preparar a identidade visual.');
+    }
+
+    $stmt->bind_param('isss', $escritorioId, $tenantId, $chave, $valor);
+    if (!$stmt->execute()) {
+        $erro = $stmt->error;
+        $stmt->close();
+        throw new RuntimeException($erro ?: 'Não foi possível salvar a identidade visual.');
+    }
+    $stmt->close();
+}
+
+function rojex_marca_cfg_delete(
+    mysqli $conn,
+    array $contexto,
+    string $chave
+): void {
+    if (($contexto['tipo'] ?? '') === 'plataforma') {
+        $stmt = $conn->prepare('DELETE FROM configuracoes WHERE chave = ?');
+        if (!$stmt) {
+            throw new RuntimeException('Não foi possível preparar a remoção da identidade visual.');
+        }
+        $stmt->bind_param('s', $chave);
+    } else {
+        $tenantId = (string)($contexto['tenant_id'] ?? '');
+        $escritorioId = (int)($contexto['escritorio_id'] ?? 0);
+        if ($tenantId === '' || $escritorioId <= 0) {
+            throw new RuntimeException('Escopo inválido para remover a identidade visual.');
+        }
+        $stmt = $conn->prepare(
+            'DELETE FROM escritorios_configuracoes_saas
+              WHERE tenant_id = ? AND escritorio_id = ? AND chave = ?'
+        );
+        if (!$stmt) {
+            throw new RuntimeException('Não foi possível preparar a remoção da identidade visual.');
+        }
+        $stmt->bind_param('sis', $tenantId, $escritorioId, $chave);
+    }
+
+    if (!$stmt || !$stmt->execute()) {
+        $erro = $stmt ? $stmt->error : '';
+        if ($stmt) {
+            $stmt->close();
+        }
+        throw new RuntimeException($erro ?: 'Não foi possível remover a identidade visual.');
+    }
+    $stmt->close();
+}
+
+function rojex_marca_prefixo_arquivo(array $contexto): string {
+    if (($contexto['tipo'] ?? '') === 'plataforma') {
+        return 'platform_master_logo';
+    }
+
+    $tenantHash = substr(hash('sha256', (string)$contexto['tenant_id']), 0, 20);
+    return 'tenant_' . $tenantHash . '_office_' . (int)$contexto['escritorio_id'] . '_logo';
+}
+
 
 /**
  * Busca as preferências visuais individuais do usuário autenticado.
@@ -483,6 +714,16 @@ function sgl_tabela_existe(mysqli $conn, string $tabela): bool {
 
 function sgl_log(mysqli $conn, string $acao, ?string $tabela = null, ?string $registro = null, ?string $detalhes = null): void {
     try {
+        if (function_exists('sgl_registrar_log')) {
+            sgl_registrar_log($conn, $acao, $tabela, $registro, $detalhes, [
+                'tipo_acao' => 'EVENTO',
+                'modulo' => $tabela ?: 'Configurações',
+                'origem' => 'modules/configuracoes.php',
+                'resultado' => 'SUCESSO',
+                'nivel' => 'INFO',
+            ]);
+            return;
+        }
         $usuario_id = isset($_SESSION['user_id']) ? (int)$_SESSION['user_id'] : null;
         $nomeSessao = $_SESSION['nome'] ?? $_SESSION['username'] ?? 'Sistema';
         $perfilSessao = $_SESSION['perfil'] ?? 'Perfil não informado';
@@ -1279,6 +1520,202 @@ function rojex_backup_validar_arquivo(string $arquivo, ?string $hashEsperado = n
     ];
 }
 
+function rojex_log_backup_diretorio(): string {
+    $diretorio = __DIR__ . '/../storage/log_backups';
+    if (!is_dir($diretorio)) {
+        @mkdir($diretorio, 0750, true);
+    }
+    if (is_dir($diretorio)) {
+        $htaccess = $diretorio . '/.htaccess';
+        if (!is_file($htaccess)) {
+            @file_put_contents($htaccess, "Require all denied\nDeny from all\n");
+        }
+        $index = $diretorio . '/index.php';
+        if (!is_file($index)) {
+            @file_put_contents($index, "<?php http_response_code(404); exit;\n");
+        }
+    }
+    return $diretorio;
+}
+
+function rojex_log_backup_json(mixed $valor): string {
+    $json = json_encode(
+        $valor,
+        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE
+    );
+    if ($json === false) {
+        throw new RuntimeException('Não foi possível serializar os dados do backup.');
+    }
+    return $json;
+}
+
+function rojex_log_backup_csv_valor(mixed $valor): string {
+    if ($valor === null) return '';
+    if (is_bool($valor)) return $valor ? '1' : '0';
+    if (is_array($valor) || is_object($valor)) return rojex_log_backup_json($valor);
+    return (string)$valor;
+}
+
+function rojex_log_backup_buscar(mysqli $conn, int $backupId, bool $bloquear = false): ?array {
+    $sql = "SELECT * FROM logs_backups WHERE id = ? LIMIT 1" . ($bloquear ? " FOR UPDATE" : "");
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) throw new RuntimeException('Falha ao preparar a consulta do backup de LOG.');
+    $stmt->bind_param('i', $backupId);
+    $stmt->execute();
+    $registro = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $registro ?: null;
+}
+
+function rojex_log_backup_caminho_valido(string $arquivo): bool {
+    $base = realpath(rojex_log_backup_diretorio());
+    $real = realpath($arquivo);
+    return $base !== false
+        && $real !== false
+        && is_file($real)
+        && ($real === $base || str_starts_with($real, $base . DIRECTORY_SEPARATOR));
+}
+
+function rojex_log_backup_gerar_zip(
+    mysqli $conn,
+    string $tenantId,
+    int $escritorioId,
+    string $escritorioNome,
+    string $periodoInicio,
+    string $periodoFim
+): array {
+    if (!class_exists('ZipArchive')) {
+        throw new RuntimeException('A extensão ZIP do PHP não está habilitada.');
+    }
+    if ($tenantId === '' || $escritorioId <= 0) {
+        throw new RuntimeException('Selecione um único escritório válido.');
+    }
+
+    $stmt = $conn->prepare(
+        "SELECT * FROM logs_sistema
+          WHERE tenant_id = ?
+            AND escritorio_id = ?
+            AND escopo = 'TENANT'
+            AND criado_em >= ?
+            AND criado_em <= ?
+          ORDER BY id ASC"
+    );
+    if (!$stmt) throw new RuntimeException('Falha ao preparar a seleção isolada dos logs.');
+    $stmt->bind_param('siss', $tenantId, $escritorioId, $periodoInicio, $periodoFim);
+    $stmt->execute();
+    $resultado = $stmt->get_result();
+    $registros = [];
+    while ($linha = $resultado->fetch_assoc()) {
+        $registros[] = $linha;
+    }
+    $stmt->close();
+
+    if (!$registros) {
+        throw new RuntimeException('Nenhum LOG deste escritório foi encontrado no período informado.');
+    }
+
+    $ids = array_map(static fn(array $linha): int => (int)$linha['id'], $registros);
+    $diretorio = rojex_log_backup_diretorio();
+    if (!is_dir($diretorio) || !is_writable($diretorio)) {
+        throw new RuntimeException('A pasta storage/log_backups não possui permissão de gravação.');
+    }
+
+    $sufixo = bin2hex(random_bytes(8));
+    $tenantSeguro = preg_replace('/[^A-Za-z0-9_-]+/', '-', $tenantId) ?: 'tenant';
+    $nomeZip = 'logs_' . $tenantSeguro . '_escritorio_' . $escritorioId . '_'
+        . date('Ymd_His') . '_' . $sufixo . '.zip';
+    $arquivoZip = $diretorio . DIRECTORY_SEPARATOR . $nomeZip;
+    $temporario = $diretorio . DIRECTORY_SEPARATOR . '.tmp_' . $sufixo;
+    if (!@mkdir($temporario, 0750, true) && !is_dir($temporario)) {
+        throw new RuntimeException('Não foi possível criar a área temporária do backup.');
+    }
+
+    $arquivoCsv = $temporario . DIRECTORY_SEPARATOR . 'logs.csv';
+    $arquivoJsonl = $temporario . DIRECTORY_SEPARATOR . 'logs.jsonl';
+    $arquivoManifesto = $temporario . DIRECTORY_SEPARATOR . 'manifesto.json';
+
+    try {
+        $csv = fopen($arquivoCsv, 'wb');
+        if (!$csv) throw new RuntimeException('Não foi possível criar logs.csv.');
+        fwrite($csv, "\xEF\xBB\xBF");
+        $cabecalhos = array_keys($registros[0]);
+        fputcsv($csv, $cabecalhos, ';', '"', '\\');
+        foreach ($registros as $registro) {
+            $linhaCsv = [];
+            foreach ($cabecalhos as $cabecalho) {
+                $linhaCsv[] = rojex_log_backup_csv_valor($registro[$cabecalho] ?? null);
+            }
+            fputcsv($csv, $linhaCsv, ';', '"', '\\');
+        }
+        fclose($csv);
+
+        $jsonl = fopen($arquivoJsonl, 'wb');
+        if (!$jsonl) throw new RuntimeException('Não foi possível criar logs.jsonl.');
+        foreach ($registros as $registro) {
+            fwrite($jsonl, rojex_log_backup_json($registro) . "\n");
+        }
+        fclose($jsonl);
+
+        $manifesto = [
+            'produto' => 'ROJEX.AI ERP Jurídico Enterprise SaaS',
+            'sprint' => '4.6.5',
+            'formato' => 1,
+            'gerado_em' => date(DATE_ATOM),
+            'tenant_id' => $tenantId,
+            'escritorio_id' => $escritorioId,
+            'escritorio_nome' => $escritorioNome,
+            'periodo_inicio' => $periodoInicio,
+            'periodo_fim' => $periodoFim,
+            'total_registros' => count($registros),
+            'primeiro_id' => min($ids),
+            'ultimo_id' => max($ids),
+            'ids' => $ids,
+            'arquivos' => [
+                'logs.csv' => ['sha256' => hash_file('sha256', $arquivoCsv), 'bytes' => filesize($arquivoCsv)],
+                'logs.jsonl' => ['sha256' => hash_file('sha256', $arquivoJsonl), 'bytes' => filesize($arquivoJsonl)],
+            ],
+        ];
+        file_put_contents(
+            $arquivoManifesto,
+            json_encode($manifesto, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+        );
+
+        $zip = new ZipArchive();
+        if ($zip->open($arquivoZip, ZipArchive::CREATE | ZipArchive::EXCL) !== true) {
+            throw new RuntimeException('Não foi possível criar o arquivo ZIP.');
+        }
+        $zip->addFile($arquivoCsv, 'logs.csv');
+        $zip->addFile($arquivoJsonl, 'logs.jsonl');
+        $zip->addFile($arquivoManifesto, 'manifesto.json');
+        if (!$zip->close()) {
+            throw new RuntimeException('Não foi possível finalizar o arquivo ZIP.');
+        }
+
+        $sha256 = hash_file('sha256', $arquivoZip);
+        $tamanho = filesize($arquivoZip);
+        if (!is_string($sha256) || strlen($sha256) !== 64 || $tamanho === false || $tamanho <= 0) {
+            throw new RuntimeException('O ZIP foi criado, mas sua integridade inicial não pôde ser confirmada.');
+        }
+
+        return [
+            'arquivo' => $arquivoZip,
+            'nome_arquivo' => $nomeZip,
+            'sha256' => $sha256,
+            'tamanho_bytes' => (int)$tamanho,
+            'total_registros' => count($registros),
+            'ids_json' => rojex_log_backup_json($ids),
+        ];
+    } catch (Throwable $e) {
+        if (is_file($arquivoZip)) @unlink($arquivoZip);
+        throw $e;
+    } finally {
+        foreach ([$arquivoCsv, $arquivoJsonl, $arquivoManifesto] as $temporarioArquivo) {
+            if (is_file($temporarioArquivo)) @unlink($temporarioArquivo);
+        }
+        if (is_dir($temporario)) @rmdir($temporario);
+    }
+}
+
 
 function rojex_atualizacao_versao_atual(mysqli $conn): string {
     $versao = trim(sgl_cfg_get($conn, 'versao_sistema', ''));
@@ -1482,6 +1919,9 @@ $acoesExclusivasMaster = [
     'simular_backup',
     'executar_backup',
     'verificar_backup',
+    'gerar_log_backup',
+    'verificar_log_backup',
+    'arquivar_log_backup',
     'salvar_atualizacao',
     'alterar_status_atualizacao',
     'simular_atualizacao',
@@ -1505,8 +1945,285 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !validarTokenCsrf($_POST['csrf_toke
     $acao_cfg = '';
 }
 
+// Download autenticado. O buffer iniciado pelo index.php impede qualquer saída
+// HTML anterior aos cabeçalhos do arquivo.
+if (
+    $ehUsuarioMaster
+    && ($_GET['acao_cfg'] ?? '') === 'baixar_log_backup'
+    && $_SERVER['REQUEST_METHOD'] === 'GET'
+) {
+    $backupIdDownload = max(0, (int)($_GET['backup_id'] ?? 0));
+    try {
+        $backupDownload = rojex_log_backup_buscar($conn, $backupIdDownload);
+        if (!$backupDownload || !rojex_log_backup_caminho_valido((string)$backupDownload['arquivo'])) {
+            throw new RuntimeException('Arquivo de backup não localizado.');
+        }
+        $hashAtual = hash_file('sha256', (string)$backupDownload['arquivo']);
+        if (!is_string($hashAtual) || !hash_equals((string)$backupDownload['sha256'], $hashAtual)) {
+            throw new RuntimeException('Download bloqueado: o SHA-256 do ZIP não confere.');
+        }
+
+        $agoraDownload = date('Y-m-d H:i:s');
+        $stmt = $conn->prepare(
+            "UPDATE logs_backups
+                SET download_em = ?, status = CASE WHEN status = 'VERIFICADO' THEN 'BAIXADO' ELSE status END
+              WHERE id = ?"
+        );
+        $stmt->bind_param('si', $agoraDownload, $backupIdDownload);
+        $stmt->execute();
+        $stmt->close();
+        sgl_log(
+            $conn,
+            'Download de backup de LOG iniciado',
+            'logs_backups',
+            (string)$backupIdDownload,
+            'Arquivo: ' . (string)$backupDownload['nome_arquivo']
+        );
+
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+        $arquivoDownload = (string)$backupDownload['arquivo'];
+        $nomeDownload = basename((string)$backupDownload['nome_arquivo']);
+        header('Content-Type: application/zip');
+        header('Content-Disposition: attachment; filename="' . str_replace('"', '', $nomeDownload) . '"');
+        header('Content-Length: ' . (string)filesize($arquivoDownload));
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('X-Content-Type-Options: nosniff');
+        $handleDownload = fopen($arquivoDownload, 'rb');
+        if (!$handleDownload) throw new RuntimeException('Não foi possível abrir o ZIP para download.');
+        fpassthru($handleDownload);
+        fclose($handleDownload);
+        exit;
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('logs', 'erro', $e->getMessage());
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Ações POST
+// -----------------------------------------------------------------------------
+// Backup e Arquivamento do LOG por Escritório — Sprint 4.6.5
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'gerar_log_backup') {
+    $escritorioIdBackup = max(0, (int)($_POST['log_backup_escritorio_id'] ?? 0));
+    $dataInicioBackup = trim((string)($_POST['log_backup_data_inicio'] ?? ''));
+    $dataFimBackup = trim((string)($_POST['log_backup_data_fim'] ?? ''));
+    $inicioObj = DateTime::createFromFormat('!Y-m-d', $dataInicioBackup);
+    $fimObj = DateTime::createFromFormat('!Y-m-d', $dataFimBackup);
+
+    if ($escritorioIdBackup <= 0 || !$inicioObj || !$fimObj) {
+        sgl_redirect_cfg('logs', 'erro', 'Selecione um único escritório e informe o período inicial e final.');
+    }
+    if ($inicioObj > $fimObj) {
+        sgl_redirect_cfg('logs', 'erro', 'A data inicial não pode ser posterior à data final.');
+    }
+
+    $zipGerado = null;
+    try {
+        $stmt = $conn->prepare(
+            "SELECT id, tenant_id, nome FROM escritorios_saas WHERE id = ? LIMIT 1"
+        );
+        $stmt->bind_param('i', $escritorioIdBackup);
+        $stmt->execute();
+        $escritorioBackup = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$escritorioBackup || trim((string)$escritorioBackup['tenant_id']) === '') {
+            throw new RuntimeException('Escritório inválido ou sem tenant_id.');
+        }
+
+        $periodoInicioSql = $inicioObj->format('Y-m-d 00:00:00');
+        $periodoFimSql = $fimObj->format('Y-m-d 23:59:59');
+        $zipGerado = rojex_log_backup_gerar_zip(
+            $conn,
+            trim((string)$escritorioBackup['tenant_id']),
+            (int)$escritorioBackup['id'],
+            (string)$escritorioBackup['nome'],
+            $periodoInicioSql,
+            $periodoFimSql
+        );
+        $statusGerado = 'GERADO';
+        $responsavelBackup = (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'MASTER');
+        $stmt = $conn->prepare(
+            "INSERT INTO logs_backups (
+                tenant_id, escritorio_id, escritorio_nome, periodo_inicio, periodo_fim,
+                arquivo, nome_arquivo, sha256, tamanho_bytes, total_registros,
+                ids_json, status, criado_por, criado_por_nome
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        );
+        $stmt->bind_param(
+            'sissssssiissis',
+            $escritorioBackup['tenant_id'],
+            $escritorioIdBackup,
+            $escritorioBackup['nome'],
+            $periodoInicioSql,
+            $periodoFimSql,
+            $zipGerado['arquivo'],
+            $zipGerado['nome_arquivo'],
+            $zipGerado['sha256'],
+            $zipGerado['tamanho_bytes'],
+            $zipGerado['total_registros'],
+            $zipGerado['ids_json'],
+            $statusGerado,
+            $usuarioSessaoId,
+            $responsavelBackup
+        );
+        if (!$stmt->execute()) throw new RuntimeException($stmt->error ?: 'Falha ao registrar o backup.');
+        $novoBackupId = (int)$stmt->insert_id;
+        $stmt->close();
+        sgl_log(
+            $conn,
+            'Gerou backup isolado do LOG',
+            'logs_backups',
+            (string)$novoBackupId,
+            'Tenant: ' . $escritorioBackup['tenant_id'] . '; Escritório: ' . $escritorioIdBackup
+                . '; Registros: ' . $zipGerado['total_registros'] . '; SHA-256: ' . $zipGerado['sha256']
+        );
+        sgl_redirect_cfg('logs', 'sucesso', 'ZIP isolado gerado. Agora clique em Verificar.');
+    } catch (Throwable $e) {
+        if (is_array($zipGerado) && !empty($zipGerado['arquivo']) && is_file((string)$zipGerado['arquivo'])) {
+            @unlink((string)$zipGerado['arquivo']);
+        }
+        sgl_redirect_cfg('logs', 'erro', 'Não foi possível gerar o backup do LOG: ' . $e->getMessage());
+    }
+}
+
+if ($acao_cfg === 'verificar_log_backup') {
+    $backupId = max(0, (int)($_POST['backup_id'] ?? 0));
+    try {
+        $backup = rojex_log_backup_buscar($conn, $backupId);
+        if (!$backup || !rojex_log_backup_caminho_valido((string)$backup['arquivo'])) {
+            throw new RuntimeException('ZIP não localizado no servidor.');
+        }
+        $hashAtual = hash_file('sha256', (string)$backup['arquivo']);
+        if (!is_string($hashAtual) || !hash_equals((string)$backup['sha256'], $hashAtual)) {
+            $statusFalha = 'FALHA_INTEGRIDADE';
+            $stmt = $conn->prepare("UPDATE logs_backups SET status = ? WHERE id = ?");
+            $stmt->bind_param('si', $statusFalha, $backupId);
+            $stmt->execute();
+            $stmt->close();
+            throw new RuntimeException('Falha de integridade: SHA-256 divergente.');
+        }
+        $zipTeste = new ZipArchive();
+        if ($zipTeste->open((string)$backup['arquivo'], ZipArchive::CHECKCONS) !== true) {
+            throw new RuntimeException('O arquivo não passou na validação estrutural ZIP.');
+        }
+        foreach (['logs.csv', 'logs.jsonl', 'manifesto.json'] as $itemObrigatorio) {
+            if ($zipTeste->locateName($itemObrigatorio) === false) {
+                $zipTeste->close();
+                throw new RuntimeException('ZIP incompleto: ' . $itemObrigatorio . ' não foi encontrado.');
+            }
+        }
+        $zipTeste->close();
+        $agora = date('Y-m-d H:i:s');
+        $statusVerificado = 'VERIFICADO';
+        $stmt = $conn->prepare(
+            "UPDATE logs_backups SET status = ?, verificado_em = ? WHERE id = ?"
+        );
+        $stmt->bind_param('ssi', $statusVerificado, $agora, $backupId);
+        $stmt->execute();
+        $stmt->close();
+        sgl_log($conn, 'Verificou backup isolado do LOG', 'logs_backups', (string)$backupId, 'SHA-256 confirmado.');
+        sgl_redirect_cfg('logs', 'sucesso', 'Integridade confirmada. Faça o download do ZIP.');
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('logs', 'erro', $e->getMessage());
+    }
+}
+
+if ($acao_cfg === 'arquivar_log_backup') {
+    $backupId = max(0, (int)($_POST['backup_id'] ?? 0));
+    $confirmacao = strtoupper(trim((string)($_POST['confirmacao_arquivar'] ?? '')));
+    if ($confirmacao !== 'ARQUIVAR') {
+        sgl_redirect_cfg('logs', 'erro', 'Confirmação inválida. Digite ARQUIVAR.');
+    }
+
+    $transacaoAberta = false;
+    $arquivoParaRemover = '';
+    $arquivoRenomeado = '';
+    try {
+        $conn->begin_transaction();
+        $transacaoAberta = true;
+        $backup = rojex_log_backup_buscar($conn, $backupId, true);
+        if (!$backup) throw new RuntimeException('Backup não localizado.');
+        if (empty($backup['verificado_em']) || empty($backup['download_em'])) {
+            throw new RuntimeException('É obrigatório verificar e baixar o ZIP antes de arquivar.');
+        }
+        if (in_array((string)$backup['status'], ['ARQUIVADO', 'FALHA_INTEGRIDADE'], true)) {
+            throw new RuntimeException('Este backup não está disponível para arquivamento.');
+        }
+        if (!rojex_log_backup_caminho_valido((string)$backup['arquivo'])) {
+            throw new RuntimeException('O ZIP temporário não está disponível.');
+        }
+        $hashAtual = hash_file('sha256', (string)$backup['arquivo']);
+        if (!is_string($hashAtual) || !hash_equals((string)$backup['sha256'], $hashAtual)) {
+            throw new RuntimeException('Arquivamento bloqueado: SHA-256 divergente.');
+        }
+        $ids = json_decode((string)$backup['ids_json'], true);
+        if (!is_array($ids) || !$ids) throw new RuntimeException('A lista imutável de IDs do backup está vazia.');
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids), static fn(int $id): bool => $id > 0)));
+        if (!$ids) throw new RuntimeException('Nenhum ID válido foi encontrado no manifesto interno.');
+
+        $totalExcluido = 0;
+        foreach (array_chunk($ids, 500) as $loteIds) {
+            $marcadores = implode(',', array_fill(0, count($loteIds), '?'));
+            $tipos = 'si' . str_repeat('i', count($loteIds));
+            $valores = array_merge([(string)$backup['tenant_id'], (int)$backup['escritorio_id']], $loteIds);
+            $stmt = $conn->prepare(
+                "DELETE FROM logs_sistema
+                  WHERE tenant_id = ?
+                    AND escritorio_id = ?
+                    AND escopo = 'TENANT'
+                    AND id IN ($marcadores)"
+            );
+            if (!$stmt) throw new RuntimeException('Falha ao preparar a exclusão isolada dos IDs.');
+            $stmt->bind_param($tipos, ...$valores);
+            if (!$stmt->execute()) throw new RuntimeException($stmt->error ?: 'Falha ao arquivar os logs.');
+            $totalExcluido += max(0, $stmt->affected_rows);
+            $stmt->close();
+        }
+
+        $agora = date('Y-m-d H:i:s');
+        $statusArquivado = 'ARQUIVADO';
+        $stmt = $conn->prepare(
+            "UPDATE logs_backups
+                SET status = ?, arquivado_em = ?, arquivo = ''
+              WHERE id = ?"
+        );
+        $stmt->bind_param('ssi', $statusArquivado, $agora, $backupId);
+        $stmt->execute();
+        $stmt->close();
+
+        $arquivoParaRemover = (string)$backup['arquivo'];
+        $arquivoRenomeado = $arquivoParaRemover . '.arquivando';
+        if (!@rename($arquivoParaRemover, $arquivoRenomeado)) {
+            throw new RuntimeException('Não foi possível preparar a remoção segura do ZIP temporário.');
+        }
+
+        $conn->commit();
+        $transacaoAberta = false;
+        if (!@unlink($arquivoRenomeado)) {
+            error_log('[ROJEX LOG BACKUP] ZIP arquivado pendente de remoção: ' . basename($arquivoRenomeado));
+        }
+        sgl_log(
+            $conn,
+            'Arquivou backup isolado do LOG',
+            'logs_backups',
+            (string)$backupId,
+            'IDs previstos: ' . count($ids) . '; registros removidos: ' . $totalExcluido
+        );
+        sgl_redirect_cfg('logs', 'sucesso', 'Arquivamento concluído. Somente os IDs do ZIP foram removidos e a cópia temporária foi apagada.');
+    } catch (Throwable $e) {
+        if ($transacaoAberta) {
+            try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        }
+        if ($arquivoRenomeado !== '' && is_file($arquivoRenomeado) && !is_file($arquivoParaRemover)) {
+            @rename($arquivoRenomeado, $arquivoParaRemover);
+        }
+        sgl_redirect_cfg('logs', 'erro', 'Arquivamento não concluído: ' . $e->getMessage());
+    }
+}
+
 // -----------------------------------------------------------------------------
 // -----------------------------------------------------------------------------
 // Central de Atualizações Enterprise — Sprint 4.1.3 / Etapa 9
@@ -2044,7 +2761,12 @@ if ($acao_cfg === 'simular_manutencao') {
 
     if (in_array('logs_antigos', $acoesSelecionadas, true) && sgl_tabela_existe($conn, 'logs_sistema')) {
         $dataCorte = date('Y-m-d H:i:s', strtotime("-{$diasLogs} days"));
-        $stmt = $conn->prepare("SELECT COUNT(*) AS total FROM logs_sistema WHERE criado_em < ?");
+        $stmt = $conn->prepare(
+            "SELECT COUNT(*) AS total
+               FROM logs_sistema
+              WHERE criado_em < ?
+                AND COALESCE(escopo, 'LEGADO') <> 'TENANT'"
+        );
         $stmt->bind_param('s', $dataCorte);
         $stmt->execute();
         $preview['logs_antigos'] = (int)($stmt->get_result()->fetch_assoc()['total'] ?? 0);
@@ -2137,9 +2859,12 @@ if ($acao_cfg === 'executar_manutencao') {
         $diasLogs = max(30, min(3650, (int)$preview['dias_logs']));
         $dataCorte = date('Y-m-d H:i:s', strtotime("-{$diasLogs} days"));
 
-        // Preserva os 1.000 eventos mais recentes, mesmo que o período configurado seja antigo.
+        // Logs TENANT somente podem ser removidos pelo fluxo auditado da Sprint
+        // 4.6.5, após ZIP, verificação, download e confirmação ARQUIVAR.
+        // A manutenção comum atua apenas em eventos LEGADO/PLATAFORMA.
         $sqlLimpezaLogs = "DELETE FROM logs_sistema
                             WHERE criado_em < ?
+                              AND COALESCE(escopo, 'LEGADO') <> 'TENANT'
                               AND id NOT IN (
                                   SELECT id FROM (
                                       SELECT id FROM logs_sistema ORDER BY id DESC LIMIT 1000
@@ -3347,35 +4072,110 @@ if ($acao_cfg === 'salvar_escritorio') {
 }
 
 if ($acao_cfg === 'upload_logo' && isset($_FILES['logo'])) {
-    $file = $_FILES['logo'];
-    $allowed = ['image/jpeg'=>'jpg', 'image/jpg'=>'jpg', 'image/png'=>'png'];
-    $tmp = $file['tmp_name'] ?? '';
-    $mime = is_uploaded_file($tmp) ? (mime_content_type($tmp) ?: '') : '';
-    if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
-        sgl_redirect_cfg('marca', 'erro', 'Erro no upload da logomarca.');
-    } elseif (!isset($allowed[$mime])) {
-        sgl_redirect_cfg('marca', 'erro', 'Use apenas imagens JPG ou PNG.');
-    } elseif (($file['size'] ?? 0) > 2 * 1024 * 1024) {
-        sgl_redirect_cfg('marca', 'erro', 'A logomarca deve ter no máximo 2 MB.');
-    } else {
-        foreach (glob($upload_dir . 'logo_custom.*') as $f) { @unlink($f); }
-        $nome = 'logo_custom.' . $allowed[$mime];
-        if (move_uploaded_file($tmp, $upload_dir . $nome)) {
-            sgl_cfg_set($conn, 'logo_arquivo', $nome);
-            sgl_log($conn, 'Atualizou logomarca', 'configuracoes', null, $nome);
-            sgl_redirect_cfg('marca', 'sucesso', 'Logomarca atualizada com sucesso.');
+    try {
+        $contextoMarca = rojex_marca_contexto_atual($ehUsuarioMaster);
+        $file = $_FILES['logo'];
+        $allowed = [
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'image/webp' => 'webp',
+        ];
+        $tmp = (string)($file['tmp_name'] ?? '');
+        $tamanho = (int)($file['size'] ?? 0);
+
+        if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            throw new RuntimeException('Erro no upload da logomarca.');
         }
-        sgl_redirect_cfg('marca', 'erro', 'Falha ao salvar a imagem. Verifique permissões de assets/img.');
+        if (!is_uploaded_file($tmp) || $tamanho < 1 || $tamanho > 2 * 1024 * 1024) {
+            throw new RuntimeException('A logomarca deve ser uma imagem válida de até 2 MB.');
+        }
+
+        $finfo = new finfo(FILEINFO_MIME_TYPE);
+        $mime = (string)$finfo->file($tmp);
+        if (!isset($allowed[$mime]) || @getimagesize($tmp) === false) {
+            throw new RuntimeException('Use somente imagens JPG, PNG ou WebP válidas.');
+        }
+
+        if (!is_dir($upload_marca_dir) && !@mkdir($upload_marca_dir, 0755, true)) {
+            throw new RuntimeException('Não foi possível preparar a pasta das logomarcas.');
+        }
+
+        $prefixo = rojex_marca_prefixo_arquivo($contextoMarca);
+        $sufixo = bin2hex(random_bytes(6));
+        $nomeArquivo = $prefixo . '_' . $sufixo . '.' . $allowed[$mime];
+        $caminhoFinal = $upload_marca_dir . $nomeArquivo;
+        $valorBanco = 'branding/' . $nomeArquivo;
+
+        if (!move_uploaded_file($tmp, $caminhoFinal)) {
+            throw new RuntimeException(
+                'Falha ao salvar a imagem. Verifique as permissões de assets/img/branding.'
+            );
+        }
+
+        try {
+            rojex_marca_cfg_set($conn, $contextoMarca, 'logo_arquivo', $valorBanco);
+        } catch (Throwable $e) {
+            @unlink($caminhoFinal);
+            throw $e;
+        }
+
+        foreach (glob($upload_marca_dir . $prefixo . '_*') ?: [] as $arquivoAntigo) {
+            if ($arquivoAntigo !== $caminhoFinal && is_file($arquivoAntigo)) {
+                @unlink($arquivoAntigo);
+            }
+        }
+
+        sgl_log(
+            $conn,
+            'Atualizou logomarca Multi-Tenant',
+            'escritorios_configuracoes_saas',
+            (string)($contextoMarca['escritorio_id'] ?? 0),
+            'Escopo: ' . (string)$contextoMarca['tipo']
+        );
+        sgl_redirect_cfg('marca', 'sucesso', 'Logomarca deste ambiente atualizada com sucesso.');
+    } catch (Throwable $e) {
+        error_log('[ROJEX MARCA][UPLOAD] ' . $e->getMessage());
+        $mensagensUploadSeguras = [
+            'Erro no upload da logomarca.',
+            'A logomarca deve ser uma imagem válida de até 2 MB.',
+            'Use somente imagens JPG, PNG ou WebP válidas.',
+            'Não foi possível preparar a pasta das logomarcas.',
+            'Falha ao salvar a imagem. Verifique as permissões de assets/img/branding.',
+            'Somente o MASTER pode alterar a identidade visual da plataforma.',
+            'Contexto Multi-Tenant inválido para alterar a identidade visual.',
+            'Tenant ou escritório não identificado para a identidade visual.',
+        ];
+        $mensagemUpload = in_array($e->getMessage(), $mensagensUploadSeguras, true)
+            ? $e->getMessage()
+            : 'Não foi possível salvar a logomarca com segurança.';
+        sgl_redirect_cfg('marca', 'erro', $mensagemUpload);
     }
 }
 
 if ($acao_cfg === 'remover_logo') {
-    foreach (glob($upload_dir . 'logo_custom.*') as $f) { @unlink($f); }
-    $stmt = $conn->prepare("DELETE FROM configuracoes WHERE chave = 'logo_arquivo'");
-    $stmt->execute();
-    $stmt->close();
-    sgl_log($conn, 'Removeu logomarca personalizada', 'configuracoes');
-    sgl_redirect_cfg('marca', 'aviso', 'Logo personalizada removida.');
+    try {
+        $contextoMarca = rojex_marca_contexto_atual($ehUsuarioMaster);
+        $prefixo = rojex_marca_prefixo_arquivo($contextoMarca);
+
+        rojex_marca_cfg_delete($conn, $contextoMarca, 'logo_arquivo');
+        foreach (glob($upload_marca_dir . $prefixo . '_*') ?: [] as $arquivoMarca) {
+            if (is_file($arquivoMarca)) {
+                @unlink($arquivoMarca);
+            }
+        }
+
+        sgl_log(
+            $conn,
+            'Removeu logomarca Multi-Tenant',
+            'escritorios_configuracoes_saas',
+            (string)($contextoMarca['escritorio_id'] ?? 0),
+            'Escopo: ' . (string)$contextoMarca['tipo']
+        );
+        sgl_redirect_cfg('marca', 'aviso', 'Logo personalizada deste ambiente removida.');
+    } catch (Throwable $e) {
+        error_log('[ROJEX MARCA][REMOCAO] ' . $e->getMessage());
+        sgl_redirect_cfg('marca', 'erro', 'Não foi possível remover a logomarca com segurança.');
+    }
 }
 
 if ($acao_cfg === 'salvar_marca') {
@@ -3385,14 +4185,30 @@ if ($acao_cfg === 'salvar_marca') {
         ? (string)$_POST['posicao_logo']
         : 'esquerda';
 
-    sgl_cfg_set($conn, 'nome_marca_exibicao', $nomeMarca);
-    sgl_cfg_set($conn, 'slogan_marca', $sloganMarca);
-    sgl_cfg_set($conn, 'posicao_logo', $posicaoLogo);
-    sgl_cfg_set($conn, 'exibir_nome_menu', !empty($_POST['exibir_nome_menu']) ? '1' : '0');
-    sgl_cfg_set($conn, 'exibir_slogan_documentos', !empty($_POST['exibir_slogan_documentos']) ? '1' : '0');
+    try {
+        $contextoMarca = rojex_marca_contexto_atual($ehUsuarioMaster);
+        foreach ([
+            'nome_marca_exibicao' => $nomeMarca,
+            'slogan_marca' => $sloganMarca,
+            'posicao_logo' => $posicaoLogo,
+            'exibir_nome_menu' => !empty($_POST['exibir_nome_menu']) ? '1' : '0',
+            'exibir_slogan_documentos' => !empty($_POST['exibir_slogan_documentos']) ? '1' : '0',
+        ] as $chaveMarca => $valorMarca) {
+            rojex_marca_cfg_set($conn, $contextoMarca, $chaveMarca, $valorMarca);
+        }
 
-    sgl_log($conn, 'Atualizou configurações da marca', 'configuracoes', null, 'Nome, slogan e preferências de exibição.');
-    sgl_redirect_cfg('marca', 'sucesso', 'Configurações da marca salvas com sucesso.');
+        sgl_log(
+            $conn,
+            'Atualizou configurações da marca Multi-Tenant',
+            'escritorios_configuracoes_saas',
+            (string)($contextoMarca['escritorio_id'] ?? 0),
+            'Escopo: ' . (string)$contextoMarca['tipo']
+        );
+        sgl_redirect_cfg('marca', 'sucesso', 'Configurações da marca deste ambiente salvas.');
+    } catch (Throwable $e) {
+        error_log('[ROJEX MARCA][CONFIGURACAO] ' . $e->getMessage());
+        sgl_redirect_cfg('marca', 'erro', 'Não foi possível salvar a marca com segurança.');
+    }
 }
 
 if ($acao_cfg === 'salvar_tema') {
@@ -4101,6 +4917,36 @@ foreach ($config_padrao as $chave => $default) {
     $cfg[$chave] = sgl_cfg_get($conn, $chave, $default);
 }
 
+// Identidade visual institucional: MASTER usa o escopo da plataforma e cada
+// escritório usa somente sua linha em escritorios_configuracoes_saas.
+$contextoMarcaTela = null;
+try {
+    $contextoMarcaTela = rojex_marca_contexto_atual($ehUsuarioMaster);
+    foreach ([
+        'logo_arquivo',
+        'nome_marca_exibicao',
+        'slogan_marca',
+        'posicao_logo',
+        'exibir_nome_menu',
+        'exibir_slogan_documentos',
+    ] as $chaveMarcaTela) {
+        $cfg[$chaveMarcaTela] = rojex_marca_cfg_get(
+            $conn,
+            $contextoMarcaTela,
+            $chaveMarcaTela,
+            ($contextoMarcaTela['tipo'] ?? '') === 'plataforma'
+                ? (string)($cfg[$chaveMarcaTela] ?? '')
+                : (string)($config_padrao[$chaveMarcaTela] ?? '')
+        );
+    }
+} catch (Throwable $e) {
+    error_log('[ROJEX MARCA][LEITURA] ' . $e->getMessage());
+    if ($tab_ativa === 'marca') {
+        $msg = 'A identidade visual foi bloqueada porque o contexto Multi-Tenant não é válido.';
+        $msg_tipo = 'danger';
+    }
+}
+
 // Preferências visuais são individuais e nunca são lidas da tabela global.
 $preferenciasUsuario = rojex_usuario_preferencias_get($conn, $usuarioSessaoId);
 $cfg = array_merge($cfg, $preferenciasUsuario);
@@ -4158,7 +5004,29 @@ foreach ([
     }
 }
 
-$logo_exibir = $cfg['logo_arquivo'] ? 'assets/img/' . htmlspecialchars($cfg['logo_arquivo'], ENT_QUOTES, 'UTF-8') : 'assets/img/logo_custom.png';
+$logoPadrao = 'assets/img/logo_custom.png';
+foreach ([
+    'assets/img/logo_rojex_ai.png',
+    'assets/img/logo_rojex.png',
+    'assets/img/logo.png',
+    'assets/img/logo_custom.png',
+] as $candidatoLogoPadrao) {
+    if (is_file(__DIR__ . '/../' . $candidatoLogoPadrao)) {
+        $logoPadrao = $candidatoLogoPadrao;
+        break;
+    }
+}
+
+$logo_exibir = $logoPadrao;
+$logoArquivoConfigurado = trim((string)($cfg['logo_arquivo'] ?? ''));
+if (
+    $logoArquivoConfigurado !== ''
+    && !str_contains($logoArquivoConfigurado, '..')
+    && preg_match('/^[A-Za-z0-9_\/-]+\.(?:png|jpe?g|webp)$/i', $logoArquivoConfigurado)
+    && is_file($upload_dir . $logoArquivoConfigurado)
+) {
+    $logo_exibir = 'assets/img/' . $logoArquivoConfigurado;
+}
 $lixeira_todos = sgl_buscar_lixeira($conn);
 
 $lixeira_busca = trim((string)($_GET['lixeira_q'] ?? ''));
@@ -4286,6 +5154,38 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
             }
         }
     } catch (Throwable $e) {}
+}
+
+$logBackupEscritorios = [];
+$logBackupsRecentes = [];
+if ($ehUsuarioMaster) {
+    try {
+        $resEscritoriosBackup = $conn->query(
+            "SELECT id, tenant_id, nome, status
+               FROM escritorios_saas
+              WHERE tenant_id IS NOT NULL AND tenant_id <> ''
+              ORDER BY nome ASC, id ASC"
+        );
+        if ($resEscritoriosBackup) {
+            while ($escritorioBackupLista = $resEscritoriosBackup->fetch_assoc()) {
+                $logBackupEscritorios[] = $escritorioBackupLista;
+            }
+        }
+        $resBackupsLog = $conn->query(
+            "SELECT *
+               FROM logs_backups
+              ORDER BY id DESC
+              LIMIT 100"
+        );
+        if ($resBackupsLog) {
+            while ($backupLogLista = $resBackupsLog->fetch_assoc()) {
+                $logBackupsRecentes[] = $backupLogLista;
+            }
+        }
+    } catch (Throwable $e) {
+        $logBackupEscritorios = [];
+        $logBackupsRecentes = [];
+    }
 }
 
 $totalUsuarios = count($usuarios);
@@ -4723,6 +5623,11 @@ $relatorioTipo = trim((string)($_GET['relatorio_tipo'] ?? 'resumo'));
 $relatorioDataInicio = trim((string)($_GET['relatorio_data_inicio'] ?? ''));
 $relatorioDataFim = trim((string)($_GET['relatorio_data_fim'] ?? ''));
 $relatorioFormato = trim((string)($_GET['relatorio_exportar'] ?? ''));
+$tituloRelatorio = 'Relatório Administrativo';
+$cabecalhosRelatorio = [];
+$linhasRelatorio = [];
+$periodoDescricao = 'Período: todos os registros';
+$nomeArquivoRelatorio = 'rojex_relatorio_' . date('Ymd_His');
 
 $tiposRelatorioPermitidos = ['resumo','escritorios','licencas','usuarios','desligados','saude'];
 if (!in_array($relatorioTipo, $tiposRelatorioPermitidos, true)) {
@@ -5108,7 +6013,7 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
             <div class="card-body">
                 <div class="text-center mb-4">
                     <p class="text-muted small mb-2">Logo interna atual</p>
-                    <img src="<?=$logo_exibir?>?v=<?=time()?>" class="img-thumbnail bg-light" style="max-width:260px;max-height:220px;object-fit:contain;" alt="Logo atual">
+                    <img src="<?=htmlspecialchars($logo_exibir, ENT_QUOTES, 'UTF-8')?>?v=<?=time()?>" class="img-thumbnail bg-light" style="max-width:260px;max-height:220px;object-fit:contain;" alt="Logo atual">
                     <div class="form-text mt-2">A identidade da tela de login ROJEX.AI não é alterada por esta configuração.</div>
                 </div>
 
@@ -5116,8 +6021,8 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                     <input type="hidden" name="acao_cfg" value="upload_logo">
                     <label class="form-label fw-semibold">Substituir logo interna</label>
-                    <input type="file" name="logo" class="form-control" accept=".jpg,.jpeg,.png" required onchange="prevLogo(this)">
-                    <div class="form-text">JPG ou PNG, até 2 MB. A logo atual pode continuar sendo utilizada normalmente.</div>
+                    <input type="file" name="logo" class="form-control" accept=".jpg,.jpeg,.png,.webp" required onchange="prevLogo(this)">
+                    <div class="form-text">JPG, PNG ou WebP, até 2 MB. A alteração afeta somente este ambiente autenticado.</div>
                     <div id="prev_wrap" style="display:none;" class="mt-3 text-center"><img id="prev_img" src="#" class="img-thumbnail" style="max-width:220px;max-height:140px;object-fit:contain;" alt="Prévia"></div>
                     <button class="btn btn-primary mt-3"><i class="bi bi-upload me-1"></i>Enviar logomarca</button>
                 </form>
@@ -7417,6 +8322,140 @@ function rojexEditarAtualizacao(dados) {
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'logs'): ?>
+<div class="card shadow-sm border-primary mb-4 d-print-none">
+    <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-file-earmark-zip-fill me-1"></i> Backup e Arquivamento do LOG por Escritório</span>
+        <span class="badge bg-light text-primary">Sprint 4.6.5</span>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-info">
+            <strong>Fluxo obrigatório:</strong> gerar ZIP → verificar integridade → baixar → digitar
+            <code>ARQUIVAR</code>. A exclusão usa somente os IDs gravados no backup e sempre repete
+            o filtro por <code>tenant_id</code> e <code>escritorio_id</code>.
+        </div>
+        <form method="POST" class="row g-3 align-items-end mb-4">
+            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+            <input type="hidden" name="acao_cfg" value="gerar_log_backup">
+            <div class="col-lg-6">
+                <label class="form-label fw-semibold">Escritório (seleção única obrigatória)</label>
+                <select name="log_backup_escritorio_id" class="form-select" required>
+                    <option value="">Selecione um escritório</option>
+                    <?php foreach ($logBackupEscritorios as $escritorioBackupOpcao): ?>
+                        <option value="<?=(int)$escritorioBackupOpcao['id']?>">
+                            <?=htmlspecialchars((string)$escritorioBackupOpcao['nome'])?>
+                            — <?=htmlspecialchars((string)$escritorioBackupOpcao['tenant_id'])?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="col-lg-2 col-md-4">
+                <label class="form-label fw-semibold">Período inicial</label>
+                <input type="date" name="log_backup_data_inicio" class="form-control" required>
+            </div>
+            <div class="col-lg-2 col-md-4">
+                <label class="form-label fw-semibold">Período final</label>
+                <input type="date" name="log_backup_data_fim" class="form-control" required>
+            </div>
+            <div class="col-lg-2 col-md-4">
+                <button class="btn btn-primary w-100" onclick="return confirm('Gerar ZIP isolado para o escritório e período selecionados?')">
+                    <i class="bi bi-file-earmark-zip me-1"></i> Gerar ZIP
+                </button>
+            </div>
+        </form>
+
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>ID / Escritório</th>
+                        <th>Período</th>
+                        <th>Registros</th>
+                        <th>SHA-256</th>
+                        <th>Status</th>
+                        <th>Controles obrigatórios</th>
+                    </tr>
+                </thead>
+                <tbody>
+                <?php if (!$logBackupsRecentes): ?>
+                    <tr><td colspan="6" class="text-center text-muted py-4">Nenhum backup isolado do LOG foi gerado.</td></tr>
+                <?php endif; ?>
+                <?php foreach ($logBackupsRecentes as $logBackupItem): ?>
+                    <?php
+                    $logBackupVerificado = !empty($logBackupItem['verificado_em']);
+                    $logBackupBaixado = !empty($logBackupItem['download_em']);
+                    $logBackupArquivado = !empty($logBackupItem['arquivado_em'])
+                        || (string)$logBackupItem['status'] === 'ARQUIVADO';
+                    ?>
+                    <tr>
+                        <td>
+                            <strong>#<?=(int)$logBackupItem['id']?> — <?=htmlspecialchars((string)$logBackupItem['escritorio_nome'])?></strong>
+                            <br><code><?=htmlspecialchars((string)$logBackupItem['tenant_id'])?></code>
+                            <small class="text-muted"> / <?=(int)$logBackupItem['escritorio_id']?></small>
+                        </td>
+                        <td>
+                            <small>
+                                <?=!empty($logBackupItem['periodo_inicio']) ? date('d/m/Y', strtotime($logBackupItem['periodo_inicio'])) : '-'?>
+                                a
+                                <?=!empty($logBackupItem['periodo_fim']) ? date('d/m/Y', strtotime($logBackupItem['periodo_fim'])) : '-'?>
+                            </small>
+                        </td>
+                        <td>
+                            <span class="badge bg-secondary"><?=(int)$logBackupItem['total_registros']?></span>
+                            <br><small><?=sgl_formatar_bytes((float)$logBackupItem['tamanho_bytes'])?></small>
+                        </td>
+                        <td><code class="small text-break"><?=htmlspecialchars((string)$logBackupItem['sha256'])?></code></td>
+                        <td>
+                            <span class="badge <?=$logBackupArquivado?'bg-dark':($logBackupBaixado?'bg-success':($logBackupVerificado?'bg-info text-dark':'bg-warning text-dark'))?>">
+                                <?=htmlspecialchars((string)$logBackupItem['status'])?>
+                            </span>
+                            <div class="small mt-1">
+                                <?=$logBackupVerificado?'✓ Verificado':'○ Verificar'?><br>
+                                <?=$logBackupBaixado?'✓ Download iniciado':'○ Baixar'?><br>
+                                <?=$logBackupArquivado?'✓ Arquivado':'○ Arquivar'?>
+                            </div>
+                        </td>
+                        <td style="min-width:260px">
+                            <?php if (!$logBackupArquivado): ?>
+                                <div class="d-flex gap-2 flex-wrap mb-2">
+                                    <form method="POST">
+                                        <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                        <input type="hidden" name="acao_cfg" value="verificar_log_backup">
+                                        <input type="hidden" name="backup_id" value="<?=(int)$logBackupItem['id']?>">
+                                        <button class="btn btn-sm btn-outline-primary"><i class="bi bi-shield-check me-1"></i>Verificar</button>
+                                    </form>
+                                    <?php if ($logBackupVerificado): ?>
+                                        <a class="btn btn-sm btn-success"
+                                           href="?mod=configuracoes&tab=logs&acao_cfg=baixar_log_backup&backup_id=<?=(int)$logBackupItem['id']?>">
+                                            <i class="bi bi-download me-1"></i>Baixar ZIP
+                                        </a>
+                                    <?php endif; ?>
+                                </div>
+                                <?php if ($logBackupVerificado && $logBackupBaixado): ?>
+                                    <form method="POST" class="input-group input-group-sm"
+                                          onsubmit="return confirm('Confirma o arquivamento? Somente os IDs deste backup serão removidos do LOG ativo.')">
+                                        <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                        <input type="hidden" name="acao_cfg" value="arquivar_log_backup">
+                                        <input type="hidden" name="backup_id" value="<?=(int)$logBackupItem['id']?>">
+                                        <input type="text" name="confirmacao_arquivar" class="form-control"
+                                               placeholder="Digite ARQUIVAR" required pattern="ARQUIVAR" autocomplete="off">
+                                        <button class="btn btn-danger"><i class="bi bi-archive me-1"></i>Arquivar</button>
+                                    </form>
+                                <?php else: ?>
+                                    <small class="text-muted">O arquivamento será liberado após verificação e download.</small>
+                                <?php endif; ?>
+                            <?php else: ?>
+                                <span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>Concluído</span>
+                                <br><small class="text-muted">ZIP temporário removido do servidor.</small>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
 <div class="card shadow-sm border-0 mb-4 d-print-none">
     <div class="card-header bg-dark text-white"><i class="bi bi-funnel me-1"></i> Filtros e Relatório do LOG</div>
     <div class="card-body">

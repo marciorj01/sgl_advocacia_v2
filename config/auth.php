@@ -535,6 +535,7 @@ if (!function_exists('rojexCarregarContextoTenant')) {
                 FROM usuarios_escritorios_saas ue
                 INNER JOIN escritorios_saas e
                         ON e.id = ue.escritorio_id
+                       AND e.tenant_id = ue.tenant_id
                 LEFT JOIN licencas_saas l
                        ON l.escritorio_id = e.id
                 LEFT JOIN assinaturas_saas a
@@ -714,7 +715,22 @@ if (!function_exists('rojexModoPlataforma')) {
 if (!function_exists('rojexModoSuporte')) {
     function rojexModoSuporte(): bool
     {
-        return !empty($_SESSION['modo_suporte']);
+        $contexto = rojexContextoTenant();
+        $tenantSessao = rojexTenantId();
+        $escritorioSessao = rojexEscritorioId();
+        $perfil = trim((string)($_SESSION['perfil'] ?? ''));
+
+        return !empty($_SESSION['modo_suporte'])
+            && !empty($contexto['modo_suporte'])
+            && ($contexto['tipo_contexto'] ?? null) === 'tenant'
+            && $perfil === 'Administrador Master'
+            && $tenantSessao !== null
+            && $escritorioSessao !== null
+            && hash_equals(
+                trim((string)($contexto['tenant_id'] ?? '')),
+                $tenantSessao
+            )
+            && (int)($contexto['escritorio_id'] ?? 0) === $escritorioSessao;
     }
 }
 
@@ -724,12 +740,24 @@ if (!function_exists('rojexContextoTenantValido')) {
         $contexto = rojexContextoTenant();
 
         if (($contexto['tipo_contexto'] ?? null) === 'plataforma') {
-            return rojexModoPlataforma();
+            return rojexModoPlataforma()
+                && rojexTenantId() === null
+                && rojexEscritorioId() === null;
         }
 
+        $tenantSessao = rojexTenantId();
+        $escritorioSessao = rojexEscritorioId();
+        $tenantContexto = trim((string)($contexto['tenant_id'] ?? ''));
+        $escritorioContexto = (int)($contexto['escritorio_id'] ?? 0);
+
         return ($contexto['tipo_contexto'] ?? null) === 'tenant'
-            && rojexEscritorioId() !== null
-            && rojexTenantId() !== null;
+            && $tenantSessao !== null
+            && $escritorioSessao !== null
+            && $tenantContexto !== ''
+            && hash_equals($tenantContexto, $tenantSessao)
+            && $escritorioContexto > 0
+            && $escritorioContexto === $escritorioSessao
+            && empty($_SESSION['modo_plataforma']);
     }
 }
 

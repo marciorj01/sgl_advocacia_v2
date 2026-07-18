@@ -213,13 +213,14 @@ function validarCliente(array $c): array {
 function clienteExisteDocumento(
     mysqli $conn,
     string $tenantId,
+    int $escritorioId,
     string $cpfCnpj,
     ?string $ignorarId = null
 ): bool {
     if (trim($cpfCnpj) === '') return false;
-    $sql = 'SELECT id FROM clientes WHERE tenant_id = ? AND cpf_cnpj = ? AND deletado = 0';
-    $params = [$tenantId, $cpfCnpj];
-    $types = 'ss';
+    $sql = 'SELECT id FROM clientes WHERE tenant_id = ? AND escritorio_id = ? AND cpf_cnpj = ? AND deletado = 0';
+    $params = [$tenantId, $escritorioId, $cpfCnpj];
+    $types = 'sis';
     if ($ignorarId !== null) {
         $sql .= ' AND id <> ?';
         $params[] = $ignorarId;
@@ -257,35 +258,35 @@ function salvarCliente(
     return $stmt->execute();
 }
 
-function atualizarCliente(mysqli $conn, string $tenantId, string $id, array $c): bool {
+function atualizarCliente(mysqli $conn, string $tenantId, int $escritorioId, string $id, array $c): bool {
     $sql = "UPDATE clientes SET
         nome = ?, cpf_cnpj = NULLIF(?, ''), tipo_pessoa = ?, rg = ?, data_nascimento = NULLIF(?, ''),
         estado_civil = ?, profissao = ?, telefone = ?, celular = ?, whatsapp = ?, email = ?,
         email_secundario = ?, cep = ?, logradouro = ?, numero = ?, complemento = ?, bairro = ?,
         cidade = ?, estado = ?, status = ?, indicacao = ?, observacoes = ?
-        WHERE id = ? AND tenant_id = ? AND deletado = 0";
+        WHERE id = ? AND tenant_id = ? AND escritorio_id = ? AND deletado = 0";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param(
-        'ssssssssssssssssssssssss',
+        'ssssssssssssssssssssssssi',
         $c['nome'], $c['cpf_cnpj'], $c['tipo_pessoa'], $c['rg'], $c['data_nascimento'],
         $c['estado_civil'], $c['profissao'], $c['telefone'], $c['celular'], $c['whatsapp'],
         $c['email'], $c['email_secundario'], $c['cep'], $c['logradouro'], $c['numero'],
         $c['complemento'], $c['bairro'], $c['cidade'], $c['estado'], $c['status'],
-        $c['indicacao'], $c['observacoes'], $id, $tenantId
+        $c['indicacao'], $c['observacoes'], $id, $tenantId, $escritorioId
     );
     return $stmt->execute();
 }
 
 
-function buscarClienteAuditoria(mysqli $conn, string $tenantId, string $id): ?array {
+function buscarClienteAuditoria(mysqli $conn, string $tenantId, int $escritorioId, string $id): ?array {
     $stmt = $conn->prepare(
-        'SELECT * FROM clientes WHERE id = ? AND tenant_id = ? LIMIT 1'
+        'SELECT * FROM clientes WHERE id = ? AND tenant_id = ? AND escritorio_id = ? LIMIT 1'
     );
     if (!$stmt) {
         return null;
     }
 
-    $stmt->bind_param('ss', $id, $tenantId);
+    $stmt->bind_param('ssi', $id, $tenantId, $escritorioId);
     $stmt->execute();
     $res = $stmt->get_result();
     $cliente = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
@@ -306,7 +307,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
         $erros = validarCliente($c);
         $idAtual = $_POST['id'] ?? null;
 
-        if (clienteExisteDocumento($conn, $tenantId, $c['cpf_cnpj'], $idAtual)) {
+        if (clienteExisteDocumento($conn, $tenantId, $escritorioId, $c['cpf_cnpj'], $idAtual)) {
             $erros[] = 'Já existe outro cliente cadastrado com este CPF/CNPJ.';
         }
 
@@ -331,7 +332,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
                             'origem' => 'Cadastro de clientes',
                             'resultado' => 'SUCESSO',
                             'nivel' => 'INFO',
-                            'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $id) ?? $c,
+                            'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $escritorioId, $id) ?? $c,
                         ]
                     );
                 }
@@ -345,9 +346,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
             }
         } else {
             $id = (string)($_POST['id'] ?? '');
-            $dadosAnteriores = buscarClienteAuditoria($conn, $tenantId, $id);
+            $dadosAnteriores = buscarClienteAuditoria($conn, $tenantId, $escritorioId, $id);
 
-            if (atualizarCliente($conn, $tenantId, $id, $c)) {
+            if (atualizarCliente($conn, $tenantId, $escritorioId, $id, $c)) {
                 if (function_exists('sgl_registrar_log')) {
                     sgl_registrar_log(
                         $conn,
@@ -362,7 +363,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
                             'resultado' => 'SUCESSO',
                             'nivel' => 'INFO',
                             'dados_anteriores' => $dadosAnteriores,
-                            'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $id) ?? $c,
+                            'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $escritorioId, $id) ?? $c,
                         ]
                     );
                 }
@@ -385,16 +386,17 @@ if (isset($_GET['excluir'])) {
         $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Tente novamente.</div>';
     } else {
         $id = (string)$_GET['excluir'];
-        $dadosAnteriores = buscarClienteAuditoria($conn, $tenantId, $id);
+        $dadosAnteriores = buscarClienteAuditoria($conn, $tenantId, $escritorioId, $id);
 
         $stmt = $conn->prepare(
             "UPDATE clientes
                 SET deletado = 1,
                     status = 'Excluído'
               WHERE id = ?
-                AND tenant_id = ?"
+                AND tenant_id = ?
+                AND escritorio_id = ?"
         );
-        $stmt->bind_param('ss', $id, $tenantId);
+        $stmt->bind_param('ssi', $id, $tenantId, $escritorioId);
         $okExcluir = $stmt->execute();
         $linhasAfetadas = $stmt->affected_rows;
         $stmt->close();
@@ -414,7 +416,7 @@ if (isset($_GET['excluir'])) {
                         'resultado' => 'SUCESSO',
                         'nivel' => 'AVISO',
                         'dados_anteriores' => $dadosAnteriores,
-                        'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $id),
+                        'dados_novos' => buscarClienteAuditoria($conn, $tenantId, $escritorioId, $id),
                     ]
                 );
             }
@@ -453,10 +455,11 @@ if ($acao === 'editar' && isset($_GET['id']) && $cliente_editar === null) {
            FROM clientes
           WHERE id = ?
             AND tenant_id = ?
+            AND escritorio_id = ?
             AND deletado = 0
           LIMIT 1'
     );
-    $stmt->bind_param('ss', $id_editar, $tenantId);
+    $stmt->bind_param('ssi', $id_editar, $tenantId, $escritorioId);
     $stmt->execute();
     $res = $stmt->get_result();
     if ($res && $res->num_rows > 0) {
@@ -587,9 +590,9 @@ $pagina = max(1, (int)($_GET['pagina'] ?? 1));
 $porPagina = 15;
 $offset = ($pagina - 1) * $porPagina;
 
-$condicoes = ['tenant_id = ?', 'deletado = 0'];
-$params = [$tenantId];
-$types = 's';
+$condicoes = ['tenant_id = ?', 'escritorio_id = ?', 'deletado = 0'];
+$params = [$tenantId, $escritorioId];
+$types = 'si';
 
 if ($busca !== '') {
     $condicoes[] = '(id LIKE ? OR nome LIKE ? OR cpf_cnpj LIKE ? OR telefone LIKE ? OR celular LIKE ? OR whatsapp LIKE ? OR email LIKE ?)';
@@ -637,9 +640,10 @@ $stmtResumo = $conn->prepare(
         ) AS novos_mes
      FROM clientes
      WHERE tenant_id = ?
+       AND escritorio_id = ?
        AND deletado = 0"
 );
-$stmtResumo->bind_param('s', $tenantId);
+$stmtResumo->bind_param('si', $tenantId, $escritorioId);
 $stmtResumo->execute();
 $resumo = $stmtResumo->get_result()->fetch_assoc();
 $stmtResumo->close();

@@ -405,6 +405,44 @@ if (!function_exists('sgl_int_add_coluna')) {
     }
 }
 
+if (!function_exists('sgl_int_contexto_multi_tenant')) {
+    /**
+     * Retorna exclusivamente o contexto operacional autenticado.
+     * Integrações financeiras nunca podem operar no modo Plataforma ou sem
+     * tenant_id + escritorio_id válidos.
+     *
+     * @return array{tenant_id:string,escritorio_id:int}
+     */
+    function sgl_int_contexto_multi_tenant(): array
+    {
+        if (function_exists('rojexExigirContextoTenant')) {
+            rojexExigirContextoTenant();
+        }
+
+        if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
+            throw new RuntimeException('Integração bloqueada no Modo Plataforma.');
+        }
+
+        $tenantId = function_exists('rojexTenantId')
+            ? trim((string)rojexTenantId())
+            : trim((string)($_SESSION['tenant_id'] ?? ''));
+        $escritorioId = function_exists('rojexEscritorioId')
+            ? (int)rojexEscritorioId()
+            : (int)($_SESSION['escritorio_id'] ?? 0);
+
+        if ($tenantId === '' || $escritorioId <= 0) {
+            throw new RuntimeException(
+                'Integração bloqueada: contexto Multi-Tenant incompleto.'
+            );
+        }
+
+        return [
+            'tenant_id' => $tenantId,
+            'escritorio_id' => $escritorioId,
+        ];
+    }
+}
+
 if (!function_exists('sgl_integracao_garantir_financeiro')) {
     function sgl_integracao_garantir_financeiro(mysqli $conn): void
     {
@@ -443,6 +481,8 @@ if (!function_exists('sgl_integracao_garantir_recibos')) {
         try {
             if (!$conn->query("CREATE TABLE IF NOT EXISTS recibos (
                 id VARCHAR(20) PRIMARY KEY,
+                tenant_id VARCHAR(80) NULL,
+                escritorio_id BIGINT NULL,
                 numero VARCHAR(30) NOT NULL UNIQUE,
                 cliente_id VARCHAR(10) NULL,
                 nome_cliente VARCHAR(150) NOT NULL,
@@ -471,6 +511,8 @@ if (!function_exists('sgl_integracao_garantir_recibos')) {
                 throw new RuntimeException($conn->error ?: 'Falha ao garantir a tabela de recibos.');
             }
 
+            sgl_int_add_coluna($conn, 'recibos', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
+            sgl_int_add_coluna($conn, 'recibos', 'escritorio_id', "escritorio_id BIGINT NULL AFTER tenant_id");
             sgl_int_add_coluna($conn, 'recibos', 'conta_receber_id', "conta_receber_id VARCHAR(20) NULL");
             $garantido[$cacheKey] = true;
         } catch (Throwable $e) {
@@ -548,18 +590,23 @@ if (!function_exists('sgl_sincronizar_honorario_financeiro')) {
 
         try {
             sgl_integracao_garantir_financeiro($conn);
+            $contextoTenant = sgl_int_contexto_multi_tenant();
+            $tenantId = $contextoTenant['tenant_id'];
+            $escritorioId = $contextoTenant['escritorio_id'];
 
             $stmtHonorario = $conn->prepare(
                 "SELECT id, cliente_id, nome_cliente, forma_pagamento, observacoes
                  FROM honorarios
                  WHERE id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
                  LIMIT 1"
             );
             if (!$stmtHonorario) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar honorário.');
             }
 
-            $stmtHonorario->bind_param('s', $honorario_id);
+            $stmtHonorario->bind_param('ssi', $honorario_id, $tenantId, $escritorioId);
             if (!$stmtHonorario->execute()) {
                 throw new RuntimeException($stmtHonorario->error ?: 'Falha ao consultar honorário.');
             }
@@ -583,13 +630,15 @@ if (!function_exists('sgl_sincronizar_honorario_financeiro')) {
                     . ($temDataPagamento ? ", data_pagamento" : "") . "
                  FROM honorarios_parcelas
                  WHERE honorario_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
                  ORDER BY parcela_numero ASC"
             );
             if (!$stmtParcelas) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar parcelas.');
             }
 
-            $stmtParcelas->bind_param('s', $honorario_id);
+            $stmtParcelas->bind_param('ssi', $honorario_id, $tenantId, $escritorioId);
             if (!$stmtParcelas->execute()) {
                 throw new RuntimeException($stmtParcelas->error ?: 'Falha ao consultar parcelas.');
             }
@@ -638,13 +687,21 @@ if (!function_exists('sgl_sincronizar_honorario_financeiro')) {
                          FROM contas_receber
                          WHERE honorario_id = ?
                            AND parcela_id = ?
+                           AND tenant_id = ?
+                           AND escritorio_id = ?
                          LIMIT 1"
                     );
                     if (!$stmtExiste) {
                         throw new RuntimeException($conn->error ?: 'Falha ao preparar busca da conta.');
                     }
 
-                    $stmtExiste->bind_param('ss', $honorario_id, $parcelaId);
+                    $stmtExiste->bind_param(
+                        'sssi',
+                        $honorario_id,
+                        $parcelaId,
+                        $tenantId,
+                        $escritorioId
+                    );
                     if (!$stmtExiste->execute()) {
                         throw new RuntimeException($stmtExiste->error ?: 'Falha ao localizar conta vinculada.');
                     }
@@ -672,14 +729,16 @@ if (!function_exists('sgl_sincronizar_honorario_financeiro')) {
                                 observacoes = ?,
                                 origem = 'honorarios',
                                 deletado = 0
-                             WHERE id = ?"
+                             WHERE id = ?
+                               AND tenant_id = ?
+                               AND escritorio_id = ?"
                         );
                         if (!$stmt) {
                             throw new RuntimeException($conn->error ?: 'Falha ao preparar atualização financeira.');
                         }
 
                         $stmt->bind_param(
-                            'ssddddssssss',
+                            'ssddddsssssssi',
                             $clienteId,
                             $descricao,
                             $valor,
@@ -691,7 +750,9 @@ if (!function_exists('sgl_sincronizar_honorario_financeiro')) {
                             $forma,
                             $statusCR,
                             $obs,
-                            $crId
+                            $crId,
+                            $tenantId,
+                            $escritorioId
                         );
 
                         if (!$stmt->execute()) {
@@ -714,20 +775,23 @@ if (!function_exists('sgl_sincronizar_honorario_financeiro')) {
                             try {
                                 $stmt = $conn->prepare(
                                     "INSERT INTO contas_receber (
-                                        id, cliente_id, descricao, valor, qtd_parcelas,
+                                        id, tenant_id, escritorio_id,
+                                        cliente_id, descricao, valor, qtd_parcelas,
                                         valor_parcela, valor_pago, valor_pendente,
                                         data_vencimento, data_recebimento, forma_recebimento,
                                         status, observacoes, deletado, honorario_id,
                                         parcela_id, origem
-                                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'honorarios')"
+                                    ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'honorarios')"
                                 );
                                 if (!$stmt) {
                                     throw new RuntimeException($conn->error ?: 'Falha ao preparar criação financeira.');
                                 }
 
                                 $stmt->bind_param(
-                                    'sssddddsssssss',
+                                    'ssissddddsssssss',
                                     $crId,
+                                    $tenantId,
+                                    $escritorioId,
                                     $clienteId,
                                     $descricao,
                                     $valor,
@@ -876,6 +940,9 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
 
         try {
             sgl_integracao_garantir_financeiro($conn);
+            $contextoTenant = sgl_int_contexto_multi_tenant();
+            $tenantId = $contextoTenant['tenant_id'];
+            $escritorioId = $contextoTenant['escritorio_id'];
 
             if ($usarTransacao) {
                 $conn->begin_transaction();
@@ -889,6 +956,8 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                     forma_recebimento, deletado
                  FROM contas_receber
                  WHERE id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
                  LIMIT 1
                  FOR UPDATE"
             );
@@ -897,7 +966,7 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar a conta a receber.');
             }
 
-            $stmtConta->bind_param('s', $conta_receber_id);
+            $stmtConta->bind_param('ssi', $conta_receber_id, $tenantId, $escritorioId);
 
             if (!$stmtConta->execute()) {
                 throw new RuntimeException($stmtConta->error ?: 'Falha ao consultar a conta a receber.');
@@ -961,6 +1030,8 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                  FROM honorarios_parcelas
                  WHERE id = ?
                    AND honorario_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
                  LIMIT 1
                  FOR UPDATE"
             );
@@ -969,7 +1040,13 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar a parcela de honorário.');
             }
 
-            $stmtParcela->bind_param('ss', $parcelaId, $honorarioId);
+            $stmtParcela->bind_param(
+                'sssi',
+                $parcelaId,
+                $honorarioId,
+                $tenantId,
+                $escritorioId
+            );
 
             if (!$stmtParcela->execute()) {
                 throw new RuntimeException($stmtParcela->error ?: 'Falha ao consultar a parcela de honorário.');
@@ -1020,7 +1097,9 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                          data_pagamento = ?,
                          forma_pagamento = ?
                      WHERE id = ?
-                       AND honorario_id = ?"
+                       AND honorario_id = ?
+                       AND tenant_id = ?
+                       AND escritorio_id = ?"
                 );
 
                 if (!$stmtAtualizaParcela) {
@@ -1032,14 +1111,16 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                     : null;
 
                 $stmtAtualizaParcela->bind_param(
-                    'ddsssss',
+                    'ddssssssi',
                     $valorPago,
                     $saldo,
                     $statusParcela,
                     $dataPagamento,
                     $formaRecebimento,
                     $parcelaId,
-                    $honorarioId
+                    $honorarioId,
+                    $tenantId,
+                    $escritorioId
                 );
             } else {
                 $stmtAtualizaParcela = $conn->prepare(
@@ -1049,7 +1130,9 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                          status_pagamento = ?,
                          forma_pagamento = ?
                      WHERE id = ?
-                       AND honorario_id = ?"
+                       AND honorario_id = ?
+                       AND tenant_id = ?
+                       AND escritorio_id = ?"
                 );
 
                 if (!$stmtAtualizaParcela) {
@@ -1057,13 +1140,15 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                 }
 
                 $stmtAtualizaParcela->bind_param(
-                    'ddssss',
+                    'ddsssssi',
                     $valorPago,
                     $saldo,
                     $statusParcela,
                     $formaRecebimento,
                     $parcelaId,
-                    $honorarioId
+                    $honorarioId,
+                    $tenantId,
+                    $escritorioId
                 );
             }
 
@@ -1081,14 +1166,16 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                     COALESCE(SUM(valor_pago), 0) AS total_pago,
                     COALESCE(SUM(saldo_devedor), 0) AS total_saldo
                  FROM honorarios_parcelas
-                 WHERE honorario_id = ?"
+                 WHERE honorario_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?"
             );
 
             if (!$stmtTotais) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar o recálculo do honorário.');
             }
 
-            $stmtTotais->bind_param('s', $honorarioId);
+            $stmtTotais->bind_param('ssi', $honorarioId, $tenantId, $escritorioId);
 
             if (!$stmtTotais->execute()) {
                 throw new RuntimeException($stmtTotais->error ?: 'Falha ao recalcular o honorário.');
@@ -1120,7 +1207,9 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
                      status = ?,
                      forma_pagamento = ?
                  WHERE id = ?
-                   AND deletado = 0"
+                   AND deletado = 0
+                   AND tenant_id = ?
+                   AND escritorio_id = ?"
             );
 
             if (!$stmtHonorario) {
@@ -1128,12 +1217,14 @@ if (!function_exists('sgl_sincronizar_conta_receber_honorario')) {
             }
 
             $stmtHonorario->bind_param(
-                'ddsss',
+                'ddssssi',
                 $totalPago,
                 $totalSaldo,
                 $statusHonorario,
                 $formaRecebimento,
-                $honorarioId
+                $honorarioId,
+                $tenantId,
+                $escritorioId
             );
 
             if (!$stmtHonorario->execute()) {
@@ -1231,11 +1322,16 @@ if (!function_exists('sgl_gerar_recibo_de_conta_receber')) {
     {
         try {
             sgl_integracao_garantir_recibos($conn);
+            $contextoTenant = sgl_int_contexto_multi_tenant();
+            $tenantId = $contextoTenant['tenant_id'];
+            $escritorioId = $contextoTenant['escritorio_id'];
 
             $stmtJa = $conn->prepare(
                 "SELECT id
                  FROM recibos
                  WHERE conta_receber_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
                    AND status <> 'Cancelado'
                    AND deletado = 0
                  ORDER BY data_emissao DESC, id DESC
@@ -1245,7 +1341,7 @@ if (!function_exists('sgl_gerar_recibo_de_conta_receber')) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar busca de recibo.');
             }
 
-            $stmtJa->bind_param('s', $conta_receber_id);
+            $stmtJa->bind_param('ssi', $conta_receber_id, $tenantId, $escritorioId);
             if (!$stmtJa->execute()) {
                 throw new RuntimeException($stmtJa->error ?: 'Falha ao buscar recibo.');
             }
@@ -1265,14 +1361,18 @@ if (!function_exists('sgl_gerar_recibo_de_conta_receber')) {
                     cr.parcela_id, c.nome AS cliente_nome, c.cpf_cnpj
                  FROM contas_receber cr
                  LEFT JOIN clientes c ON c.id = cr.cliente_id
+                    AND c.tenant_id = cr.tenant_id
+                    AND c.escritorio_id = cr.escritorio_id
                  WHERE cr.id = ?
+                   AND cr.tenant_id = ?
+                   AND cr.escritorio_id = ?
                  LIMIT 1"
             );
             if (!$stmtConta) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar conta para recibo.');
             }
 
-            $stmtConta->bind_param('s', $conta_receber_id);
+            $stmtConta->bind_param('ssi', $conta_receber_id, $tenantId, $escritorioId);
             if (!$stmtConta->execute()) {
                 throw new RuntimeException($stmtConta->error ?: 'Falha ao consultar conta para recibo.');
             }
@@ -1314,19 +1414,22 @@ if (!function_exists('sgl_gerar_recibo_de_conta_receber')) {
                 try {
                     $stmt = $conn->prepare(
                         "INSERT INTO recibos (
-                            id, numero, cliente_id, nome_cliente, cpf_cnpj,
+                            id, tenant_id, escritorio_id,
+                            numero, cliente_id, nome_cliente, cpf_cnpj,
                             honorario_id, parcela_id, conta_receber_id,
                             data_emissao, data_pagamento, referente,
                             forma_pagamento, valor, observacoes, chave_validacao
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     );
                     if (!$stmt) {
                         throw new RuntimeException($conn->error ?: 'Falha ao preparar criação de recibo.');
                     }
 
                     $stmt->bind_param(
-                        'ssssssssssssdss',
+                        'ssisssssssssssdss',
                         $id,
+                        $tenantId,
+                        $escritorioId,
                         $numero,
                         $clienteId,
                         $nomeCliente,
@@ -1424,11 +1527,16 @@ if (!function_exists('buscarReciboPorContaReceber')) {
     {
         try {
             sgl_integracao_garantir_recibos($conn);
+            $contextoTenant = sgl_int_contexto_multi_tenant();
+            $tenantId = $contextoTenant['tenant_id'];
+            $escritorioId = $contextoTenant['escritorio_id'];
 
             $stmt = $conn->prepare(
                 "SELECT *
                  FROM recibos
                  WHERE conta_receber_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
                    AND deletado = 0
                    AND status <> 'Cancelado'
                  ORDER BY data_emissao DESC, id DESC
@@ -1438,7 +1546,7 @@ if (!function_exists('buscarReciboPorContaReceber')) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar busca de recibo.');
             }
 
-            $stmt->bind_param('s', $conta_receber_id);
+            $stmt->bind_param('ssi', $conta_receber_id, $tenantId, $escritorioId);
             if (!$stmt->execute()) {
                 throw new RuntimeException($stmt->error ?: 'Falha ao buscar recibo.');
             }
@@ -1497,6 +1605,10 @@ if (!function_exists('marcarContaPagarPaga')) {
         $transacaoIniciadaAqui = false;
 
         try {
+            $contextoTenant = sgl_int_contexto_multi_tenant();
+            $tenantId = $contextoTenant['tenant_id'];
+            $escritorioId = $contextoTenant['escritorio_id'];
+
             if (!sgl_int_transacao_ativa($conn)) {
                 $conn->begin_transaction();
                 $transacaoIniciadaAqui = true;
@@ -1507,6 +1619,8 @@ if (!function_exists('marcarContaPagarPaga')) {
                  FROM contas_pagar
                  WHERE id = ?
                    AND deletado = 0
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
                  LIMIT 1
                  FOR UPDATE"
             );
@@ -1514,7 +1628,7 @@ if (!function_exists('marcarContaPagarPaga')) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar conta a pagar.');
             }
 
-            $stmtConta->bind_param('s', $conta_id);
+            $stmtConta->bind_param('ssi', $conta_id, $tenantId, $escritorioId);
             if (!$stmtConta->execute()) {
                 throw new RuntimeException($stmtConta->error ?: 'Falha ao consultar conta a pagar.');
             }
@@ -1539,13 +1653,22 @@ if (!function_exists('marcarContaPagarPaga')) {
                      status = 'Pago',
                      data_pagamento = ?
                  WHERE id = ?
-                   AND deletado = 0"
+                   AND deletado = 0
+                   AND tenant_id = ?
+                   AND escritorio_id = ?"
             );
             if (!$stmtAtualiza) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar pagamento da conta.');
             }
 
-            $stmtAtualiza->bind_param('dss', $valor, $dataPagamento, $conta_id);
+            $stmtAtualiza->bind_param(
+                'dsssi',
+                $valor,
+                $dataPagamento,
+                $conta_id,
+                $tenantId,
+                $escritorioId
+            );
             if (!$stmtAtualiza->execute()) {
                 throw new RuntimeException($stmtAtualiza->error ?: 'Falha ao marcar conta como paga.');
             }
@@ -1556,13 +1679,15 @@ if (!function_exists('marcarContaPagarPaga')) {
                  SET valor_pago = valor_parcela,
                      saldo_devedor = 0,
                      status_pagamento = 'Pago'
-                 WHERE conta_id = ?"
+                 WHERE conta_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?"
             );
             if (!$stmtParcelas) {
                 throw new RuntimeException($conn->error ?: 'Falha ao preparar parcelas da conta.');
             }
 
-            $stmtParcelas->bind_param('s', $conta_id);
+            $stmtParcelas->bind_param('ssi', $conta_id, $tenantId, $escritorioId);
             if (!$stmtParcelas->execute()) {
                 throw new RuntimeException($stmtParcelas->error ?: 'Falha ao atualizar parcelas da conta.');
             }

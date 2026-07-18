@@ -541,6 +541,121 @@ $sucessoIa = '';
 $consultaId = 0;
 $documentoSalvoId = 0;
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 'mover_historico_lixeira') {
+    if (!cij_gerador_validar_csrf()) {
+        $erroIa = 'A sessão de segurança expirou. Atualize a página e tente novamente.';
+    } elseif (cij_gerador_id_usuario() <= 0) {
+        $erroIa = 'Sua sessão não está autenticada. Entre novamente no sistema.';
+    } elseif (!$contextoGerador) {
+        $erroIa = $erroContextoTenant !== ''
+            ? $erroContextoTenant
+            : 'O contexto Multi-Tenant não está disponível.';
+    } else {
+        $historicoExcluirId = max(0, (int)($_POST['historico_id'] ?? 0));
+        $uid = cij_gerador_id_usuario();
+
+        try {
+            if ($historicoExcluirId <= 0) {
+                throw new RuntimeException('O item informado para exclusão é inválido.');
+            }
+
+            $historicoExcluir = cij_gerador_consultar_um(
+                $conn,
+                'SELECT id, tipo, titulo
+                 FROM ia_consultas
+                 WHERE id = ?
+                   AND usuario_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
+                   AND modulo = ?
+                   AND COALESCE(deletado, 0) = 0
+                 LIMIT 1',
+                'iisis',
+                [
+                    $historicoExcluirId,
+                    $uid,
+                    $contextoGerador['tenant_id'],
+                    $contextoGerador['escritorio_id'],
+                    'CIJ_GERADOR',
+                ]
+            );
+
+            if (!$historicoExcluir) {
+                throw new RuntimeException('O item não foi localizado no histórico deste escritório.');
+            }
+
+            $stmtExcluirHistorico = $conn->prepare(
+                'UPDATE ia_consultas
+                    SET deletado = 1,
+                        deletado_em = NOW(),
+                        deletado_por = ?
+                  WHERE id = ?
+                   AND usuario_id = ?
+                   AND tenant_id = ?
+                   AND escritorio_id = ?
+                   AND modulo = ?
+                   AND COALESCE(deletado, 0) = 0'
+            );
+
+            if (!$stmtExcluirHistorico) {
+                throw new RuntimeException($conn->error ?: 'Falha ao preparar a exclusão do histórico.');
+            }
+
+            $moduloHistorico = 'CIJ_GERADOR';
+            $stmtExcluirHistorico->bind_param(
+                'iiisis',
+                $uid,
+                $historicoExcluirId,
+                $uid,
+                $contextoGerador['tenant_id'],
+                $contextoGerador['escritorio_id'],
+                $moduloHistorico
+            );
+
+            if (!$stmtExcluirHistorico->execute()) {
+                throw new RuntimeException(
+                    $stmtExcluirHistorico->error ?: 'Falha ao excluir o item do histórico.'
+                );
+            }
+
+            $historicoExcluido = $stmtExcluirHistorico->affected_rows === 1;
+            $stmtExcluirHistorico->close();
+
+            if (!$historicoExcluido) {
+                throw new RuntimeException('O item não foi excluído. Atualize a página e tente novamente.');
+            }
+
+            $sucessoIa = 'Item movido para a Lixeira Enterprise. A Biblioteca Jurídica não foi alterada.';
+
+            if (function_exists('sgl_registrar_log')) {
+                sgl_registrar_log(
+                    $conn,
+                    'MOVEU_HISTORICO_PECA_CIJ_LIXEIRA',
+                    'ia_consultas',
+                    (string)$historicoExcluirId,
+                    'Item movido para a Lixeira Enterprise pelo Gerador de Peças.',
+                    [
+                        'tipo_acao' => 'EXCLUSAO_LOGICA',
+                        'modulo' => 'CIJ / Gerador de Peças',
+                        'origem' => 'Histórico do Gerador Jurídico',
+                        'resultado' => 'SUCESSO',
+                        'nivel' => 'AVISO',
+                        'dados_anteriores' => [
+                            'tenant_id' => $contextoGerador['tenant_id'],
+                            'escritorio_id' => $contextoGerador['escritorio_id'],
+                            'tipo' => (string)($historicoExcluir['tipo'] ?? ''),
+                            'titulo' => (string)($historicoExcluir['titulo'] ?? ''),
+                        ],
+                    ]
+                );
+            }
+        } catch (Throwable $e) {
+            cij_gerador_log_erro('EXCLUIR_HISTORICO', $e);
+            $erroIa = $e->getMessage();
+        }
+    }
+}
+
 $historicoAbrirId = max(0, (int)($_GET['historico_id'] ?? 0));
 if ($historicoAbrirId > 0 && cij_gerador_id_usuario() > 0 && $contextoGerador) {
     $historicoAberto = cij_gerador_consultar_um(
@@ -552,6 +667,7 @@ if ($historicoAbrirId > 0 && cij_gerador_id_usuario() > 0 && $contextoGerador) {
            AND tenant_id = ?
            AND escritorio_id = ?
            AND modulo = ?
+           AND COALESCE(deletado, 0) = 0
          LIMIT 1',
         'iisis',
         [
@@ -683,6 +799,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                    AND tenant_id = ?
                    AND escritorio_id = ?
                    AND modulo = ?
+                   AND COALESCE(deletado, 0) = 0
                  LIMIT 1',
                 'iisis',
                 [
@@ -825,7 +942,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao_gerador'] ?? '') === 
                        AND usuario_id = ?
                        AND tenant_id = ?
                        AND escritorio_id = ?
-                       AND modulo = ?'
+                       AND modulo = ?
+                       AND COALESCE(deletado, 0) = 0'
                 );
 
                 if (!$stmtAtualizarHistorico) {
@@ -1168,6 +1286,7 @@ if ($contextoGerador && cij_gerador_id_usuario() > 0) {
            AND tenant_id = ?
            AND escritorio_id = ?
            AND modulo = ?
+           AND COALESCE(deletado, 0) = 0
          ORDER BY id DESC
          LIMIT 8',
         'isis',
@@ -1406,6 +1525,18 @@ if ($contextoGerador && cij_gerador_id_usuario() > 0) {
                                     >
                                         <i class="bi bi-folder2-open me-1"></i>Abrir
                                     </a>
+                                    <form
+                                        method="POST"
+                                        class="d-inline"
+                                        onsubmit="return confirm('Mover esta peça para a Lixeira Enterprise? Você poderá restaurá-la depois em Configurações > Lixeira.');"
+                                    >
+                                        <input type="hidden" name="acao_gerador" value="mover_historico_lixeira">
+                                        <input type="hidden" name="csrf_token" value="<?= cij_gerador_h($csrf) ?>">
+                                        <input type="hidden" name="historico_id" value="<?= (int)$itemHistorico['id'] ?>">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm">
+                                            <i class="bi bi-trash me-1"></i>Mover para Lixeira
+                                        </button>
+                                    </form>
                                 </div>
                             </div>
                         </div>

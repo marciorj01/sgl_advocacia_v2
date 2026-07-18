@@ -33,21 +33,6 @@ if (empty($_SESSION['csrf_documentos'])) {
 }
 $csrf = $_SESSION['csrf_documentos'];
 
-function sgl_doc_coluna_existe(mysqli $conn, string $tabela, string $coluna): bool {
-    $tabela = $conn->real_escape_string($tabela);
-    $coluna = $conn->real_escape_string($coluna);
-    $res = $conn->query("SHOW COLUMNS FROM `{$tabela}` LIKE '{$coluna}'");
-    return $res && $res->num_rows > 0;
-}
-
-function sgl_doc_adicionar_coluna(mysqli $conn, string $tabela, string $coluna, string $definicao): void {
-    if (!sgl_doc_coluna_existe($conn, $tabela, $coluna)) {
-        if (!$conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}")) {
-            throw new RuntimeException("Não foi possível adicionar {$tabela}.{$coluna}: " . $conn->error);
-        }
-    }
-}
-
 function sgl_doc_tenant_id(): string {
     return function_exists('rojexTenantId')
         ? trim((string)rojexTenantId())
@@ -60,89 +45,11 @@ function sgl_doc_escritorio_id(): int {
         : (int)($_SESSION['escritorio_id'] ?? 0);
 }
 
-function sgl_doc_garantir_tabela(mysqli $conn): void {
-    $conn->query("CREATE TABLE IF NOT EXISTS documentos_arquivos (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        tenant_id VARCHAR(80) NULL,
-        escritorio_id INT NULL,
-        codigo VARCHAR(20) NOT NULL UNIQUE,
-        titulo VARCHAR(180) NOT NULL,
-        categoria VARCHAR(80) NOT NULL DEFAULT 'Documento geral',
-        cliente_id VARCHAR(10) NULL,
-        processo_id VARCHAR(10) NULL,
-        numero_processo VARCHAR(80) NULL,
-        descricao TEXT NULL,
-        nome_original VARCHAR(255) NOT NULL,
-        nome_arquivo VARCHAR(255) NOT NULL,
-        caminho VARCHAR(255) NOT NULL,
-        extensao VARCHAR(20) NULL,
-        mime_type VARCHAR(120) NULL,
-        tamanho_bytes BIGINT DEFAULT 0,
-        hash_arquivo VARCHAR(64) NULL,
-        usuario_id INT NULL,
-        usuario_nome VARCHAR(150) NULL,
-        status VARCHAR(30) NOT NULL DEFAULT 'Ativo',
-        deletado TINYINT(1) NOT NULL DEFAULT 0,
-        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX idx_doc_tenant (tenant_id, escritorio_id),
-        INDEX idx_doc_cliente (cliente_id),
-        INDEX idx_doc_processo (processo_id),
-        INDEX idx_doc_categoria (categoria),
-        INDEX idx_doc_deletado (deletado)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    sgl_doc_adicionar_coluna($conn, 'documentos_arquivos', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    sgl_doc_adicionar_coluna($conn, 'documentos_arquivos', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-
-    // Migra somente registros legados ainda sem contexto para o tenant legado configurado.
-    $tenantLegado = '';
-    $escritorioLegado = 0;
-
-    $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave = 'tenant_id' LIMIT 1");
-    if ($stmtCfg) {
-        $stmtCfg->execute();
-        $rowCfg = $stmtCfg->get_result()->fetch_assoc();
-        $stmtCfg->close();
-        $tenantLegado = trim((string)($rowCfg['valor'] ?? ''));
-    }
-
-    if ($tenantLegado !== '') {
-        $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
-        if ($stmtEsc) {
-            $stmtEsc->bind_param('s', $tenantLegado);
-            $stmtEsc->execute();
-            $rowEsc = $stmtEsc->get_result()->fetch_assoc();
-            $stmtEsc->close();
-            $escritorioLegado = (int)($rowEsc['id'] ?? 0);
-        }
-    }
-
-    if ($tenantLegado !== '' && $escritorioLegado > 0) {
-        $stmtBackfill = $conn->prepare(
-            "UPDATE documentos_arquivos
-             SET tenant_id = ?, escritorio_id = ?
-             WHERE tenant_id IS NULL OR tenant_id = ''
-                OR escritorio_id IS NULL OR escritorio_id = 0"
-        );
-        if ($stmtBackfill) {
-            $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
-            $stmtBackfill->execute();
-            $stmtBackfill->close();
-        }
-    }
-
-    $indices = [];
-    $resIdx = $conn->query("SHOW INDEX FROM documentos_arquivos");
-    if ($resIdx) {
-        while ($idx = $resIdx->fetch_assoc()) {
-            $indices[(string)$idx['Key_name']] = true;
-        }
-    }
-    if (!isset($indices['idx_doc_tenant'])) {
-        $conn->query("ALTER TABLE documentos_arquivos ADD INDEX idx_doc_tenant (tenant_id, escritorio_id)");
-    }
-}
+/*
+ * A estrutura de documentos_arquivos é mantida por migração SQL.
+ * DDL e backfills não são executados durante requisições HTTP.
+ * Migração: migrations/20260718_ra06_documentos_runtime_ddl.sql
+ */
 
 function sgl_doc_novo_codigo(mysqli $conn): string {
     $ano = date('Y');
@@ -224,7 +131,6 @@ function sgl_doc_registrar_log(
     );
 }
 
-sgl_doc_garantir_tabela($conn);
 $mensagem = null;
 $erro = null;
 

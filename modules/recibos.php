@@ -43,120 +43,11 @@ function brlParaFloatRec(string $valor): float {
     if (strpos($v, ',') !== false) $v = str_replace(',', '.', str_replace('.', '', $v));
     return is_numeric($v) ? (float)$v : 0.0;
 }
-function sglReciboColunaExiste(mysqli $conn, string $coluna): bool {
-    $coluna = $conn->real_escape_string($coluna);
-    $res = $conn->query("SHOW COLUMNS FROM `recibos` LIKE '{$coluna}'");
-    return $res && $res->num_rows > 0;
-}
-
-function sglReciboGarantirColuna(mysqli $conn, string $coluna, string $definicao): void {
-    if (!sglReciboColunaExiste($conn, $coluna)) {
-        $conn->query("ALTER TABLE `recibos` ADD COLUMN {$definicao}");
-    }
-}
-
-function sglReciboTabela(mysqli $conn): void {
-    $conn->query("CREATE TABLE IF NOT EXISTS recibos (
-        id VARCHAR(20) PRIMARY KEY,
-        tenant_id VARCHAR(80) NULL,
-        escritorio_id INT NULL,
-        numero VARCHAR(30) NOT NULL,
-        cliente_id VARCHAR(10) NULL,
-        nome_cliente VARCHAR(150) NOT NULL,
-        cpf_cnpj VARCHAR(25) NULL,
-        processo_numero VARCHAR(80) NULL,
-        honorario_id VARCHAR(20) NULL,
-        parcela_id VARCHAR(20) NULL,
-        data_emissao DATE NOT NULL,
-        data_pagamento DATE NULL,
-        referente VARCHAR(255) NOT NULL,
-        forma_pagamento VARCHAR(80) NULL,
-        valor DECIMAL(12,2) NOT NULL DEFAULT 0,
-        observacoes TEXT NULL,
-        status ENUM('Emitido','Cancelado') NOT NULL DEFAULT 'Emitido',
-        chave_validacao VARCHAR(80) NULL,
-        deletado TINYINT(1) NOT NULL DEFAULT 0,
-        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX idx_rec_tenant (tenant_id, escritorio_id),
-        UNIQUE KEY uq_rec_numero_tenant (tenant_id, numero),
-        INDEX idx_rec_numero (numero),
-        INDEX idx_rec_cliente (cliente_id),
-        INDEX idx_rec_status (status),
-        INDEX idx_rec_deletado (deletado),
-        INDEX idx_rec_data (data_emissao)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    // Compatibilidade com bancos criados nas fases anteriores.
-    sglReciboGarantirColuna($conn, 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    sglReciboGarantirColuna($conn, 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-    sglReciboGarantirColuna($conn, 'processo_numero', "processo_numero VARCHAR(80) NULL AFTER cpf_cnpj");
-    sglReciboGarantirColuna($conn, 'honorario_id', "honorario_id VARCHAR(20) NULL AFTER processo_numero");
-    sglReciboGarantirColuna($conn, 'parcela_id', "parcela_id VARCHAR(20) NULL AFTER honorario_id");
-    sglReciboGarantirColuna($conn, 'data_emissao', "data_emissao DATE NULL AFTER parcela_id");
-    sglReciboGarantirColuna($conn, 'data_pagamento', "data_pagamento DATE NULL AFTER data_emissao");
-    sglReciboGarantirColuna($conn, 'referente', "referente VARCHAR(255) NULL AFTER data_pagamento");
-    sglReciboGarantirColuna($conn, 'observacoes', "observacoes TEXT NULL AFTER valor");
-    sglReciboGarantirColuna($conn, 'chave_validacao', "chave_validacao VARCHAR(80) NULL AFTER status");
-    sglReciboGarantirColuna($conn, 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0 AFTER chave_validacao");
-
-    if (sglReciboColunaExiste($conn, 'data_recibo')) {
-        $conn->query("UPDATE recibos SET data_emissao = COALESCE(data_emissao, data_recibo) WHERE data_emissao IS NULL");
-    }
-    if (sglReciboColunaExiste($conn, 'descricao')) {
-        $conn->query("UPDATE recibos SET referente = COALESCE(NULLIF(referente,''), descricao, 'Honorários advocatícios') WHERE referente IS NULL OR referente = ''");
-    } else {
-        $conn->query("UPDATE recibos SET referente = 'Honorários advocatícios' WHERE referente IS NULL OR referente = ''");
-    }
-    $conn->query("UPDATE recibos SET data_emissao = CURDATE() WHERE data_emissao IS NULL");
-
-    // Migração controlada dos registros legados para o tenant original da instalação.
-    try {
-        $tenantLegado = '';
-        $escritorioLegado = 0;
-        $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave='tenant_id' LIMIT 1");
-        if ($stmtCfg) {
-            $stmtCfg->execute();
-            $cfg = $stmtCfg->get_result()->fetch_assoc();
-            $stmtCfg->close();
-            $tenantLegado = trim((string)($cfg['valor'] ?? ''));
-        }
-        if ($tenantLegado !== '') {
-            $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id=? LIMIT 1");
-            if ($stmtEsc) {
-                $stmtEsc->bind_param('s', $tenantLegado);
-                $stmtEsc->execute();
-                $esc = $stmtEsc->get_result()->fetch_assoc();
-                $stmtEsc->close();
-                $escritorioLegado = (int)($esc['id'] ?? 0);
-            }
-        }
-        if ($tenantLegado !== '' && $escritorioLegado > 0) {
-            $stmtBackfill = $conn->prepare(
-                "UPDATE recibos
-                 SET tenant_id=?, escritorio_id=?
-                 WHERE tenant_id IS NULL OR tenant_id='' OR escritorio_id IS NULL OR escritorio_id=0"
-            );
-            if ($stmtBackfill) {
-                $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
-                $stmtBackfill->execute();
-                $stmtBackfill->close();
-            }
-        }
-
-        $indices = [];
-        $resIdx = $conn->query("SHOW INDEX FROM recibos");
-        if ($resIdx) {
-            while ($idx = $resIdx->fetch_assoc()) $indices[(string)$idx['Key_name']] = true;
-        }
-        if (!isset($indices['idx_rec_tenant'])) {
-            $conn->query("ALTER TABLE recibos ADD INDEX idx_rec_tenant (tenant_id, escritorio_id)");
-        }
-    } catch (Throwable $e) {
-        error_log('[ROJEX RECIBOS MULTI-TENANT] ' . $e->getMessage());
-        throw new RuntimeException('Não foi possível preparar o isolamento Multi-Tenant dos Recibos.', 0, $e);
-    }
-}
+/*
+ * A estrutura da tabela recibos é mantida por migração SQL.
+ * DDL e backfills não são executados durante requisições HTTP.
+ * Migração: migrations/20260718_ra06_recibos_runtime_ddl.sql
+ */
 function gerarIdRecibo(mysqli $conn): string {
     $tenant = $conn->real_escape_string(sglReciboTenantId());
     $escritorio = sglReciboEscritorioId();
@@ -254,7 +145,6 @@ function getRecibo(mysqli $conn, string $id): ?array {
     return ($res && $res->num_rows) ? $res->fetch_assoc() : null;
 }
 
-sglReciboTabela($conn);
 $csrf = gerarTokenCsrf();
 $clientes = getClientesRec($conn);
 

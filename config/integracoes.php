@@ -13,8 +13,8 @@
 /**
  * Cache interno por requisição/conexão.
  *
- * Evita repetir SHOW COLUMNS, CREATE TABLE IF NOT EXISTS e outras garantias
- * estruturais dentro da mesma execução PHP.
+ * Evita repetir verificações de compatibilidade dentro da mesma execução PHP.
+ * Alterações estruturais são executadas exclusivamente por migrações SQL.
  */
 if (!function_exists('sgl_int_cache_key')) {
     function sgl_int_cache_key(mysqli $conn, string $sufixo): string
@@ -55,44 +55,6 @@ if (!function_exists('sgl_garantir_logs')) {
         }
 
         try {
-            if (!$conn->query("CREATE TABLE IF NOT EXISTS logs_sistema (
-                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-                tenant_id VARCHAR(80) NULL,
-                escritorio_id BIGINT NULL,
-                escopo VARCHAR(20) NOT NULL DEFAULT 'PLATAFORMA',
-                usuario_id INT NULL,
-                usuario_nome VARCHAR(150) NULL,
-                usuario_login VARCHAR(80) NULL,
-                usuario_perfil VARCHAR(80) NULL,
-                acao VARCHAR(120) NOT NULL,
-                tipo_acao VARCHAR(50) NULL,
-                modulo VARCHAR(100) NULL,
-                tabela VARCHAR(80) NULL,
-                registro_id VARCHAR(80) NULL,
-                detalhes TEXT NULL,
-                dados_anteriores LONGTEXT NULL,
-                dados_novos LONGTEXT NULL,
-                origem VARCHAR(80) NULL,
-                resultado VARCHAR(30) NOT NULL DEFAULT 'SUCESSO',
-                nivel VARCHAR(20) NOT NULL DEFAULT 'INFO',
-                ip VARCHAR(45) NULL,
-                sessao_id VARCHAR(128) NULL,
-                user_agent VARCHAR(255) NULL,
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_logs_usuario (usuario_id),
-                INDEX idx_logs_acao (acao),
-                INDEX idx_logs_tipo_acao (tipo_acao),
-                INDEX idx_logs_modulo (modulo),
-                INDEX idx_logs_tabela (tabela),
-                INDEX idx_logs_registro (registro_id),
-                INDEX idx_logs_resultado (resultado),
-                INDEX idx_logs_data (criado_em),
-                INDEX idx_logs_escopo (escopo),
-                INDEX idx_logs_tenant_escritorio_data (tenant_id, escritorio_id, criado_em)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")) {
-                throw new RuntimeException($conn->error ?: 'Falha ao garantir a tabela de logs.');
-            }
-
             if (function_exists('sgl_int_add_coluna')) {
                 sgl_int_add_coluna($conn, 'logs_sistema', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
                 sgl_int_add_coluna($conn, 'logs_sistema', 'escritorio_id', "escritorio_id BIGINT NULL AFTER tenant_id");
@@ -301,40 +263,13 @@ if (!function_exists('sgl_registrar_log')) {
 
 if (!function_exists('sgl_completar_logs_sem_responsavel')) {
     /**
-     * Completa somente dados que possam ser confirmados pelo usuario_id gravado.
-     * Nunca atribui registros antigos ao usuário atualmente conectado.
+     * Mantida para compatibilidade com chamadas antigas.
+     * O backfill foi retirado do caminho HTTP; a migração RA-06 gera o relatório
+     * de origem antes de qualquer correção controlada.
      */
     function sgl_completar_logs_sem_responsavel(mysqli $conn): void
     {
-        try {
-            sgl_garantir_logs($conn);
-
-            $sql = "UPDATE logs_sistema l
-                    INNER JOIN usuarios u ON u.id = l.usuario_id
-                    SET
-                        l.usuario_nome = CASE
-                            WHEN l.usuario_nome IS NULL OR l.usuario_nome = '' THEN u.nome
-                            ELSE l.usuario_nome
-                        END,
-                        l.usuario_login = CASE
-                            WHEN l.usuario_login IS NULL OR l.usuario_login = '' THEN u.usuario
-                            ELSE l.usuario_login
-                        END,
-                        l.usuario_perfil = CASE
-                            WHEN l.usuario_perfil IS NULL OR l.usuario_perfil = '' THEN u.perfil
-                            ELSE l.usuario_perfil
-                        END
-                    WHERE l.usuario_id IS NOT NULL
-                      AND (
-                          l.usuario_nome IS NULL OR l.usuario_nome = ''
-                          OR l.usuario_login IS NULL OR l.usuario_login = ''
-                          OR l.usuario_perfil IS NULL OR l.usuario_perfil = ''
-                      )";
-
-            $conn->query($sql);
-        } catch (Throwable $e) {
-            error_log('[ROJEX LOG BACKFILL] ' . $e->getMessage());
-        }
+        // Intencionalmente sem mutação. Consulte a migração RA-06 central.
     }
 }
 
@@ -389,19 +324,12 @@ if (!function_exists('sgl_int_add_coluna')) {
             return;
         }
 
-        if (!preg_match('/^[A-Za-z0-9_]+$/', $tabela)) {
-            sgl_int_log_erro('ADD_COLUNA', 'Nome de tabela inválido: ' . $tabela);
-            return;
-        }
-
-        try {
-            $tabelaSql = str_replace('`', '``', $tabela);
-            if (!$conn->query("ALTER TABLE `{$tabelaSql}` ADD COLUMN {$definicao}")) {
-                throw new RuntimeException($conn->error ?: 'Falha ao adicionar coluna.');
-            }
-        } catch (Throwable $e) {
-            sgl_int_log_erro('ADD_COLUNA', $e);
-        }
+        // Compatibilidade com chamadas antigas: apenas detecta estrutura ausente.
+        // DDL é proibido no caminho HTTP e deve ser aplicado por migração.
+        sgl_int_log_erro(
+            'MIGRACAO_PENDENTE',
+            "Estrutura ausente: {$tabela}.{$coluna}. Execute a migração RA-06 central."
+        );
     }
 }
 
@@ -479,38 +407,6 @@ if (!function_exists('sgl_integracao_garantir_recibos')) {
         }
 
         try {
-            if (!$conn->query("CREATE TABLE IF NOT EXISTS recibos (
-                id VARCHAR(20) PRIMARY KEY,
-                tenant_id VARCHAR(80) NULL,
-                escritorio_id BIGINT NULL,
-                numero VARCHAR(30) NOT NULL UNIQUE,
-                cliente_id VARCHAR(10) NULL,
-                nome_cliente VARCHAR(150) NOT NULL,
-                cpf_cnpj VARCHAR(25) NULL,
-                processo_numero VARCHAR(80) NULL,
-                honorario_id VARCHAR(20) NULL,
-                parcela_id VARCHAR(20) NULL,
-                conta_receber_id VARCHAR(20) NULL,
-                data_emissao DATE NOT NULL,
-                data_pagamento DATE NULL,
-                referente VARCHAR(255) NOT NULL,
-                forma_pagamento VARCHAR(80) NULL,
-                valor DECIMAL(12,2) NOT NULL DEFAULT 0,
-                observacoes TEXT NULL,
-                status ENUM('Emitido','Cancelado') NOT NULL DEFAULT 'Emitido',
-                chave_validacao VARCHAR(80) NULL,
-                deletado TINYINT(1) NOT NULL DEFAULT 0,
-                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                INDEX idx_rec_numero (numero),
-                INDEX idx_rec_cliente (cliente_id),
-                INDEX idx_rec_status (status),
-                INDEX idx_rec_deletado (deletado),
-                INDEX idx_rec_data (data_emissao)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci")) {
-                throw new RuntimeException($conn->error ?: 'Falha ao garantir a tabela de recibos.');
-            }
-
             sgl_int_add_coluna($conn, 'recibos', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
             sgl_int_add_coluna($conn, 'recibos', 'escritorio_id', "escritorio_id BIGINT NULL AFTER tenant_id");
             sgl_int_add_coluna($conn, 'recibos', 'conta_receber_id', "conta_receber_id VARCHAR(20) NULL");

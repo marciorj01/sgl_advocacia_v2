@@ -21,6 +21,27 @@ if (empty($_SESSION['user_id'])) {
     return;
 }
 
+if (
+    !function_exists('rojexContextoTenantValido')
+    || !function_exists('rojexTenantId')
+    || !function_exists('rojexEscritorioId')
+    || !rojexContextoTenantValido()
+    || (function_exists('rojexModoPlataforma') && rojexModoPlataforma())
+) {
+    http_response_code(403);
+    echo '<div class="alert alert-danger">Contexto do escritório inválido para acessar a IA Jurídica.</div>';
+    return;
+}
+
+$sglAiTenantId = trim((string)rojexTenantId());
+$sglAiEscritorioId = (int)rojexEscritorioId();
+
+if ($sglAiTenantId === '' || $sglAiEscritorioId <= 0) {
+    http_response_code(403);
+    echo '<div class="alert alert-danger">Tenant ou escritório não identificado para acessar a IA Jurídica.</div>';
+    return;
+}
+
 if (function_exists('sgl_garantir_logs')) {
     sgl_garantir_logs($conn);
 }
@@ -87,17 +108,6 @@ function sgl_ai_table(mysqli $conn, string $tabela): bool
     ) !== null;
 }
 
-function sgl_ai_exec(mysqli $conn, string $sql): void
-{
-    try {
-        if (!$conn->query($sql)) {
-            throw new RuntimeException($conn->error ?: 'Falha estrutural no módulo de IA.');
-        }
-    } catch (Throwable $e) {
-        error_log('[ROJEX IA ESTRUTURA] ' . $e->getMessage());
-    }
-}
-
 function sgl_ai_money($valor): string
 {
     return 'R$ ' . number_format((float)$valor, 2, ',', '.');
@@ -136,41 +146,11 @@ function sgl_ai_limitar(string $valor, int $maximo): string
         : $valor;
 }
 
-function sgl_ai_garantir(mysqli $conn): void
-{
-    // Compatibilidade temporária com instalações anteriores.
-    // A migração versionada será criada na etapa de banco/produção.
-    sgl_ai_exec($conn, "CREATE TABLE IF NOT EXISTS ia_consultas (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        tipo VARCHAR(80) NOT NULL,
-        titulo VARCHAR(180) NULL,
-        entrada MEDIUMTEXT NULL,
-        prompt_gerado MEDIUMTEXT NULL,
-        resposta MEDIUMTEXT NULL,
-        modo VARCHAR(30) DEFAULT 'rascunho',
-        usuario_id INT NULL,
-        usuario_nome VARCHAR(150) NULL,
-        criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_tipo (tipo),
-        INDEX idx_criado (criado_em)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    sgl_ai_exec($conn, "CREATE TABLE IF NOT EXISTS modelos_documentos_gerados (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        modelo_id INT NOT NULL DEFAULT 0,
-        cliente_id INT NULL,
-        processo_id INT NULL,
-        titulo VARCHAR(180) NOT NULL,
-        conteudo_final LONGTEXT NOT NULL,
-        gerado_por INT NULL,
-        gerado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_gerados_modelo (modelo_id),
-        INDEX idx_gerados_cliente (cliente_id),
-        INDEX idx_gerados_processo (processo_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-}
-
-sgl_ai_garantir($conn);
+/*
+ * A estrutura das tabelas da IA Jurídica é mantida por migração SQL.
+ * DDL não é executado durante requisições HTTP.
+ * Migração: migrations/20260718_ra06_ia_juridica_runtime_ddl.sql
+ */
 
 $perfis = [
     'peticao' => 'Gerador de Petições',
@@ -279,8 +259,12 @@ $clientes = sgl_ai_q(
     "SELECT id, nome, cpf_cnpj
      FROM clientes
      WHERE COALESCE(deletado, 0) = 0
+       AND tenant_id = ?
+       AND escritorio_id = ?
      ORDER BY nome
-     LIMIT 300"
+     LIMIT 300",
+    'si',
+    [$sglAiTenantId, $sglAiEscritorioId]
 );
 
 $processos = sgl_ai_q(
@@ -295,9 +279,15 @@ $processos = sgl_ai_q(
         c.nome AS cliente_nome
      FROM processos p
      LEFT JOIN clientes c ON c.id = p.cliente_id
+        AND c.tenant_id = p.tenant_id
+        AND c.escritorio_id = p.escritorio_id
      WHERE COALESCE(p.deletado, 0) = 0
+       AND p.tenant_id = ?
+       AND p.escritorio_id = ?
      ORDER BY p.id DESC
-     LIMIT 300"
+     LIMIT 300",
+    'si',
+    [$sglAiTenantId, $sglAiEscritorioId]
 );
 
 $modelos = sgl_ai_table($conn, 'modelos_documentos')
@@ -306,8 +296,12 @@ $modelos = sgl_ai_table($conn, 'modelos_documentos')
         "SELECT id, titulo, categoria, area_direito
          FROM modelos_documentos
          WHERE COALESCE(deletado, 0) = 0
+           AND tenant_id = ?
+           AND escritorio_id = ?
          ORDER BY favorito DESC, titulo
-         LIMIT 300"
+         LIMIT 300",
+        'si',
+        [$sglAiTenantId, $sglAiEscritorioId]
     )
     : [];
 
@@ -407,9 +401,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                      FROM ia_consultas
                      WHERE id = ?
                        AND usuario_id = ?
+                       AND tenant_id = ?
+                       AND escritorio_id = ?
                      LIMIT 1",
-                    'ii',
-                    [$consultaIdRecebida, $uid]
+                    'iisi',
+                    [$consultaIdRecebida, $uid, $sglAiTenantId, $sglAiEscritorioId]
                 )
                 : null;
 
@@ -432,8 +428,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 try {
                     $stmt = $conn->prepare(
                         "INSERT INTO modelos_documentos_gerados
-                            (modelo_id, cliente_id, processo_id, titulo, conteudo_final, gerado_por)
-                         VALUES (?, ?, ?, ?, ?, ?)"
+                            (tenant_id, escritorio_id, modelo_id, cliente_id, processo_id, titulo, conteudo_final, gerado_por)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                     );
 
                     if (!$stmt) {
@@ -441,7 +437,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     $stmt->bind_param(
-                        'iiissi',
+                        'siiiissi',
+                        $sglAiTenantId,
+                        $sglAiEscritorioId,
                         $modeloSalvar,
                         $clienteSalvar,
                         $processoSalvar,
@@ -497,10 +495,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     "SELECT *
                      FROM clientes
                      WHERE id = ?
+                       AND tenant_id = ?
+                       AND escritorio_id = ?
                        AND COALESCE(deletado, 0) = 0
                      LIMIT 1",
-                    'i',
-                    [$clienteId]
+                    'isi',
+                    [$clienteId, $sglAiTenantId, $sglAiEscritorioId]
                 )
                 : null;
 
@@ -510,11 +510,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     "SELECT p.*, c.nome AS cliente_nome
                      FROM processos p
                      LEFT JOIN clientes c ON c.id = p.cliente_id
+                        AND c.tenant_id = p.tenant_id
+                        AND c.escritorio_id = p.escritorio_id
                      WHERE p.id = ?
+                       AND p.tenant_id = ?
+                       AND p.escritorio_id = ?
                        AND COALESCE(p.deletado, 0) = 0
                      LIMIT 1",
-                    'i',
-                    [$processoId]
+                    'isi',
+                    [$processoId, $sglAiTenantId, $sglAiEscritorioId]
                 )
                 : null;
 
@@ -524,10 +528,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     "SELECT *
                      FROM modelos_documentos
                      WHERE id = ?
+                       AND tenant_id = ?
+                       AND escritorio_id = ?
                        AND COALESCE(deletado, 0) = 0
                      LIMIT 1",
-                    'i',
-                    [$modeloId]
+                    'isi',
+                    [$modeloId, $sglAiTenantId, $sglAiEscritorioId]
                 )
                 : null;
 
@@ -551,10 +557,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         "SELECT *
                          FROM clientes
                          WHERE id = ?
+                           AND tenant_id = ?
+                           AND escritorio_id = ?
                            AND COALESCE(deletado, 0) = 0
                          LIMIT 1",
-                        'i',
-                        [(int)$processo['cliente_id']]
+                        'isi',
+                        [(int)$processo['cliente_id'], $sglAiTenantId, $sglAiEscritorioId]
                     );
 
                     if ($cliente) {
@@ -626,8 +634,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 try {
                     $stmt = $conn->prepare(
                         "INSERT INTO ia_consultas
-                            (tipo, titulo, entrada, prompt_gerado, resposta, modo, usuario_id, usuario_nome)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                            (tenant_id, escritorio_id, tipo, titulo, entrada, prompt_gerado, resposta, modo, usuario_id, usuario_nome)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     );
 
                     if (!$stmt) {
@@ -635,7 +643,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     $stmt->bind_param(
-                        'ssssssis',
+                        'sissssssis',
+                        $sglAiTenantId,
+                        $sglAiEscritorioId,
                         $tipo,
                         $titulo,
                         $entrada,
@@ -690,10 +700,12 @@ $historico = sgl_ai_q(
     "SELECT id, tipo, titulo, modo, usuario_nome, criado_em
      FROM ia_consultas
      WHERE usuario_id = ?
+       AND tenant_id = ?
+       AND escritorio_id = ?
      ORDER BY id DESC
      LIMIT 10",
-    'i',
-    [(int)$_SESSION['user_id']]
+    'isi',
+    [(int)$_SESSION['user_id'], $sglAiTenantId, $sglAiEscritorioId]
 );
 ?>
 <style>

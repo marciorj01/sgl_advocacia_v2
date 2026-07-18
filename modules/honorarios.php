@@ -34,72 +34,12 @@ function honorariosEscritorioId(): int
         : (int)($_SESSION['escritorio_id'] ?? 0);
 }
 
-function honorariosColunaExiste(mysqli $conn, string $tabela, string $coluna): bool
-{
-    $tabela = $conn->real_escape_string($tabela);
-    $coluna = $conn->real_escape_string($coluna);
-    $res = $conn->query("SHOW COLUMNS FROM `{$tabela}` LIKE '{$coluna}'");
-    return $res && $res->num_rows > 0;
-}
+/*
+ * A estrutura Multi-Tenant de Honorários é mantida por migração SQL.
+ * DDL e backfills locais não são executados durante requisições HTTP.
+ * Migração: migrations/20260718_ra06_honorarios_runtime_ddl.sql
+ */
 
-function honorariosAdicionarColuna(mysqli $conn, string $tabela, string $coluna, string $definicao): void
-{
-    if (!honorariosColunaExiste($conn, $tabela, $coluna)) {
-        if (!$conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}")) {
-            throw new RuntimeException("Não foi possível adicionar {$coluna} em {$tabela}: " . $conn->error);
-        }
-    }
-}
-
-function honorariosGarantirEstruturaTenant(mysqli $conn): void
-{
-    honorariosAdicionarColuna($conn, 'honorarios', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    honorariosAdicionarColuna($conn, 'honorarios', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-    honorariosAdicionarColuna($conn, 'honorarios_parcelas', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    honorariosAdicionarColuna($conn, 'honorarios_parcelas', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-
-    $tenantLegado = '';
-    $escritorioLegado = 0;
-    $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave = 'tenant_id' LIMIT 1");
-    if ($stmtCfg) {
-        $stmtCfg->execute();
-        $rowCfg = $stmtCfg->get_result()->fetch_assoc();
-        $stmtCfg->close();
-        $tenantLegado = trim((string)($rowCfg['valor'] ?? ''));
-    }
-    if ($tenantLegado !== '') {
-        $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
-        if ($stmtEsc) {
-            $stmtEsc->bind_param('s', $tenantLegado);
-            $stmtEsc->execute();
-            $rowEsc = $stmtEsc->get_result()->fetch_assoc();
-            $stmtEsc->close();
-            $escritorioLegado = (int)($rowEsc['id'] ?? 0);
-        }
-    }
-    if ($tenantLegado !== '' && $escritorioLegado > 0) {
-        foreach (['honorarios', 'honorarios_parcelas'] as $tabela) {
-            $stmt = $conn->prepare("UPDATE `{$tabela}` SET tenant_id = ?, escritorio_id = ? WHERE tenant_id IS NULL OR tenant_id = '' OR escritorio_id IS NULL OR escritorio_id = 0");
-            if ($stmt) {
-                $stmt->bind_param('si', $tenantLegado, $escritorioLegado);
-                $stmt->execute();
-                $stmt->close();
-            }
-        }
-    }
-
-    foreach (['honorarios', 'honorarios_parcelas'] as $tabela) {
-        $indice = 'idx_' . $tabela . '_tenant_escritorio';
-        $existe = false;
-        $res = $conn->query("SHOW INDEX FROM `{$tabela}` WHERE Key_name = '" . $conn->real_escape_string($indice) . "'");
-        if ($res && $res->num_rows > 0) $existe = true;
-        if (!$existe) {
-            $conn->query("ALTER TABLE `{$tabela}` ADD INDEX `{$indice}` (tenant_id, escritorio_id)");
-        }
-    }
-}
-
-honorariosGarantirEstruturaTenant($conn);
 $tenantSql = $conn->real_escape_string($tenantId);
 $escritorioSql = (int)$escritorioId;
 

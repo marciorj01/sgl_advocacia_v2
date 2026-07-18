@@ -31,26 +31,6 @@ $aba  = $_GET['aba'] ?? 'cp';     // cp = contas a pagar, cr = receber
 $acao = $_GET['acao'] ?? 'listar'; // listar | novo_cp | editar_cp | novo_cr | editar_cr | lixeira
 $msg  = '';
 
-/* ======================================================
-   COMPATIBILIDADE DO BANCO — FINANCEIRO
-   Evita erros em instalações antigas que ainda não tenham
-   todas as colunas usadas pelo módulo.
-   ====================================================== */
-function financeiroColunaExiste(mysqli $conn, string $tabela, string $coluna): bool
-{
-    $tabela = $conn->real_escape_string($tabela);
-    $coluna = $conn->real_escape_string($coluna);
-    $res = $conn->query("SHOW COLUMNS FROM `{$tabela}` LIKE '{$coluna}'");
-    return $res && $res->num_rows > 0;
-}
-
-function financeiroAdicionarColuna(mysqli $conn, string $tabela, string $coluna, string $definicao): void
-{
-    if (!financeiroColunaExiste($conn, $tabela, $coluna)) {
-        @$conn->query("ALTER TABLE `{$tabela}` ADD COLUMN {$definicao}");
-    }
-}
-
 function financeiroTenantId(): string
 {
     return function_exists('rojexTenantId')
@@ -65,193 +45,12 @@ function financeiroEscritorioId(): int
         : (int)($_SESSION['escritorio_id'] ?? 0);
 }
 
-function financeiroGarantirEstrutura(mysqli $conn): void
-{
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'qtd_parcelas', "qtd_parcelas INT DEFAULT 1");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_parcela', "valor_parcela DECIMAL(12,2) DEFAULT 0");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_pago', "valor_pago DECIMAL(12,2) DEFAULT 0");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'valor_pendente', "valor_pendente DECIMAL(12,2) DEFAULT 0");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'data_pagamento', "data_pagamento DATE NULL");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'forma_pagamento', "forma_pagamento VARCHAR(80) NULL");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'mes_referencia', "mes_referencia VARCHAR(7) NULL");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'observacoes', "observacoes TEXT NULL");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0");
+/*
+ * A estrutura das tabelas financeiras é mantida por migração SQL.
+ * DDL e backfills locais não são executados durante requisições HTTP.
+ * Migração: migrations/20260718_ra06_financeiro_runtime_ddl.sql
+ */
 
-    financeiroAdicionarColuna($conn, 'contas_receber', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'cliente_id', "cliente_id VARCHAR(10) NULL");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'qtd_parcelas', "qtd_parcelas INT DEFAULT 1");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'valor_parcela', "valor_parcela DECIMAL(12,2) DEFAULT 0");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'valor_pago', "valor_pago DECIMAL(12,2) DEFAULT 0");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'valor_pendente', "valor_pendente DECIMAL(12,2) DEFAULT 0");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'data_recebimento', "data_recebimento DATE NULL");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'forma_recebimento', "forma_recebimento VARCHAR(80) NULL");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'mes_referencia', "mes_referencia VARCHAR(7) NULL");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'observacoes', "observacoes TEXT NULL");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'deletado', "deletado TINYINT(1) NOT NULL DEFAULT 0");
-
-    $conn->query("CREATE TABLE IF NOT EXISTS contas_pagar_parcelas (
-        id VARCHAR(20) PRIMARY KEY,
-        tenant_id VARCHAR(80) NULL,
-        escritorio_id INT NULL,
-        conta_id VARCHAR(10) NOT NULL,
-        parcela_numero INT NOT NULL,
-        valor_parcela DECIMAL(12,2) NOT NULL DEFAULT 0,
-        data_vencimento DATE NULL,
-        forma_pagamento VARCHAR(80) NULL,
-        status_pagamento VARCHAR(30) DEFAULT 'Pendente',
-        valor_pago DECIMAL(12,2) DEFAULT 0,
-        saldo_devedor DECIMAL(12,2) DEFAULT 0,
-        observacoes TEXT NULL,
-        INDEX idx_cpp_conta (conta_id),
-        INDEX idx_cpp_status (status_pagamento)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    $conn->query("CREATE TABLE IF NOT EXISTS contas_receber_parcelas (
-        id VARCHAR(20) PRIMARY KEY,
-        tenant_id VARCHAR(80) NULL,
-        escritorio_id INT NULL,
-        conta_id VARCHAR(10) NOT NULL,
-        parcela_numero INT NOT NULL,
-        valor_parcela DECIMAL(12,2) NOT NULL DEFAULT 0,
-        data_vencimento DATE NULL,
-        forma_pagamento VARCHAR(80) NULL,
-        status_pagamento VARCHAR(30) DEFAULT 'Pendente',
-        valor_pago DECIMAL(12,2) DEFAULT 0,
-        saldo_devedor DECIMAL(12,2) DEFAULT 0,
-        observacoes TEXT NULL,
-        INDEX idx_crp_conta (conta_id),
-        INDEX idx_crp_status (status_pagamento)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    $conn->query("CREATE TABLE IF NOT EXISTS bancos_caixa (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        tenant_id VARCHAR(80) NULL,
-        escritorio_id INT NULL,
-        nome VARCHAR(120) NOT NULL,
-        tipo VARCHAR(40) DEFAULT 'Conta Corrente',
-        banco VARCHAR(120) NULL,
-        agencia VARCHAR(40) NULL,
-        conta VARCHAR(60) NULL,
-        saldo_inicial DECIMAL(12,2) DEFAULT 0,
-        ativo TINYINT(1) NOT NULL DEFAULT 1,
-        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_bancos_ativo (ativo)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    $conn->query("CREATE TABLE IF NOT EXISTS bancos_movimentacoes (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        tenant_id VARCHAR(80) NULL,
-        escritorio_id INT NULL,
-        data_movimento DATE NOT NULL,
-        tipo VARCHAR(30) NOT NULL DEFAULT 'Transferência',
-        banco_origem_id INT NULL,
-        banco_destino_id INT NULL,
-        valor DECIMAL(12,2) NOT NULL DEFAULT 0,
-        descricao VARCHAR(255) NULL,
-        origem_outros VARCHAR(150) NULL,
-        destino_outros VARCHAR(150) NULL,
-        usuario_nome VARCHAR(150) NULL,
-        criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_bm_data (data_movimento),
-        INDEX idx_bm_origem (banco_origem_id),
-        INDEX idx_bm_destino (banco_destino_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-    financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'origem_outros', "origem_outros VARCHAR(150) NULL");
-    financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'destino_outros', "destino_outros VARCHAR(150) NULL");
-    financeiroAdicionarColuna($conn, 'contas_pagar', 'banco_id', "banco_id INT NULL");
-    financeiroAdicionarColuna($conn, 'contas_receber', 'banco_id', "banco_id INT NULL");
-    financeiroAdicionarColuna($conn, 'bancos_caixa', 'titularidade', "titularidade VARCHAR(40) NOT NULL DEFAULT 'Pessoa Jurídica'");
-    financeiroAdicionarColuna($conn, 'bancos_caixa', 'finalidade', "finalidade VARCHAR(120) NULL");
-    financeiroAdicionarColuna($conn, 'bancos_caixa', 'observacoes', "observacoes TEXT NULL");
-
-    financeiroAdicionarColuna($conn, 'contas_pagar_parcelas', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    financeiroAdicionarColuna($conn, 'contas_pagar_parcelas', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-    financeiroAdicionarColuna($conn, 'contas_receber_parcelas', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    financeiroAdicionarColuna($conn, 'contas_receber_parcelas', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-    financeiroAdicionarColuna($conn, 'bancos_caixa', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    financeiroAdicionarColuna($conn, 'bancos_caixa', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-    financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-    financeiroAdicionarColuna($conn, 'bancos_movimentacoes', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-
-    try {
-        $tenantLegado = '';
-        $escritorioLegado = 0;
-
-        $stmtCfg = $conn->prepare("SELECT valor FROM configuracoes WHERE chave = 'tenant_id' LIMIT 1");
-        if ($stmtCfg) {
-            $stmtCfg->execute();
-            $rowCfg = $stmtCfg->get_result()->fetch_assoc();
-            $stmtCfg->close();
-            $tenantLegado = trim((string)($rowCfg['valor'] ?? ''));
-        }
-
-        if ($tenantLegado !== '') {
-            $stmtEsc = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
-            if ($stmtEsc) {
-                $stmtEsc->bind_param('s', $tenantLegado);
-                $stmtEsc->execute();
-                $rowEsc = $stmtEsc->get_result()->fetch_assoc();
-                $stmtEsc->close();
-                $escritorioLegado = (int)($rowEsc['id'] ?? 0);
-            }
-        }
-
-        if ($tenantLegado !== '' && $escritorioLegado > 0) {
-            foreach ([
-                'contas_pagar',
-                'contas_receber',
-                'contas_pagar_parcelas',
-                'contas_receber_parcelas',
-                'bancos_caixa',
-                'bancos_movimentacoes'
-            ] as $tabelaTenant) {
-                $sqlBackfill = "UPDATE `{$tabelaTenant}`
-                                   SET tenant_id = ?,
-                                       escritorio_id = ?
-                                 WHERE tenant_id IS NULL
-                                    OR tenant_id = ''
-                                    OR escritorio_id IS NULL
-                                    OR escritorio_id = 0";
-                $stmtBackfill = $conn->prepare($sqlBackfill);
-                if ($stmtBackfill) {
-                    $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
-                    $stmtBackfill->execute();
-                    $stmtBackfill->close();
-                }
-            }
-        }
-
-        foreach ([
-            'contas_pagar',
-            'contas_receber',
-            'contas_pagar_parcelas',
-            'contas_receber_parcelas',
-            'bancos_caixa',
-            'bancos_movimentacoes'
-        ] as $tabelaIndice) {
-            $nomeIndice = 'idx_' . $tabelaIndice . '_tenant';
-            $indices = [];
-            $resIdx = $conn->query("SHOW INDEX FROM `{$tabelaIndice}`");
-            if ($resIdx) {
-                while ($idx = $resIdx->fetch_assoc()) {
-                    $indices[(string)$idx['Key_name']] = true;
-                }
-            }
-            if (!isset($indices[$nomeIndice])) {
-                $conn->query("ALTER TABLE `{$tabelaIndice}` ADD INDEX `{$nomeIndice}` (tenant_id)");
-            }
-        }
-    } catch (Throwable $e) {
-        error_log('[ROJEX FINANCEIRO MULTI-TENANT] ' . $e->getMessage());
-        throw new RuntimeException('Não foi possível preparar o isolamento Multi-Tenant do Financeiro.', 0, $e);
-    }
-}
-
-financeiroGarantirEstrutura($conn);
 $tenantSql = $conn->real_escape_string($tenantId);
 
 
@@ -373,6 +172,20 @@ function financeiroBancoPertenceAoContexto(mysqli $conn, int $bancoId): bool
     $stmt = $conn->prepare("SELECT id FROM bancos_caixa WHERE tenant_id = ? AND escritorio_id = ? AND id = ? LIMIT 1");
     if (!$stmt) return false;
     $stmt->bind_param('sii', $tenant, $escritorio, $bancoId);
+    $stmt->execute();
+    $existe = (bool)$stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $existe;
+}
+
+function financeiroContaPertenceAoContexto(mysqli $conn, string $tabela, string $id): bool
+{
+    if (!in_array($tabela, ['contas_pagar', 'contas_receber'], true) || trim($id) === '') return false;
+    $tenant = financeiroTenantId();
+    $escritorio = financeiroEscritorioId();
+    $stmt = $conn->prepare("SELECT id FROM `{$tabela}` WHERE tenant_id = ? AND escritorio_id = ? AND id = ? LIMIT 1");
+    if (!$stmt) return false;
+    $stmt->bind_param('sis', $tenant, $escritorio, $id);
     $stmt->execute();
     $existe = (bool)$stmt->get_result()->fetch_assoc();
     $stmt->close();
@@ -507,7 +320,8 @@ function gerarParcelasCP(mysqli $conn, array $conta, bool $gerar30dias = true): 
 
     // apaga parcelas anteriores
     $tenant = $conn->real_escape_string(financeiroTenantId());
-    $conn->query("DELETE FROM contas_pagar_parcelas WHERE tenant_id = '{$tenant}' AND conta_id = '" . $conn->real_escape_string($conta_id) . "'");
+    $escritorio = financeiroEscritorioId();
+    $conn->query("DELETE FROM contas_pagar_parcelas WHERE tenant_id = '{$tenant}' AND escritorio_id = {$escritorio} AND conta_id = '" . $conn->real_escape_string($conta_id) . "'");
 
     $valor_parcela_base = round($valor_total / $qtd_parcelas, 2);
     $data_atual         = new DateTime($data_vencimento);
@@ -567,7 +381,8 @@ function getParcelasCP(mysqli $conn, string $conta_id): array
     $parcelas = [];
     $conta_id = $conn->real_escape_string($conta_id);
     $tenant = $conn->real_escape_string(financeiroTenantId());
-    $res = $conn->query("SELECT * FROM contas_pagar_parcelas WHERE tenant_id = '{$tenant}' AND conta_id = '$conta_id' ORDER BY parcela_numero ASC");
+    $escritorio = financeiroEscritorioId();
+    $res = $conn->query("SELECT * FROM contas_pagar_parcelas WHERE tenant_id = '{$tenant}' AND escritorio_id = {$escritorio} AND conta_id = '$conta_id' ORDER BY parcela_numero ASC");
     if ($res) {
         while ($row = $res->fetch_assoc()) {
             $parcelas[] = $row;
@@ -588,6 +403,7 @@ function recalcContaPagar(mysqli $conn, string $conta_id): void
             COALESCE(SUM(saldo_devedor), 0) AS total_saldo
         FROM contas_pagar_parcelas
         WHERE tenant_id = '" . $conn->real_escape_string(financeiroTenantId()) . "'
+          AND escritorio_id = " . financeiroEscritorioId() . "
           AND conta_id = '$conta_id'
     ");
 
@@ -610,6 +426,7 @@ function recalcContaPagar(mysqli $conn, string $conta_id): void
             valor_pendente = " . sqlMoney($total_saldo) . ",
             status         = " . sqlText($conn, $status) . "
         WHERE tenant_id = " . sqlText($conn, financeiroTenantId()) . "
+          AND escritorio_id = " . financeiroEscritorioId() . "
           AND id = " . sqlText($conn, $conta_id) . "
     ");
 }
@@ -628,13 +445,14 @@ if (isset($_GET['receber_cr'])) {
             "SELECT valor, forma_recebimento, banco_id
              FROM contas_receber
              WHERE tenant_id = ?
+               AND escritorio_id = ?
                AND id = ?
                AND deletado = 0
              LIMIT 1"
         );
 
         if ($stmtConta) {
-            $stmtConta->bind_param('ss', $tenantId, $id);
+            $stmtConta->bind_param('sis', $tenantId, $escritorioId, $id);
             $stmtConta->execute();
             $res = $stmtConta->get_result();
             $cr = $res ? $res->fetch_assoc() : null;
@@ -647,6 +465,8 @@ if (isset($_GET['receber_cr'])) {
             $msg = '<div class="alert alert-danger">Conta a receber não encontrada.</div>';
         } elseif (trim((string)($cr['forma_recebimento'] ?? '')) === '' || (int)($cr['banco_id'] ?? 0) <= 0) {
             $msg = '<div class="alert alert-warning">Antes de confirmar o recebimento, edite a conta e informe a forma de recebimento e o destino Caixa/Banco.</div>';
+        } elseif (!financeiroBancoPertenceAoContexto($conn, (int)$cr['banco_id'])) {
+            $msg = '<div class="alert alert-danger">O Caixa/Banco vinculado não pertence ao escritório ativo.</div>';
         } else {
             $valor = round((float)($cr['valor'] ?? 0), 2);
             $hojeSql = date('Y-m-d');
@@ -658,11 +478,12 @@ if (isset($_GET['receber_cr'])) {
                      status = 'Recebido',
                      data_recebimento = ?
                  WHERE tenant_id = ?
+                   AND escritorio_id = ?
                    AND id = ?"
             );
 
             if ($stmtAtualiza) {
-                $stmtAtualiza->bind_param('dsss', $valor, $hojeSql, $tenantId, $id);
+                $stmtAtualiza->bind_param('dssis', $valor, $hojeSql, $tenantId, $escritorioId, $id);
                 $okAtualiza = $stmtAtualiza->execute();
                 $stmtAtualiza->close();
             } else {
@@ -720,13 +541,14 @@ if (isset($_GET['gerar_recibo_cr'])) {
             "SELECT valor, valor_pago, status, data_recebimento, forma_recebimento, banco_id
              FROM contas_receber
              WHERE tenant_id = ?
+               AND escritorio_id = ?
                AND id = ?
                AND deletado = 0
              LIMIT 1"
         );
 
         if ($stmtConta) {
-            $stmtConta->bind_param('ss', $tenantId, $id);
+            $stmtConta->bind_param('sis', $tenantId, $escritorioId, $id);
             $stmtConta->execute();
             $res = $stmtConta->get_result();
             $cr = $res ? $res->fetch_assoc() : null;
@@ -739,6 +561,8 @@ if (isset($_GET['gerar_recibo_cr'])) {
             $msg = '<div class="alert alert-danger">Conta a receber não encontrada.</div>';
         } elseif (trim((string)($cr['forma_recebimento'] ?? '')) === '' || (int)($cr['banco_id'] ?? 0) <= 0) {
             $msg = '<div class="alert alert-warning">Antes de gerar o recibo, informe a forma de recebimento e o destino Caixa/Banco.</div>';
+        } elseif (!financeiroBancoPertenceAoContexto($conn, (int)$cr['banco_id'])) {
+            $msg = '<div class="alert alert-danger">O Caixa/Banco vinculado não pertence ao escritório ativo.</div>';
         } else {
             $valor = round((float)($cr['valor_pago'] ?? 0), 2);
             if ($valor <= 0) {
@@ -756,11 +580,12 @@ if (isset($_GET['gerar_recibo_cr'])) {
                      status = 'Recebido',
                      data_recebimento = ?
                  WHERE tenant_id = ?
+                   AND escritorio_id = ?
                    AND id = ?"
             );
 
             if ($stmtAtualiza) {
-                $stmtAtualiza->bind_param('dsss', $valor, $dataReceb, $tenantId, $id);
+                $stmtAtualiza->bind_param('dssis', $valor, $dataReceb, $tenantId, $escritorioId, $id);
                 $okAtualiza = $stmtAtualiza->execute();
                 $stmtAtualiza->close();
             } else {
@@ -797,9 +622,9 @@ if (isset($_GET['pagar_cp'])) {
     } else {
         $id = (string)$_GET['pagar_cp'];
         $stmtValidaCp = $conn->prepare(
-            "SELECT id FROM contas_pagar WHERE tenant_id = ? AND id = ? AND deletado = 0 LIMIT 1"
+            "SELECT id FROM contas_pagar WHERE tenant_id = ? AND escritorio_id = ? AND id = ? AND deletado = 0 LIMIT 1"
         );
-        $stmtValidaCp->bind_param('ss', $tenantId, $id);
+        $stmtValidaCp->bind_param('sis', $tenantId, $escritorioId, $id);
         $stmtValidaCp->execute();
         $cpValida = $stmtValidaCp->get_result()->fetch_assoc();
         $stmtValidaCp->close();
@@ -970,6 +795,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
     $banco_id        = (int)($_POST['banco_id'] ?? 0);
     $banco_sql       = $banco_id > 0 ? (string)$banco_id : 'NULL';
     $gerar30dias     = isset($_POST['gerar_30dias']);
+    $escopoCpValido  = $novo || financeiroContaPertenceAoContexto($conn, 'contas_pagar', $id);
+    $bancoCpValido   = $banco_id <= 0 || financeiroBancoPertenceAoContexto($conn, $banco_id);
 
     // A conta principal é "espelho" das parcelas:
     // valor_pago / pendente são recalculados depois com base nas parcelas.
@@ -981,7 +808,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
         $status_final = 'Cancelado';
     }
 
-    if ($novo) {
+    if (!$escopoCpValido || !$bancoCpValido) {
+        $sql = null;
+    } elseif ($novo) {
         $sql = "INSERT INTO contas_pagar
             (id, tenant_id, escritorio_id, descricao, categoria, fornecedor, valor, data_vencimento, data_pagamento,
              forma_pagamento, status, mes_referencia, observacoes, valor_pago, valor_pendente, banco_id, deletado)
@@ -1018,10 +847,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
                 observacoes     = " . sqlNullableText($conn, $observacoes) . ",
                 banco_id        = {$banco_sql}
             WHERE tenant_id = " . sqlText($conn, $tenantId) . "
+              AND escritorio_id = " . (int)$escritorioId . "
               AND id = " . sqlText($conn, $id);
     }
 
-    if ($conn->query($sql)) {
+    if ($sql !== null && $conn->query($sql)) {
 
         // gera / regenera parcelas
         $contaData = [
@@ -1040,7 +870,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
         } else {
             recalcContaPagar($conn, $id);
             if ($status_input === 'Cancelado') {
-                $conn->query("UPDATE contas_pagar SET status = 'Cancelado' WHERE tenant_id = " . sqlText($conn, $tenantId) . " AND id = " . sqlText($conn, $id));
+                $conn->query("UPDATE contas_pagar SET status = 'Cancelado' WHERE tenant_id = " . sqlText($conn, $tenantId) . " AND escritorio_id = " . (int)$escritorioId . " AND id = " . sqlText($conn, $id));
             }
         }
 
@@ -1049,7 +879,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cp'])) {
         $acao = 'listar';
         $aba  = 'cp';
     } else {
-        $msg  = "<div class='alert alert-danger'>Erro ao salvar: " . htmlspecialchars($conn->error) . "</div>";
+        $msg  = !$escopoCpValido
+            ? "<div class='alert alert-danger'>A conta a pagar não pertence ao escritório ativo.</div>"
+            : (!$bancoCpValido
+                ? "<div class='alert alert-danger'>O Caixa/Banco selecionado não pertence ao escritório ativo.</div>"
+                : "<div class='alert alert-danger'>Erro ao salvar: " . htmlspecialchars($conn->error) . "</div>");
         $acao = $novo ? 'novo_cp' : 'editar_cp';
         $aba  = 'cp';
     }
@@ -1062,8 +896,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_parcela_cp']))
     $valor_pago_in = brlParaFloatFin($_POST['valor_pago_parcela'] ?? '0');
 
     $parcela_id = $conn->real_escape_string($parcela_id);
+    $conta_id_sql = $conn->real_escape_string($conta_id);
+    $escritorioSql = (int)$escritorioId;
 
-    $res = $conn->query("SELECT valor_parcela FROM contas_pagar_parcelas WHERE tenant_id = '" . $conn->real_escape_string($tenantId) . "' AND id = '$parcela_id' LIMIT 1");
+    $res = $conn->query("SELECT valor_parcela FROM contas_pagar_parcelas WHERE tenant_id = '" . $conn->real_escape_string($tenantId) . "' AND escritorio_id = {$escritorioSql} AND id = '$parcela_id' AND conta_id = '$conta_id_sql' LIMIT 1");
     if ($res && $res->num_rows) {
         $row           = $res->fetch_assoc();
         $valor_parcela = (float)$row['valor_parcela'];
@@ -1084,7 +920,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_parcela_cp']))
                 saldo_devedor    = " . sqlMoney($saldo) . ",
                 status_pagamento = " . sqlText($conn, $status) . "
             WHERE tenant_id = '" . $conn->real_escape_string($tenantId) . "'
+              AND escritorio_id = {$escritorioSql}
               AND id = '$parcela_id'
+              AND conta_id = '$conta_id_sql'
         ");
 
         if ($conta_id !== '') {
@@ -1169,6 +1007,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
             $erroValidacao = 'Forma de recebimento inválida.';
         } elseif (in_array($status, ['Recebido', 'Parcial'], true) && $bancoId <= 0) {
             $erroValidacao = 'Selecione o Caixa ou Banco onde o valor entrou.';
+        } elseif ($bancoId > 0 && !financeiroBancoPertenceAoContexto($conn, $bancoId)) {
+            $erroValidacao = 'O Caixa ou Banco selecionado não pertence ao escritório ativo.';
+        } elseif (!$novo && !financeiroContaPertenceAoContexto($conn, 'contas_receber', $id)) {
+            $erroValidacao = 'A conta a receber não pertence ao escritório ativo.';
         }
 
         if ($erroValidacao !== '') {
@@ -1213,6 +1055,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['salvar_cr'])) {
                         observacoes = " . sqlNullableText($conn, $observacoes) . ",
                         banco_id = {$bancoSql}
                     WHERE tenant_id = " . sqlText($conn, $tenantId) . "
+                      AND escritorio_id = " . (int)$escritorioId . "
                       AND id = " . sqlText($conn, $id);
             }
 

@@ -24,118 +24,11 @@ if (function_exists('sgl_garantir_logs')) {
     sgl_garantir_logs($conn);
 }
 
-/**
- * Garante a estrutura Multi-Tenant da tabela processos e preserva
- * os registros legados do escritório original.
+/*
+ * A estrutura Multi-Tenant da tabela processos é mantida por migração SQL.
+ * DDL e backfills próprios de processos não são executados durante requisições HTTP.
+ * Migração: migrations/20260718_ra06_processos_runtime_ddl.sql
  */
-function garantirProcessosMultiTenant(mysqli $conn): void {
-    static $garantido = false;
-
-    if ($garantido) {
-        return;
-    }
-
-    if (function_exists('sgl_int_add_coluna')) {
-        sgl_int_add_coluna($conn, 'processos', 'tenant_id', "tenant_id VARCHAR(80) NULL AFTER id");
-        sgl_int_add_coluna($conn, 'processos', 'escritorio_id', "escritorio_id INT NULL AFTER tenant_id");
-    }
-
-    try {
-        $tenantLegado = '';
-        $escritorioLegado = 0;
-
-        $stmtConfig = $conn->prepare(
-            "SELECT valor
-               FROM configuracoes
-              WHERE chave = 'tenant_id'
-              LIMIT 1"
-        );
-
-        if ($stmtConfig) {
-            $stmtConfig->execute();
-            $rowConfig = $stmtConfig->get_result()->fetch_assoc();
-            $stmtConfig->close();
-            $tenantLegado = trim((string)($rowConfig['valor'] ?? ''));
-        }
-
-        if ($tenantLegado !== '') {
-            $stmtEsc = $conn->prepare(
-                "SELECT id
-                   FROM escritorios_saas
-                  WHERE tenant_id = ?
-                  LIMIT 1"
-            );
-
-            if ($stmtEsc) {
-                $stmtEsc->bind_param('s', $tenantLegado);
-                $stmtEsc->execute();
-                $rowEsc = $stmtEsc->get_result()->fetch_assoc();
-                $stmtEsc->close();
-                $escritorioLegado = (int)($rowEsc['id'] ?? 0);
-            }
-        }
-
-        if ($tenantLegado !== '' && $escritorioLegado > 0) {
-            $stmtBackfill = $conn->prepare(
-                "UPDATE processos
-                    SET tenant_id = ?,
-                        escritorio_id = ?
-                  WHERE tenant_id IS NULL
-                     OR tenant_id = ''
-                     OR escritorio_id IS NULL
-                     OR escritorio_id = 0"
-            );
-
-            if ($stmtBackfill) {
-                $stmtBackfill->bind_param('si', $tenantLegado, $escritorioLegado);
-                $stmtBackfill->execute();
-                $stmtBackfill->close();
-            }
-        }
-
-        $indices = [];
-        $resIndices = $conn->query("SHOW INDEX FROM processos");
-
-        if ($resIndices) {
-            while ($idx = $resIndices->fetch_assoc()) {
-                $indices[(string)$idx['Key_name']] = true;
-            }
-        }
-
-        if (!isset($indices['idx_processos_tenant'])) {
-            $conn->query("ALTER TABLE processos ADD INDEX idx_processos_tenant (tenant_id)");
-        }
-
-        if (!isset($indices['idx_processos_escritorio'])) {
-            $conn->query("ALTER TABLE processos ADD INDEX idx_processos_escritorio (escritorio_id)");
-        }
-
-        if (!isset($indices['idx_processos_tenant_numero'])) {
-            $conn->query(
-                "ALTER TABLE processos
-                 ADD INDEX idx_processos_tenant_numero (tenant_id, numero_processo)"
-            );
-        }
-
-        if (!isset($indices['idx_processos_tenant_cliente'])) {
-            $conn->query(
-                "ALTER TABLE processos
-                 ADD INDEX idx_processos_tenant_cliente (tenant_id, cliente_id)"
-            );
-        }
-
-        $garantido = true;
-    } catch (Throwable $e) {
-        error_log('[ROJEX PROCESSOS MULTI-TENANT] ' . $e->getMessage());
-        throw new RuntimeException(
-            'Não foi possível preparar o isolamento Multi-Tenant de Processos.',
-            0,
-            $e
-        );
-    }
-}
-
-garantirProcessosMultiTenant($conn);
 
 $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
@@ -186,11 +79,12 @@ function registrarLog(
     }
 }
 
-function buscarProcessoAuditoria(mysqli $conn, string $tenantId, string $id): ?array {
+function buscarProcessoAuditoria(mysqli $conn, string $tenantId, int $escritorioId, string $id): ?array {
     $stmt = $conn->prepare(
         "SELECT *
            FROM processos
           WHERE tenant_id = ?
+            AND escritorio_id = ?
             AND id = ?
           LIMIT 1"
     );
@@ -199,7 +93,7 @@ function buscarProcessoAuditoria(mysqli $conn, string $tenantId, string $id): ?a
         return null;
     }
 
-    $stmt->bind_param('ss', $tenantId, $id);
+    $stmt->bind_param('sis', $tenantId, $escritorioId, $id);
     $stmt->execute();
     $res = $stmt->get_result();
     $processo = ($res && $res->num_rows > 0) ? $res->fetch_assoc() : null;
@@ -211,17 +105,19 @@ function buscarProcessoAuditoria(mysqli $conn, string $tenantId, string $id): ?a
 function processoExiste(
     mysqli $conn,
     string $tenantId,
+    int $escritorioId,
     string $numero,
     string $ignorarId = ''
 ): bool {
     $sql = "SELECT id
               FROM processos
              WHERE tenant_id = ?
+               AND escritorio_id = ?
                AND numero_processo = ?
                AND status != 'Excluído'";
 
-    $params = [$tenantId, $numero];
-    $types = 'ss';
+    $params = [$tenantId, $escritorioId, $numero];
+    $types = 'sis';
 
     if ($ignorarId !== '') {
         $sql .= " AND id <> ?";
@@ -245,11 +141,12 @@ function processoExiste(
     return $existe;
 }
 
-function clientePertenceTenant(mysqli $conn, string $tenantId, string $clienteId): bool {
+function clientePertenceTenant(mysqli $conn, string $tenantId, int $escritorioId, string $clienteId): bool {
     $stmt = $conn->prepare(
         "SELECT id
            FROM clientes
           WHERE tenant_id = ?
+            AND escritorio_id = ?
             AND id = ?
             AND deletado = 0
             AND status != 'Excluído'
@@ -260,7 +157,7 @@ function clientePertenceTenant(mysqli $conn, string $tenantId, string $clienteId
         return false;
     }
 
-    $stmt->bind_param('ss', $tenantId, $clienteId);
+    $stmt->bind_param('sis', $tenantId, $escritorioId, $clienteId);
     $stmt->execute();
     $res = $stmt->get_result();
     $ok = $res && $res->num_rows > 0;
@@ -269,11 +166,12 @@ function clientePertenceTenant(mysqli $conn, string $tenantId, string $clienteId
     return $ok;
 }
 
-function advogadoPertenceTenant(mysqli $conn, string $tenantId, string $advogadoId): bool {
+function advogadoPertenceTenant(mysqli $conn, string $tenantId, int $escritorioId, string $advogadoId): bool {
     $stmt = $conn->prepare(
         "SELECT id
            FROM advogados
           WHERE tenant_id = ?
+            AND escritorio_id = ?
             AND id = ?
             AND deletado = 0
             AND status = 'Ativo'
@@ -284,7 +182,7 @@ function advogadoPertenceTenant(mysqli $conn, string $tenantId, string $advogado
         return false;
     }
 
-    $stmt->bind_param('ss', $tenantId, $advogadoId);
+    $stmt->bind_param('sis', $tenantId, $escritorioId, $advogadoId);
     $stmt->execute();
     $res = $stmt->get_result();
     $ok = $res && $res->num_rows > 0;
@@ -308,7 +206,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
 
         if ($advogado_id === '') {
             $advogado_id = null;
-        } elseif (!advogadoPertenceTenant($conn, $tenantId, $advogado_id)) {
+        } elseif (!advogadoPertenceTenant($conn, $tenantId, $escritorioId, $advogado_id)) {
             $advogado_id = null;
         }
         $data_distribuicao = trim($_POST['data_distribuicao'] ?? '') ?: null;
@@ -321,10 +219,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
         if ($numero_processo === '' || $cliente_id === '') {
             $msg = '<div class="alert alert-danger">Informe o número do processo e selecione o cliente.</div>';
             $acao = isset($_POST['atualizar_processo']) ? 'editar' : 'novo';
-        } elseif (!clientePertenceTenant($conn, $tenantId, $cliente_id)) {
+        } elseif (!clientePertenceTenant($conn, $tenantId, $escritorioId, $cliente_id)) {
             $msg = '<div class="alert alert-danger">O cliente selecionado não pertence ao escritório ativo.</div>';
             $acao = isset($_POST['atualizar_processo']) ? 'editar' : 'novo';
-        } elseif (processoExiste($conn, $tenantId, $numero_processo, isset($_POST['atualizar_processo']) ? $id : '')) {
+        } elseif (processoExiste($conn, $tenantId, $escritorioId, $numero_processo, isset($_POST['atualizar_processo']) ? $id : '')) {
             $msg = '<div class="alert alert-warning">Já existe um processo ativo com este número.</div>';
             $acao = isset($_POST['atualizar_processo']) ? 'editar' : 'novo';
         } else {
@@ -364,7 +262,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
                         [
                             'tipo_acao' => 'INCLUSAO',
                             'origem' => 'Cadastro de processos',
-                            'dados_novos' => buscarProcessoAuditoria($conn, $tenantId, $id),
+                            'dados_novos' => buscarProcessoAuditoria($conn, $tenantId, $escritorioId, $id),
                         ]
                     );
                     $msg = "<div class='alert alert-success'>Processo <strong>".h($id)."</strong> cadastrado com sucesso.</div>";
@@ -393,7 +291,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
                     $acao='novo';
                 }
             } else {
-                $dadosAnteriores = buscarProcessoAuditoria($conn, $tenantId, $id);
+                $dadosAnteriores = buscarProcessoAuditoria($conn, $tenantId, $escritorioId, $id);
 
                 $stmt = $conn->prepare(
                     "UPDATE processos
@@ -410,11 +308,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
                             status = ?,
                             observacoes = ?
                       WHERE tenant_id = ?
+                        AND escritorio_id = ?
                         AND id = ?
                         AND status != 'Excluído'"
                 );
                 $stmt->bind_param(
-                    'ssssssssdsssss',
+                    'ssssssssdssssis',
                     $numero_processo,
                     $cliente_id,
                     $tipo_processo,
@@ -428,6 +327,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
                     $status,
                     $observacoes,
                     $tenantId,
+                    $escritorioId,
                     $id
                 );
                 $ok = $stmt->execute();
@@ -442,7 +342,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_processo']) |
                             'tipo_acao' => 'EDICAO',
                             'origem' => 'Edição de processos',
                             'dados_anteriores' => $dadosAnteriores,
-                            'dados_novos' => buscarProcessoAuditoria($conn, $tenantId, $id),
+                            'dados_novos' => buscarProcessoAuditoria($conn, $tenantId, $escritorioId, $id),
                         ]
                     );
                     $msg = "<div class='alert alert-success'>Processo <strong>".h($id)."</strong> atualizado com sucesso.</div>";
@@ -481,16 +381,17 @@ if (isset($_GET['excluir'])) {
     if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
         $msg = '<div class="alert alert-danger">Token inválido para exclusão.</div>';
     } else {
-        $dadosAnteriores = buscarProcessoAuditoria($conn, $tenantId, $id);
+        $dadosAnteriores = buscarProcessoAuditoria($conn, $tenantId, $escritorioId, $id);
 
         $stmt = $conn->prepare(
             "UPDATE processos
                 SET status = 'Excluído'
               WHERE tenant_id = ?
+                AND escritorio_id = ?
                 AND id = ?
                 AND status != 'Excluído'"
         );
-        $stmt->bind_param('ss', $tenantId, $id);
+        $stmt->bind_param('sis', $tenantId, $escritorioId, $id);
         $okExcluir = $stmt->execute();
         $linhasAfetadas = $stmt->affected_rows;
         $stmt->close();
@@ -506,7 +407,7 @@ if (isset($_GET['excluir'])) {
                     'origem' => 'Lista de processos',
                     'nivel' => 'AVISO',
                     'dados_anteriores' => $dadosAnteriores,
-                    'dados_novos' => buscarProcessoAuditoria($conn, $tenantId, $id),
+                    'dados_novos' => buscarProcessoAuditoria($conn, $tenantId, $escritorioId, $id),
                 ]
             );
             $msg = '<div class="alert alert-warning">Processo movido para a lixeira com sucesso.</div>';
@@ -537,11 +438,12 @@ if ($acao === 'editar' && isset($_GET['id'])) {
         "SELECT *
            FROM processos
           WHERE tenant_id = ?
+            AND escritorio_id = ?
             AND id = ?
             AND status != 'Excluído'
           LIMIT 1"
     );
-    $stmt->bind_param('ss', $tenantId, $id_editar);
+    $stmt->bind_param('sis', $tenantId, $escritorioId, $id_editar);
     $stmt->execute();
     $processo_editar = $stmt->get_result()->fetch_assoc();
     if (!$processo_editar) { $msg = '<div class="alert alert-danger">Processo não encontrado.</div>'; $acao = 'listar'; }
@@ -558,25 +460,27 @@ $valor_form = ((float)$f['valor_causa'] > 0) ? brl($f['valor_causa']) : '';
 $csrf = gerarTokenCsrf();
 $stmtClientes = $conn->prepare(
     "SELECT id, nome
-       FROM clientes
+      FROM clientes
       WHERE tenant_id = ?
+        AND escritorio_id = ?
         AND deletado = 0
         AND status != 'Excluído'
       ORDER BY nome"
 );
-$stmtClientes->bind_param('s', $tenantId);
+$stmtClientes->bind_param('si', $tenantId, $escritorioId);
 $stmtClientes->execute();
 $clientes = $stmtClientes->get_result();
 
 $stmtAdvogados = $conn->prepare(
     "SELECT id, nome
-       FROM advogados
+      FROM advogados
       WHERE tenant_id = ?
+        AND escritorio_id = ?
         AND deletado = 0
         AND status = 'Ativo'
       ORDER BY nome"
 );
-$stmtAdvogados->bind_param('s', $tenantId);
+$stmtAdvogados->bind_param('si', $tenantId, $escritorioId);
 $stmtAdvogados->execute();
 $advogados = $stmtAdvogados->get_result();
 $tipos_processo = ['Trabalhista','Civil','Criminal','Família','Tributário','Previdenciário','Imobiliário','Consumidor','Empresarial','Outro'];
@@ -593,9 +497,10 @@ $stmtCards = $conn->prepare(
         COALESCE(SUM(valor_causa), 0) AS valor_total
      FROM processos
      WHERE tenant_id = ?
+       AND escritorio_id = ?
        AND status != 'Excluído'"
 );
-$stmtCards->bind_param('s', $tenantId);
+$stmtCards->bind_param('si', $tenantId, $escritorioId);
 $stmtCards->execute();
 $cards = $stmtCards->get_result()->fetch_assoc() ?: [
     'total' => 0,
@@ -658,9 +563,9 @@ function limparMoedaAntesDeSalvar(form){const c=form.querySelector('[name="valor
 <?php else: ?>
 <?php
 $busca = trim($_GET['busca'] ?? ''); $statusFiltro = trim($_GET['status'] ?? ''); $tipoFiltro = trim($_GET['tipo'] ?? ''); $prazoFiltro = trim($_GET['prazo'] ?? '');
-$where = "WHERE p.tenant_id = ? AND p.status != 'Excluído'";
-$params = [$tenantId];
-$types = 's';
+$where = "WHERE p.tenant_id = ? AND p.escritorio_id = ? AND p.status != 'Excluído'";
+$params = [$tenantId, $escritorioId];
+$types = 'si';
 if($busca!==''){ $like="%$busca%"; $where.=" AND (p.numero_processo LIKE ? OR c.nome LIKE ? OR p.tipo_processo LIKE ? OR p.comarca LIKE ? OR p.fase_atual LIKE ?)"; array_push($params,$like,$like,$like,$like,$like); $types.='sssss'; }
 if($statusFiltro!==''){ $where.=" AND p.status=?"; $params[]=$statusFiltro; $types.='s'; }
 if($tipoFiltro!==''){ $where.=" AND p.tipo_processo=?"; $params[]=$tipoFiltro; $types.='s'; }
@@ -681,6 +586,7 @@ $sql = "SELECT
         LEFT JOIN clientes c
                ON c.id = p.cliente_id
               AND c.tenant_id = p.tenant_id
+              AND c.escritorio_id = p.escritorio_id
         {$where}
         ORDER BY COALESCE(p.proximo_prazo, '2999-12-31') ASC, p.id DESC
         LIMIT 300";

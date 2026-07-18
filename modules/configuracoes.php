@@ -865,8 +865,40 @@ function sgl_select_count(mysqli $conn, string $sql): int {
     return 0;
 }
 
+/**
+ * @return array{tenant_id:string,escritorio_id:int}|null
+ */
+function sgl_lixeira_contexto_atual(): ?array {
+    if (
+        !function_exists('rojexContextoTenantValido')
+        || !function_exists('rojexTenantId')
+        || !function_exists('rojexEscritorioId')
+        || !rojexContextoTenantValido()
+        || (function_exists('rojexModoPlataforma') && rojexModoPlataforma())
+    ) {
+        return null;
+    }
+
+    $tenantId = trim((string)rojexTenantId());
+    $escritorioId = (int)rojexEscritorioId();
+    if ($tenantId === '' || $escritorioId <= 0) {
+        return null;
+    }
+
+    return [
+        'tenant_id' => $tenantId,
+        'escritorio_id' => $escritorioId,
+    ];
+}
+
 function sgl_buscar_lixeira(mysqli $conn): array {
     $itens = [];
+    $contexto = sgl_lixeira_contexto_atual();
+    if (!$contexto) {
+        return $itens;
+    }
+    $tenantLixeira = $contexto['tenant_id'];
+    $escritorioLixeira = $contexto['escritorio_id'];
 
     $mapa = [
         'advogados' => ['campo' => 'nome', 'cond' => "status='Excluído'", 'tipo' => 'Advogados'],
@@ -879,10 +911,15 @@ function sgl_buscar_lixeira(mysqli $conn): array {
         'documentos_arquivos' => ['campo' => sgl_coluna_existe($conn, 'documentos_arquivos', 'titulo') ? 'titulo' : 'nome_arquivo', 'cond' => sgl_coluna_existe($conn, 'documentos_arquivos', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Documentos'],
         'modelos_documentos' => ['campo' => sgl_coluna_existe($conn, 'modelos_documentos', 'titulo') ? 'titulo' : 'nome', 'cond' => sgl_coluna_existe($conn, 'modelos_documentos', 'deletado') ? 'deletado = 1' : "status='Excluído'", 'tipo' => 'Modelos'],
         'recibos' => ['campo' => sgl_coluna_existe($conn, 'recibos', 'numero') ? 'numero' : 'nome_cliente', 'cond' => sgl_coluna_existe($conn, 'recibos', 'deletado') ? 'deletado = 1' : "status='Cancelado'", 'tipo' => 'Recibos'],
+        'ia_consultas' => ['campo' => 'titulo', 'cond' => "deletado = 1 AND modulo = 'CIJ_GERADOR'", 'tipo' => 'Histórico do Gerador'],
     ];
 
     $stmtLog = null;
-    if (sgl_tabela_existe($conn, 'logs_sistema')) {
+    if (
+        sgl_tabela_existe($conn, 'logs_sistema')
+        && sgl_coluna_existe($conn, 'logs_sistema', 'tenant_id')
+        && sgl_coluna_existe($conn, 'logs_sistema', 'escritorio_id')
+    ) {
         try {
             $stmtLog = $conn->prepare(
                 "SELECT criado_em,
@@ -890,6 +927,8 @@ function sgl_buscar_lixeira(mysqli $conn): array {
                    FROM logs_sistema
                   WHERE tabela = ?
                     AND registro_id = ?
+                    AND tenant_id = ?
+                    AND escritorio_id = ?
                     AND (
                         acao LIKE '%lixeira%'
                         OR acao LIKE '%exclu%'
@@ -904,13 +943,34 @@ function sgl_buscar_lixeira(mysqli $conn): array {
     }
 
     foreach ($mapa as $tabela => $cfg) {
-        if (!sgl_tabela_existe($conn, $tabela) || !sgl_coluna_existe($conn, $tabela, 'id') || !sgl_coluna_existe($conn, $tabela, $cfg['campo'])) {
+        if (
+            !sgl_tabela_existe($conn, $tabela)
+            || !sgl_coluna_existe($conn, $tabela, 'id')
+            || !sgl_coluna_existe($conn, $tabela, $cfg['campo'])
+            || !sgl_coluna_existe($conn, $tabela, 'tenant_id')
+            || !sgl_coluna_existe($conn, $tabela, 'escritorio_id')
+        ) {
             continue;
         }
 
         try {
-            $sql = "SELECT id, `{$cfg['campo']}` AS nome FROM `$tabela` WHERE {$cfg['cond']} ORDER BY id DESC";
-            $res = $conn->query($sql);
+            $sql = "SELECT id, `{$cfg['campo']}` AS nome
+                      FROM `$tabela`
+                     WHERE {$cfg['cond']}
+                       AND tenant_id = ?
+                       AND escritorio_id = ?
+                     ORDER BY id DESC";
+            $stmtItens = $conn->prepare($sql);
+            if (!$stmtItens) {
+                continue;
+            }
+            $stmtItens->bind_param(
+                'si',
+                $tenantLixeira,
+                $escritorioLixeira
+            );
+            $stmtItens->execute();
+            $res = $stmtItens->get_result();
             if ($res) {
                 while ($row = $res->fetch_assoc()) {
                     $id = (string)$row['id'];
@@ -919,7 +979,13 @@ function sgl_buscar_lixeira(mysqli $conn): array {
 
                     if ($stmtLog) {
                         try {
-                            $stmtLog->bind_param('ss', $tabela, $id);
+                            $stmtLog->bind_param(
+                                'sssi',
+                                $tabela,
+                                $id,
+                                $tenantLixeira,
+                                $escritorioLixeira
+                            );
                             $stmtLog->execute();
                             $meta = $stmtLog->get_result()->fetch_assoc();
                             if ($meta) {
@@ -939,6 +1005,7 @@ function sgl_buscar_lixeira(mysqli $conn): array {
                     ];
                 }
             }
+            $stmtItens->close();
         } catch (Throwable $e) {}
     }
 
@@ -973,16 +1040,64 @@ function sgl_lixeira_item_valido(string $valor, array $permitidas): ?array {
 }
 
 function sgl_lixeira_restaurar(mysqli $conn, string $tabela, string $id): bool {
-    if (!sgl_tabela_existe($conn, $tabela) || !sgl_coluna_existe($conn, $tabela, 'id')) return false;
+    $contexto = sgl_lixeira_contexto_atual();
+    if (
+        !$contexto
+        || !sgl_tabela_existe($conn, $tabela)
+        || !sgl_coluna_existe($conn, $tabela, 'id')
+        || !sgl_coluna_existe($conn, $tabela, 'tenant_id')
+        || !sgl_coluna_existe($conn, $tabela, 'escritorio_id')
+    ) return false;
+    $tenantLixeira = $contexto['tenant_id'];
+    $escritorioLixeira = $contexto['escritorio_id'];
+    $restricaoModulo = $tabela === 'ia_consultas'
+        ? " AND modulo = 'CIJ_GERADOR'"
+        : '';
 
     try {
         if (sgl_coluna_existe($conn, $tabela, 'deletado')) {
-            $stmt = $conn->prepare("UPDATE `$tabela` SET deletado = 0 WHERE id = ?");
-            $stmt->bind_param('s', $id);
+            $limparExclusao = '';
+            if (sgl_coluna_existe($conn, $tabela, 'deletado_em')) {
+                $limparExclusao .= ', deletado_em = NULL';
+            }
+            if (sgl_coluna_existe($conn, $tabela, 'deletado_por')) {
+                $limparExclusao .= ', deletado_por = NULL';
+            }
+            $stmt = $conn->prepare(
+                "UPDATE `$tabela`
+                    SET deletado = 0{$limparExclusao}
+                  WHERE id = ?
+                    AND tenant_id = ?
+                    AND escritorio_id = ?
+                    AND deletado = 1{$restricaoModulo}"
+            );
+            $stmt->bind_param(
+                'ssi',
+                $id,
+                $tenantLixeira,
+                $escritorioLixeira
+            );
         } elseif (sgl_coluna_existe($conn, $tabela, 'status')) {
             $status = ($tabela === 'processos') ? 'Em Andamento' : (($tabela === 'agenda') ? 'Agendado' : 'Ativo');
-            $stmt = $conn->prepare("UPDATE `$tabela` SET status = ? WHERE id = ?");
-            $stmt->bind_param('ss', $status, $id);
+            $statusLixeira = in_array($tabela, ['agenda', 'recibos'], true)
+                ? 'Cancelado'
+                : 'Excluído';
+            $stmt = $conn->prepare(
+                "UPDATE `$tabela`
+                    SET status = ?
+                  WHERE id = ?
+                    AND tenant_id = ?
+                    AND escritorio_id = ?
+                    AND status = ?{$restricaoModulo}"
+            );
+            $stmt->bind_param(
+                'sssis',
+                $status,
+                $id,
+                $tenantLixeira,
+                $escritorioLixeira,
+                $statusLixeira
+            );
         } else {
             return false;
         }
@@ -997,11 +1112,56 @@ function sgl_lixeira_restaurar(mysqli $conn, string $tabela, string $id): bool {
 }
 
 function sgl_lixeira_excluir(mysqli $conn, string $tabela, string $id): bool {
-    if (!sgl_tabela_existe($conn, $tabela) || !sgl_coluna_existe($conn, $tabela, 'id')) return false;
+    $contexto = sgl_lixeira_contexto_atual();
+    if (
+        !$contexto
+        || !sgl_tabela_existe($conn, $tabela)
+        || !sgl_coluna_existe($conn, $tabela, 'id')
+        || !sgl_coluna_existe($conn, $tabela, 'tenant_id')
+        || !sgl_coluna_existe($conn, $tabela, 'escritorio_id')
+    ) return false;
+    $tenantLixeira = $contexto['tenant_id'];
+    $escritorioLixeira = $contexto['escritorio_id'];
+    $restricaoModulo = $tabela === 'ia_consultas'
+        ? " AND modulo = 'CIJ_GERADOR'"
+        : '';
 
     try {
-        $stmt = $conn->prepare("DELETE FROM `$tabela` WHERE id = ?");
-        $stmt->bind_param('s', $id);
+        $restricaoLixeira = '';
+        $statusLixeira = null;
+        if (sgl_coluna_existe($conn, $tabela, 'deletado')) {
+            $restricaoLixeira = ' AND deletado = 1';
+        } elseif (sgl_coluna_existe($conn, $tabela, 'status')) {
+            $statusLixeira = in_array($tabela, ['agenda', 'recibos'], true)
+                ? 'Cancelado'
+                : 'Excluído';
+            $restricaoLixeira = ' AND status = ?';
+        } else {
+            return false;
+        }
+
+        $stmt = $conn->prepare(
+            "DELETE FROM `$tabela`
+              WHERE id = ?
+                AND tenant_id = ?
+                AND escritorio_id = ?{$restricaoLixeira}{$restricaoModulo}"
+        );
+        if ($statusLixeira !== null) {
+            $stmt->bind_param(
+                'ssis',
+                $id,
+                $tenantLixeira,
+                $escritorioLixeira,
+                $statusLixeira
+            );
+        } else {
+            $stmt->bind_param(
+                'ssi',
+                $id,
+                $tenantLixeira,
+                $escritorioLixeira
+            );
+        }
         $ok = $stmt->execute();
         $afetadas = $stmt->affected_rows;
         $stmt->close();
@@ -4863,7 +5023,7 @@ if ($acao_cfg === 'salvar_sistema') {
     sgl_redirect_cfg('sistema', 'sucesso', 'Configurações do Sistema Enterprise salvas com sucesso.');
 }
 
-$lixeira_permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos','recibos'];
+$lixeira_permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos','recibos','ia_consultas'];
 
 if ($acao_cfg === 'restaurar_item_lixeira' && !empty($_POST['tabela']) && !empty($_POST['item_id'])) {
     $item = sgl_lixeira_item_valido((string)$_POST['tabela'] . '|' . (string)$_POST['item_id'], $lixeira_permitidas);

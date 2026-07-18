@@ -8,6 +8,22 @@ if (function_exists('sgl_integracao_garantir_financeiro')) {
     sgl_integracao_garantir_financeiro($conn);
 }
 
+try {
+    if (!function_exists('sgl_int_contexto_multi_tenant')) {
+        throw new RuntimeException('A camada Multi-Tenant da Central Inteligente não está disponível.');
+    }
+    $contextoCentral = sgl_int_contexto_multi_tenant();
+    $tenantCentral = $conn->real_escape_string($contextoCentral['tenant_id']);
+    $escritorioCentral = (int)$contextoCentral['escritorio_id'];
+} catch (Throwable $e) {
+    error_log('[ROJEX CENTRAL INTELIGENTE][CONTEXTO] ' . $e->getMessage());
+    http_response_code(403);
+    echo '<div class="container-fluid"><div class="alert alert-danger">'
+        . '<strong>Central Inteligente bloqueada:</strong> contexto Multi-Tenant inválido.'
+        . '</div></div>';
+    return;
+}
+
 if (!function_exists('h')) {
     function h($valor): string { return htmlspecialchars((string)($valor ?? ''), ENT_QUOTES, 'UTF-8'); }
 }
@@ -76,8 +92,8 @@ $alertas = [];
 
 // Honorários vencidos
 if (sgl_ci_tabela_existe($conn, 'honorarios_parcelas')) {
-    $joinHonorarios = sgl_ci_tabela_existe($conn, 'honorarios') ? "LEFT JOIN honorarios h ON h.id = hp.honorario_id" : "";
-    $joinClientes = sgl_ci_tabela_existe($conn, 'clientes') ? "LEFT JOIN clientes c ON c.id = h.cliente_id" : "";
+    $joinHonorarios = sgl_ci_tabela_existe($conn, 'honorarios') ? "LEFT JOIN honorarios h ON h.id = hp.honorario_id AND h.tenant_id = hp.tenant_id AND h.escritorio_id = hp.escritorio_id" : "";
+    $joinClientes = sgl_ci_tabela_existe($conn, 'clientes') ? "LEFT JOIN clientes c ON c.id = h.cliente_id AND c.tenant_id = hp.tenant_id AND c.escritorio_id = hp.escritorio_id" : "";
     $clienteExpr = sgl_ci_tabela_existe($conn, 'clientes') ? "COALESCE(c.nome,'Cliente não informado')" : "'Cliente não informado'";
     $whereHonorarioAtivo = sgl_ci_tabela_existe($conn, 'honorarios') && sgl_ci_coluna_existe($conn, 'honorarios', 'deletado') ? "AND COALESCE(h.deletado,0)=0" : "";
     $rows = sgl_ci_rows($conn, "
@@ -87,6 +103,8 @@ if (sgl_ci_tabela_existe($conn, 'honorarios_parcelas')) {
         {$joinHonorarios}
         {$joinClientes}
         WHERE hp.data_vencimento < '{$hoje}'
+          AND hp.tenant_id = '{$tenantCentral}'
+          AND hp.escritorio_id = {$escritorioCentral}
           AND COALESCE(hp.status_pagamento,'Pendente') NOT IN ('Pago','Quitada','Recebido','Cancelado')
           AND COALESCE(NULLIF(hp.saldo_devedor,0), hp.valor_parcela, 0) > 0
           {$whereHonorarioAtivo}
@@ -103,7 +121,7 @@ if (sgl_ci_tabela_existe($conn, 'honorarios_parcelas')) {
 // Contas a receber vencidas e recebimentos de hoje
 if (sgl_ci_tabela_existe($conn, 'contas_receber')) {
     $del = sgl_ci_coluna_existe($conn, 'contas_receber', 'deletado') ? "AND COALESCE(cr.deletado,0)=0" : "";
-    $joinClientes = sgl_ci_tabela_existe($conn, 'clientes') ? "LEFT JOIN clientes c ON c.id = cr.cliente_id" : "";
+    $joinClientes = sgl_ci_tabela_existe($conn, 'clientes') ? "LEFT JOIN clientes c ON c.id = cr.cliente_id AND c.tenant_id = cr.tenant_id AND c.escritorio_id = cr.escritorio_id" : "";
     $temClienteNomeCR = sgl_ci_coluna_existe($conn, 'contas_receber', 'cliente_nome');
     $clienteExpr = sgl_ci_tabela_existe($conn, 'clientes')
         ? ($temClienteNomeCR ? "COALESCE(c.nome, cr.cliente_nome, '-')" : "COALESCE(c.nome, '-')")
@@ -117,6 +135,8 @@ if (sgl_ci_tabela_existe($conn, 'contas_receber')) {
         FROM contas_receber cr
         {$joinClientes}
         WHERE cr.data_vencimento < '{$hoje}'
+          AND cr.tenant_id = '{$tenantCentral}'
+          AND cr.escritorio_id = {$escritorioCentral}
           AND cr.status IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido')
           {$del}
         ORDER BY cr.data_vencimento ASC
@@ -133,6 +153,8 @@ if (sgl_ci_tabela_existe($conn, 'contas_receber')) {
         FROM contas_receber cr
         {$joinClientes}
         WHERE cr.data_vencimento = '{$hoje}'
+          AND cr.tenant_id = '{$tenantCentral}'
+          AND cr.escritorio_id = {$escritorioCentral}
           AND cr.status IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido')
           {$del}
         ORDER BY cr.id DESC
@@ -155,6 +177,8 @@ if (sgl_ci_tabela_existe($conn, 'contas_pagar')) {
                    COALESCE(NULLIF(cp.valor_pendente,0), cp.valor,0) AS valor
             FROM contas_pagar cp
             WHERE cp.data_vencimento {$op} '{$hoje}'
+              AND cp.tenant_id = '{$tenantCentral}'
+              AND cp.escritorio_id = {$escritorioCentral}
               AND cp.status IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido')
               {$del}
             ORDER BY cp.data_vencimento ASC
@@ -177,6 +201,8 @@ if (sgl_ci_tabela_existe($conn, 'agenda')) {
             SELECT a.id, a.horario, a.tipo_compromisso, a.nome_cliente, a.local, a.local_evento, a.status
             FROM agenda a
             WHERE a.data_evento = '{$data}'
+              AND a.tenant_id = '{$tenantCentral}'
+              AND a.escritorio_id = {$escritorioCentral}
               AND COALESCE(a.status,'') NOT IN ('Cancelado','Concluído')
               {$del}
             ORDER BY a.horario ASC
@@ -198,6 +224,8 @@ if (sgl_ci_tabela_existe($conn, 'processos')) {
             SELECT id, `{$num}` AS numero, tipo_processo, fase_atual AS fase, proximo_prazo, status
             FROM processos
             WHERE proximo_prazo BETWEEN '{$hoje}' AND '{$seteDias}'
+              AND tenant_id = '{$tenantCentral}'
+              AND escritorio_id = {$escritorioCentral}
               AND COALESCE(status,'') NOT IN ('Excluído','Arquivado','Encerrado')
             ORDER BY proximo_prazo ASC
             LIMIT 8
@@ -214,6 +242,8 @@ if (sgl_ci_tabela_existe($conn, 'processos')) {
             SELECT id, `{$num}` AS numero, tipo_processo, fase_atual AS fase, `{$dataCol}` AS data_ref, status
             FROM processos
             WHERE DATE(`{$dataCol}`) <= '{$trintaDiasAtras}'
+              AND tenant_id = '{$tenantCentral}'
+              AND escritorio_id = {$escritorioCentral}
               AND COALESCE(status,'') IN ('Em Andamento','Ativo','Distribuído','Pendente')
             ORDER BY `{$dataCol}` ASC
             LIMIT 6
@@ -227,17 +257,22 @@ if (sgl_ci_tabela_existe($conn, 'processos')) {
 }
 
 // Clientes sem documentos anexados
-if (sgl_ci_tabela_existe($conn, 'clientes') && sgl_ci_tabela_existe($conn, 'documentos')) {
+if (sgl_ci_tabela_existe($conn, 'clientes') && sgl_ci_tabela_existe($conn, 'documentos_arquivos')) {
     $delClientes = sgl_ci_coluna_existe($conn, 'clientes', 'deletado') ? "AND COALESCE(c.deletado,0)=0" : "";
-    $delDocs = sgl_ci_coluna_existe($conn, 'documentos', 'deletado') ? "AND COALESCE(d.deletado,0)=0" : "";
+    $delDocs = sgl_ci_coluna_existe($conn, 'documentos_arquivos', 'deletado') ? "AND COALESCE(d.deletado,0)=0" : "";
     $rows = sgl_ci_rows($conn, "
         SELECT c.id, c.nome, c.cpf_cnpj
         FROM clientes c
         WHERE COALESCE(c.status,'Ativo') = 'Ativo'
+          AND c.tenant_id = '{$tenantCentral}'
+          AND c.escritorio_id = {$escritorioCentral}
           {$delClientes}
           AND NOT EXISTS (
-              SELECT 1 FROM documentos d
-              WHERE d.cliente_id = c.id {$delDocs}
+              SELECT 1 FROM documentos_arquivos d
+              WHERE d.cliente_id = c.id
+                AND d.tenant_id = c.tenant_id
+                AND d.escritorio_id = c.escritorio_id
+                {$delDocs}
           )
         ORDER BY c.nome ASC
         LIMIT 8
@@ -256,10 +291,10 @@ $contAlto = count(array_filter($alertas, fn($a) => $a['prioridade'] === 'alto'))
 $contMedio = count(array_filter($alertas, fn($a) => $a['prioridade'] === 'medio'));
 $contBaixo = count(array_filter($alertas, fn($a) => $a['prioridade'] === 'baixo'));
 
-$entradasHoje = sgl_ci_tabela_existe($conn,'contas_receber') ? sgl_ci_scalar($conn, "SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE status IN ('Recebido','Pago','Quitada') AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) = '{$hoje}'" . (sgl_ci_coluna_existe($conn,'contas_receber','deletado') ? " AND COALESCE(deletado,0)=0" : "")) : 0;
-$saidasHoje = sgl_ci_tabela_existe($conn,'contas_pagar') ? sgl_ci_scalar($conn, "SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_pagar WHERE status IN ('Pago','Quitada') AND COALESCE(data_pagamento, DATE(atualizado_em), data_vencimento) = '{$hoje}'" . (sgl_ci_coluna_existe($conn,'contas_pagar','deletado') ? " AND COALESCE(deletado,0)=0" : "")) : 0;
-$receberHoje = sgl_ci_tabela_existe($conn,'contas_receber') ? sgl_ci_scalar($conn, "SELECT COALESCE(SUM(COALESCE(NULLIF(valor_pendente,0),valor,0)),0) AS total FROM contas_receber WHERE data_vencimento = '{$hoje}' AND status IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido')" . (sgl_ci_coluna_existe($conn,'contas_receber','deletado') ? " AND COALESCE(deletado,0)=0" : "")) : 0;
-$pagarHoje = sgl_ci_tabela_existe($conn,'contas_pagar') ? sgl_ci_scalar($conn, "SELECT COALESCE(SUM(COALESCE(NULLIF(valor_pendente,0),valor,0)),0) AS total FROM contas_pagar WHERE data_vencimento = '{$hoje}' AND status IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido')" . (sgl_ci_coluna_existe($conn,'contas_pagar','deletado') ? " AND COALESCE(deletado,0)=0" : "")) : 0;
+$entradasHoje = sgl_ci_tabela_existe($conn,'contas_receber') ? sgl_ci_scalar($conn, "SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_receber WHERE tenant_id = '{$tenantCentral}' AND escritorio_id = {$escritorioCentral} AND status IN ('Recebido','Pago','Quitada') AND COALESCE(data_recebimento, DATE(atualizado_em), data_vencimento) = '{$hoje}'" . (sgl_ci_coluna_existe($conn,'contas_receber','deletado') ? " AND COALESCE(deletado,0)=0" : "")) : 0;
+$saidasHoje = sgl_ci_tabela_existe($conn,'contas_pagar') ? sgl_ci_scalar($conn, "SELECT COALESCE(SUM(CASE WHEN valor_pago > 0 THEN valor_pago ELSE valor END),0) AS total FROM contas_pagar WHERE tenant_id = '{$tenantCentral}' AND escritorio_id = {$escritorioCentral} AND status IN ('Pago','Quitada') AND COALESCE(data_pagamento, DATE(atualizado_em), data_vencimento) = '{$hoje}'" . (sgl_ci_coluna_existe($conn,'contas_pagar','deletado') ? " AND COALESCE(deletado,0)=0" : "")) : 0;
+$receberHoje = sgl_ci_tabela_existe($conn,'contas_receber') ? sgl_ci_scalar($conn, "SELECT COALESCE(SUM(COALESCE(NULLIF(valor_pendente,0),valor,0)),0) AS total FROM contas_receber WHERE tenant_id = '{$tenantCentral}' AND escritorio_id = {$escritorioCentral} AND data_vencimento = '{$hoje}' AND status IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido')" . (sgl_ci_coluna_existe($conn,'contas_receber','deletado') ? " AND COALESCE(deletado,0)=0" : "")) : 0;
+$pagarHoje = sgl_ci_tabela_existe($conn,'contas_pagar') ? sgl_ci_scalar($conn, "SELECT COALESCE(SUM(COALESCE(NULLIF(valor_pendente,0),valor,0)),0) AS total FROM contas_pagar WHERE tenant_id = '{$tenantCentral}' AND escritorio_id = {$escritorioCentral} AND data_vencimento = '{$hoje}' AND status IN ('Pendente','Parcial','Aberto','Em Aberto','Vencido')" . (sgl_ci_coluna_existe($conn,'contas_pagar','deletado') ? " AND COALESCE(deletado,0)=0" : "")) : 0;
 
 $porTipo = [];
 foreach ($alertas as $a) { $porTipo[$a['tipo']] = ($porTipo[$a['tipo']] ?? 0) + 1; }

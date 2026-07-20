@@ -29,6 +29,13 @@ function rojexPortalPrimeiroTenant(string $tenant): string
     return preg_match('/^[A-Za-z0-9._-]{1,80}$/', $tenant) ? $tenant : '';
 }
 
+function rojexPortalPrimeiroEscritorio(string $escritorio): int
+{
+    $escritorio = trim($escritorio);
+    if (!preg_match('/^[1-9][0-9]{0,10}$/', $escritorio)) return 0;
+    return (int)$escritorio;
+}
+
 function rojexPortalPrimeiroMarca(mysqli $conn, array $convite): array
 {
     $cfg = [];
@@ -60,6 +67,7 @@ function rojexPortalPrimeiroMarca(mysqli $conn, array $convite): array
 
 $token = rojexPortalPrimeiroToken((string)($_POST['token'] ?? $_GET['token'] ?? ''));
 $tenant = rojexPortalPrimeiroTenant((string)($_POST['tenant'] ?? $_GET['tenant'] ?? ''));
+$escritorio = rojexPortalPrimeiroEscritorio((string)($_POST['escritorio'] ?? $_GET['escritorio'] ?? ''));
 $erro = '';
 $sucesso = false;
 $convite = null;
@@ -68,7 +76,7 @@ $marca = ['nome'=>'Portal do Cliente','logo'=>'','primaria'=>'#163a5f','secundar
 
 try {
     $conn = conectar();
-    if ($token === '' || $tenant === '') {
+    if ($token === '' || $tenant === '' || $escritorio <= 0) {
         $erro = 'O convite informado é inválido. Solicite um novo link ao seu escritório.';
     } else {
         $tokenHash = hash('sha256', $token);
@@ -82,13 +90,13 @@ try {
                INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id AND e.status='ativo'
                INNER JOIN escritorios_modulos_saas em ON em.escritorio_id=e.id AND em.ativo=1
                INNER JOIN modulos_saas m ON m.id=em.modulo_id AND m.codigo='portal_cliente' AND m.ativo=1 AND m.status_lancamento='producao'
-              WHERE pt.token_hash=? AND pt.tenant_id=? AND pt.tipo='CONVITE'
+              WHERE pt.token_hash=? AND pt.tenant_id=? AND pt.escritorio_id=? AND pt.tipo='CONVITE'
                 AND pt.utilizado_em IS NULL AND pt.revogado_em IS NULL AND pt.expira_em>NOW()
                 AND pc.status='CONVITE_PENDENTE' AND pc.primeiro_acesso_pendente=1
               LIMIT 1"
         );
         if (!$stmt) throw new RuntimeException('Não foi possível validar o convite.');
-        $stmt->bind_param('ss', $tokenHash, $tenant); $stmt->execute();
+        $stmt->bind_param('ssi', $tokenHash, $tenant, $escritorio); $stmt->execute();
         $convite = $stmt->get_result()->fetch_assoc() ?: null; $stmt->close();
         if (!$convite) $erro = 'Este convite é inválido, expirou ou já foi utilizado. Solicite um novo link ao seu escritório.';
         else $marca = rojexPortalPrimeiroMarca($conn, $convite);
@@ -152,4 +160,4 @@ $loginUrl = 'login.php' . (!empty($convite['subdominio']) ? '?escritorio=' . raw
 <!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Primeiro acesso - <?=rojexPortalPrimeiroH((string)$marca['nome'])?></title>
 <style>:root{--p:<?=rojexPortalPrimeiroH($marca['primaria'])?>;--s:<?=rojexPortalPrimeiroH($marca['secundaria'])?>;--a:<?=rojexPortalPrimeiroH($marca['accent'])?>}*{box-sizing:border-box}body{margin:0;min-height:100vh;padding:24px;display:grid;place-items:center;font-family:Inter,"Segoe UI",Arial,sans-serif;color:#17212b;background:linear-gradient(145deg,#07111b,var(--p),#08121c)}.shell{width:100%;max-width:960px;display:grid;grid-template-columns:.9fr 1.1fr;overflow:hidden;border-radius:26px;background:#fff;box-shadow:0 34px 90px #0006}.brand{padding:48px;color:#fff;background:linear-gradient(155deg,var(--p),#07111b)}.logo{width:200px;min-height:105px;display:grid;place-items:center;padding:14px;margin-bottom:32px;border:1px solid #ffffff30;border-radius:18px;background:#ffffff16}.logo img{max-width:100%;max-height:105px}.mono{font-size:38px;font-weight:900;color:var(--a)}.brand h1{font-size:32px}.brand p{line-height:1.65;color:#ffffffc7}.panel{padding:48px}.eyebrow{color:var(--s);font-size:13px;font-weight:900;letter-spacing:.12em;text-transform:uppercase}h2{margin:8px 0 10px}.sub{color:#667085;line-height:1.5}.msg{margin:20px 0;padding:14px;border-radius:12px}.err{color:#842029;background:#fff0f1;border:1px solid #f3b7bd}.ok{color:#0f5132;background:#eaf8f0;border:1px solid #a7ddbd}.field{margin:17px 0}label{display:block;margin-bottom:7px;font-weight:750}input{width:100%;padding:13px 14px;border:1px solid #d9e0e7;border-radius:12px;font:inherit}button,.button{display:inline-block;width:100%;padding:14px;border:0;border-radius:12px;text-align:center;text-decoration:none;color:#fff;background:linear-gradient(135deg,var(--s),var(--p));font:inherit;font-weight:850;cursor:pointer}.help{font-size:13px;color:#667085;line-height:1.5}@media(max-width:760px){body{padding:12px}.shell{grid-template-columns:1fr}.brand{padding:28px}.brand p{display:none}.panel{padding:30px 24px}}</style></head><body><main class="shell"><section class="brand"><div class="logo"><?php if($logoUrl!==''):?><img src="<?=rojexPortalPrimeiroH($logoUrl)?>" alt="Logomarca"><?php else:?><span class="mono"><?=rojexPortalPrimeiroH($iniciais)?></span><?php endif;?></div><h1><?=rojexPortalPrimeiroH((string)$marca['nome'])?></h1><p>Crie sua senha pessoal para acessar com segurança as informações disponibilizadas pelo escritório.</p></section><section class="panel"><div class="eyebrow">Portal do Cliente</div><h2>Defina sua primeira senha</h2><p class="sub">Este convite é pessoal, temporário e pode ser utilizado uma única vez.</p>
 <?php if($sucesso):?><div class="msg ok"><strong>Senha definida com sucesso.</strong><br>Sua conta está ativa e pronta para o primeiro acesso.</div><a class="button" href="<?=rojexPortalPrimeiroH($loginUrl)?>">Ir para o login</a>
-<?php else:?><?php if($erro!==''):?><div class="msg err" role="alert"><?=rojexPortalPrimeiroH($erro)?></div><?php endif;?><?php if($convite && $erro===''):?><p class="help">Conta de <strong><?=rojexPortalPrimeiroH((string)$convite['cliente_nome'])?></strong> · <?=rojexPortalPrimeiroH((string)$convite['email'])?></p><form method="post" autocomplete="off"><input type="hidden" name="csrf_token" value="<?=rojexPortalPrimeiroH($csrf)?>"><input type="hidden" name="token" value="<?=rojexPortalPrimeiroH($token)?>"><input type="hidden" name="tenant" value="<?=rojexPortalPrimeiroH($tenant)?>"><div class="field"><label for="senha">Nova senha</label><input type="password" id="senha" name="senha" minlength="8" maxlength="128" autocomplete="new-password" required></div><div class="field"><label for="confirmar">Confirmar nova senha</label><input type="password" id="confirmar" name="confirmar_senha" minlength="8" maxlength="128" autocomplete="new-password" required></div><p class="help">Use ao menos 8 caracteres, incluindo letra maiúscula, minúscula e número.</p><button type="submit">Ativar minha conta</button></form><?php elseif(!$convite):?><a class="button" href="login.php">Voltar ao login</a><?php endif;?><?php endif;?></section></main></body></html>
+<?php else:?><?php if($erro!==''):?><div class="msg err" role="alert"><?=rojexPortalPrimeiroH($erro)?></div><?php endif;?><?php if($convite && $erro===''):?><p class="help">Conta de <strong><?=rojexPortalPrimeiroH((string)$convite['cliente_nome'])?></strong> · <?=rojexPortalPrimeiroH((string)$convite['email'])?></p><form method="post" autocomplete="off"><input type="hidden" name="csrf_token" value="<?=rojexPortalPrimeiroH($csrf)?>"><input type="hidden" name="token" value="<?=rojexPortalPrimeiroH($token)?>"><input type="hidden" name="tenant" value="<?=rojexPortalPrimeiroH($tenant)?>"><input type="hidden" name="escritorio" value="<?=$escritorio?>"><div class="field"><label for="senha">Nova senha</label><input type="password" id="senha" name="senha" minlength="8" maxlength="128" autocomplete="new-password" required></div><div class="field"><label for="confirmar">Confirmar nova senha</label><input type="password" id="confirmar" name="confirmar_senha" minlength="8" maxlength="128" autocomplete="new-password" required></div><p class="help">Use ao menos 8 caracteres, incluindo letra maiúscula, minúscula e número.</p><button type="submit">Ativar minha conta</button></form><?php elseif(!$convite):?><a class="button" href="login.php">Voltar ao login</a><?php endif;?><?php endif;?></section></main></body></html>

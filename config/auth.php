@@ -789,3 +789,187 @@ if (!function_exists('rojexTenantTemModulo')) {
         return is_array($modulos) && in_array($slug, $modulos, true);
     }
 }
+
+/**
+ * -----------------------------------------------------------------------------
+ * AUTORIZAÇÃO POR AÇÃO NO SERVIDOR — RA-10
+ * -----------------------------------------------------------------------------
+ *
+ * Regras desta camada:
+ * - toda ação precisa existir no catálogo fechado abaixo;
+ * - ação desconhecida é sempre negada;
+ * - permissões da interface nunca substituem esta validação no servidor;
+ * - ações tenant exigem contexto válido de tenant_id + escritorio_id;
+ * - MASTER em modo plataforma supervisiona, habilita e audita globalmente;
+ * - administrador do escritório gerencia somente o próprio contexto tenant;
+ * - MASTER em suporte possui somente as ações explicitamente de leitura.
+ *
+ * IMPORTANTE: os módulos que executam as ações devem continuar filtrando suas
+ * consultas por rojexTenantId() + rojexEscritorioId(). Esta camada autoriza a
+ * operação, mas não substitui o isolamento dos registros no SQL.
+ */
+
+if (!function_exists('rojexCatalogoAcoes')) {
+    function rojexCatalogoAcoes(): array
+    {
+        return [
+            // Administração global da plataforma — exclusivamente MASTER.
+            'plataforma.portal.habilitar' => [
+                'contexto' => 'plataforma',
+                'permissoes' => ['plataforma_total'],
+            ],
+            'plataforma.portal.supervisionar' => [
+                'contexto' => 'plataforma',
+                'permissoes' => ['plataforma_total'],
+            ],
+            'plataforma.portal.auditar' => [
+                'contexto' => 'plataforma',
+                'permissoes' => ['plataforma_total'],
+            ],
+
+            // Convites do Portal — administração descentralizada por escritório.
+            'tenant.portal.convite.listar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar', 'tenant_suporte'],
+            ],
+            'tenant.portal.convite.criar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar'],
+            ],
+            'tenant.portal.convite.reenviar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar'],
+            ],
+            'tenant.portal.convite.revogar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar'],
+            ],
+
+            // Contas do Portal — restritas ao administrador do próprio escritório.
+            'tenant.portal.conta.listar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar', 'tenant_suporte'],
+            ],
+            'tenant.portal.conta.ativar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar'],
+            ],
+            'tenant.portal.conta.desativar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar'],
+            ],
+            'tenant.portal.permissoes.alterar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar'],
+            ],
+            'tenant.portal.auditoria.visualizar' => [
+                'contexto' => 'tenant',
+                'permissoes' => ['tenant_administrar', 'tenant_suporte'],
+            ],
+        ];
+    }
+}
+
+if (!function_exists('rojexPermissoesAtuais')) {
+    function rojexPermissoesAtuais(): array
+    {
+        $permissoes = $_SESSION['permissoes_tenant'] ?? [];
+
+        if (!is_array($permissoes)) {
+            return [];
+        }
+
+        $normalizadas = [];
+
+        foreach ($permissoes as $permissao) {
+            if (!is_string($permissao)) {
+                continue;
+            }
+
+            $permissao = trim($permissao);
+
+            if ($permissao !== '') {
+                $normalizadas[$permissao] = true;
+            }
+        }
+
+        return array_keys($normalizadas);
+    }
+}
+
+if (!function_exists('rojexPodeExecutarAcao')) {
+    function rojexPodeExecutarAcao(string $acao): bool
+    {
+        if (!usuarioLogado()) {
+            return false;
+        }
+
+        $acao = trim($acao);
+
+        if ($acao === '') {
+            return false;
+        }
+
+        $catalogo = rojexCatalogoAcoes();
+
+        // Fail closed: ações ausentes do catálogo jamais são autorizadas.
+        if (!isset($catalogo[$acao]) || !is_array($catalogo[$acao])) {
+            return false;
+        }
+
+        $regra = $catalogo[$acao];
+        $contextoExigido = (string)($regra['contexto'] ?? '');
+        $permissoesExigidas = $regra['permissoes'] ?? [];
+
+        if ($contextoExigido === 'plataforma') {
+            if (!rojexModoPlataforma()) {
+                return false;
+            }
+        } elseif ($contextoExigido === 'tenant') {
+            if (!rojexContextoTenantValido() || rojexModoPlataforma()) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        if (!is_array($permissoesExigidas) || $permissoesExigidas === []) {
+            return false;
+        }
+
+        $permissoesAtuais = rojexPermissoesAtuais();
+
+        foreach ($permissoesExigidas as $permissao) {
+            if (
+                is_string($permissao)
+                && in_array($permissao, $permissoesAtuais, true)
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
+if (!function_exists('rojexNegarAcao')) {
+    function rojexNegarAcao(): void
+    {
+        if (!headers_sent()) {
+            http_response_code(403);
+            header('Content-Type: text/plain; charset=UTF-8');
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        }
+
+        exit('Acesso negado.');
+    }
+}
+
+if (!function_exists('rojexExigirAcao')) {
+    function rojexExigirAcao(string $acao): void
+    {
+        if (!rojexPodeExecutarAcao($acao)) {
+            rojexNegarAcao();
+        }
+    }
+}

@@ -3383,6 +3383,7 @@ if ($acao_cfg === 'ativar_portal_escritorio') {
 
 if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal') {
     $contaPortalId = max(0, (int)($_POST['portal_conta_id'] ?? 0));
+    $tenantPortalPost = trim((string)($_POST['portal_tenant_id'] ?? ''));
     $escritorioPortalId = max(0, (int)($_POST['portal_escritorio_id'] ?? 0));
     $clientePortalId = trim((string)($_POST['portal_cliente_id'] ?? ''));
     $emailPortal = mb_strtolower(trim((string)($_POST['portal_email'] ?? '')), 'UTF-8');
@@ -3390,12 +3391,15 @@ if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal
     if (!$reemitirConvite && ($escritorioPortalId <= 0 || $clientePortalId === '' || !filter_var($emailPortal, FILTER_VALIDATE_EMAIL))) {
         sgl_redirect_cfg('portal', 'erro', 'Informe escritório, cliente e e-mail válidos.');
     }
+    if ($reemitirConvite && ($contaPortalId <= 0 || $tenantPortalPost === '' || $escritorioPortalId <= 0 || $clientePortalId === '')) {
+        sgl_redirect_cfg('portal', 'erro', 'O escopo da conta do Portal é inválido.');
+    }
 
     try {
         $conn->begin_transaction();
         if ($reemitirConvite) {
-            $stmt = $conn->prepare("SELECT pc.id,pc.tenant_id,pc.escritorio_id,pc.cliente_id,pc.email,e.subdominio FROM portal_clientes_contas pc INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id WHERE pc.id=? LIMIT 1 FOR UPDATE");
-            $stmt->bind_param('i', $contaPortalId); $stmt->execute(); $contaPortal = $stmt->get_result()->fetch_assoc(); $stmt->close();
+            $stmt = $conn->prepare("SELECT pc.id,pc.tenant_id,pc.escritorio_id,pc.cliente_id,pc.email,e.subdominio FROM portal_clientes_contas pc INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id WHERE pc.id=? AND pc.tenant_id=? AND pc.escritorio_id=? AND pc.cliente_id=? AND pc.status='CONVITE_PENDENTE' LIMIT 1 FOR UPDATE");
+            $stmt->bind_param('isis', $contaPortalId, $tenantPortalPost, $escritorioPortalId, $clientePortalId); $stmt->execute(); $contaPortal = $stmt->get_result()->fetch_assoc(); $stmt->close();
             if (!$contaPortal) throw new RuntimeException('Conta do Portal não encontrada.');
             $escritorioPortalId = (int)$contaPortal['escritorio_id']; $clientePortalId = (string)$contaPortal['cliente_id']; $emailPortal = (string)$contaPortal['email']; $tenantPortal = (string)$contaPortal['tenant_id'];
         } else {
@@ -3447,7 +3451,7 @@ if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal
         $_SESSION['rojex_portal_convite'] = [
             'email' => $emailPortal,
             'expira_em' => $expiraPortal,
-            'url' => $baseConvitePortal . '/portal/primeiro_acesso.php?token=' . rawurlencode($tokenPortal) . '&tenant=' . rawurlencode($tenantPortal),
+            'url' => $baseConvitePortal . '/portal/primeiro_acesso.php?token=' . rawurlencode($tokenPortal) . '&tenant=' . rawurlencode($tenantPortal) . '&escritorio=' . rawurlencode((string)$escritorioPortalId),
         ];
         sgl_log($conn, $reemitirConvite ? 'Reemitiu convite do Portal' : 'Criou conta do Portal', 'portal_clientes_contas', (string)$contaPortalId, 'Tenant: ' . $tenantPortal . '; Cliente: ' . $clientePortalId . '; permissões iniciais desativadas.');
         sgl_redirect_cfg('portal', 'sucesso', $reemitirConvite ? 'Novo convite gerado com validade de 48 horas.' : 'Conta criada e convite seguro gerado. Nenhum conteúdo foi publicado.');
@@ -3459,23 +3463,28 @@ if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal
 
 if ($acao_cfg === 'alterar_status_conta_portal') {
     $contaPortalId = max(0, (int)($_POST['portal_conta_id'] ?? 0));
+    $tenantPortal = trim((string)($_POST['portal_tenant_id'] ?? ''));
+    $escritorioPortalId = max(0, (int)($_POST['portal_escritorio_id'] ?? 0));
+    $clientePortalId = trim((string)($_POST['portal_cliente_id'] ?? ''));
     $novoStatusPortal = (string)($_POST['portal_novo_status'] ?? '');
-    if ($contaPortalId <= 0 || !in_array($novoStatusPortal, ['ATIVA','DESATIVADA'], true)) sgl_redirect_cfg('portal', 'erro', 'Conta ou status inválido.');
+    if ($contaPortalId <= 0 || $tenantPortal === '' || $escritorioPortalId <= 0 || $clientePortalId === '' || !in_array($novoStatusPortal, ['ATIVA','DESATIVADA'], true)) sgl_redirect_cfg('portal', 'erro', 'Conta, escopo ou status inválido.');
     try {
         $usuarioPortal = (int)($_SESSION['user_id'] ?? 0);
         if ($novoStatusPortal === 'DESATIVADA') {
-            $stmt = $conn->prepare("UPDATE portal_clientes_contas SET status='DESATIVADA',desativado_por_usuario_id=?,desativado_em=NOW() WHERE id=?");
-            $stmt->bind_param('ii', $usuarioPortal, $contaPortalId);
+            $stmt = $conn->prepare("UPDATE portal_clientes_contas SET status='DESATIVADA',desativado_por_usuario_id=?,desativado_em=NOW() WHERE id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND status='ATIVA'");
+            $stmt->bind_param('iisis', $usuarioPortal, $contaPortalId, $tenantPortal, $escritorioPortalId, $clientePortalId);
         } else {
-            $stmt = $conn->prepare("UPDATE portal_clientes_contas SET status='ATIVA',desativado_por_usuario_id=NULL,desativado_em=NULL,motivo_desativacao=NULL WHERE id=?");
-            $stmt->bind_param('i', $contaPortalId);
+            $stmt = $conn->prepare("UPDATE portal_clientes_contas SET status='ATIVA',desativado_por_usuario_id=NULL,desativado_em=NULL,motivo_desativacao=NULL WHERE id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND status='DESATIVADA'");
+            $stmt->bind_param('isis', $contaPortalId, $tenantPortal, $escritorioPortalId, $clientePortalId);
         }
-        $stmt->execute(); $stmt->close();
+        $stmt->execute();
+        if ($stmt->affected_rows !== 1) { $stmt->close(); throw new RuntimeException('A conta não foi alterada no escopo informado.'); }
+        $stmt->close();
         if ($novoStatusPortal === 'DESATIVADA') {
-            $stmt = $conn->prepare("UPDATE portal_clientes_sessoes SET encerrada_em=NOW(),motivo_encerramento='CONTA_DESATIVADA' WHERE conta_id=? AND encerrada_em IS NULL");
-            $stmt->bind_param('i', $contaPortalId); $stmt->execute(); $stmt->close();
+            $stmt = $conn->prepare("UPDATE portal_clientes_sessoes ps INNER JOIN portal_clientes_contas pc ON pc.id=ps.conta_id AND pc.tenant_id=? AND pc.escritorio_id=? AND pc.cliente_id=? SET ps.encerrada_em=NOW(),ps.motivo_encerramento='CONTA_DESATIVADA' WHERE ps.conta_id=? AND ps.encerrada_em IS NULL");
+            $stmt->bind_param('sisi', $tenantPortal, $escritorioPortalId, $clientePortalId, $contaPortalId); $stmt->execute(); $stmt->close();
         }
-        sgl_log($conn, 'Alterou status de conta do Portal', 'portal_clientes_contas', (string)$contaPortalId, 'Novo status: ' . $novoStatusPortal);
+        sgl_log($conn, 'Alterou status de conta do Portal', 'portal_clientes_contas', (string)$contaPortalId, 'Tenant: ' . $tenantPortal . '; Escritório: ' . $escritorioPortalId . '; Cliente: ' . $clientePortalId . '; Novo status: ' . $novoStatusPortal);
         sgl_redirect_cfg('portal', 'sucesso', 'Status da conta atualizado.');
     } catch (Throwable $e) { sgl_redirect_cfg('portal', 'erro', 'Não foi possível alterar o status da conta.'); }
 }
@@ -5683,7 +5692,7 @@ if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'portal_clientes_contas')) {
         $res = $conn->query("SELECT c.id,c.tenant_id,c.escritorio_id,c.nome,c.email FROM clientes c INNER JOIN escritorios_saas e ON e.id=c.escritorio_id AND e.tenant_id=c.tenant_id WHERE c.deletado=0 AND c.status='Ativo' ORDER BY e.nome,c.nome");
         while ($res && ($row = $res->fetch_assoc())) $portalClientes[] = $row;
 
-        $res = $conn->query("SELECT pc.*,c.nome AS cliente_nome,e.nome AS escritorio_nome,pp.ver_processos,pp.ver_documentos,pp.enviar_documentos,pp.ver_honorarios,pp.ver_recibos,pp.ver_agenda,pp.receber_notificacoes FROM portal_clientes_contas pc INNER JOIN clientes c ON c.id=pc.cliente_id AND c.tenant_id=pc.tenant_id AND c.escritorio_id=pc.escritorio_id INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id LEFT JOIN portal_clientes_permissoes pp ON pp.conta_id=pc.id ORDER BY pc.id DESC");
+        $res = $conn->query("SELECT pc.*,c.nome AS cliente_nome,e.nome AS escritorio_nome,pp.ver_processos,pp.ver_documentos,pp.enviar_documentos,pp.ver_honorarios,pp.ver_recibos,pp.ver_agenda,pp.receber_notificacoes,pt.id AS convite_token_id,pt.expira_em AS convite_expira_em,pt.utilizado_em AS convite_utilizado_em,pt.revogado_em AS convite_revogado_em FROM portal_clientes_contas pc INNER JOIN clientes c ON c.id=pc.cliente_id AND c.tenant_id=pc.tenant_id AND c.escritorio_id=pc.escritorio_id INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id LEFT JOIN portal_clientes_permissoes pp ON pp.conta_id=pc.id AND pp.tenant_id=pc.tenant_id AND pp.escritorio_id=pc.escritorio_id AND pp.cliente_id=pc.cliente_id LEFT JOIN portal_clientes_tokens pt ON pt.id=(SELECT MAX(pt2.id) FROM portal_clientes_tokens pt2 WHERE pt2.conta_id=pc.id AND pt2.tenant_id=pc.tenant_id AND pt2.escritorio_id=pc.escritorio_id AND pt2.cliente_id=pc.cliente_id AND pt2.tipo='CONVITE') ORDER BY pc.id DESC");
         while ($res && ($row = $res->fetch_assoc())) $portalContas[] = $row;
     } catch (Throwable $e) {
         $portalEscritorios = []; $portalClientes = []; $portalContas = [];
@@ -7226,11 +7235,11 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
     </div></div></div>
 </div>
 
-<div class="card shadow-sm border-0"><div class="card-header bg-dark text-white">Contas do Portal</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover align-middle mb-0"><thead><tr><th>Escritório</th><th>Cliente</th><th>E-mail</th><th>Permissões</th><th>Status</th><th class="text-end">Ações</th></tr></thead><tbody>
-<?php if(!$portalContas): ?><tr><td colspan="6" class="text-center text-muted py-4">Nenhuma conta criada.</td></tr><?php else: foreach($portalContas as $pc): ?>
-<tr><td><strong><?=htmlspecialchars($pc['escritorio_nome'])?></strong><br><code><?=htmlspecialchars($pc['tenant_id'])?></code></td><td><?=htmlspecialchars($pc['cliente_nome'])?><br><small><?=htmlspecialchars($pc['cliente_id'])?></small></td><td><?=htmlspecialchars($pc['email'])?></td><td><small><?php $qtdPermissoes=array_sum(array_map('intval',[$pc['ver_processos']??0,$pc['ver_documentos']??0,$pc['enviar_documentos']??0,$pc['ver_honorarios']??0,$pc['ver_recibos']??0,$pc['ver_agenda']??0,$pc['receber_notificacoes']??0])); ?><?=$qtdPermissoes?> de 7 habilitadas</small></td><td><span class="badge <?=($pc['status']==='ATIVA')?'bg-success':(($pc['status']==='CONVITE_PENDENTE')?'bg-warning text-dark':'bg-secondary')?>"><?=htmlspecialchars($pc['status'])?></span></td><td class="text-end">
-    <?php if($pc['status']==='CONVITE_PENDENTE'): ?><form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="reemitir_convite_portal"><input type="hidden" name="portal_conta_id" value="<?=(int)$pc['id']?>"><button class="btn btn-sm btn-outline-primary" onclick="return confirm('Revogar o convite anterior e gerar um novo?')">Novo convite</button></form><?php endif; ?>
-    <?php if(in_array($pc['status'],['ATIVA','DESATIVADA'],true)): ?><form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_conta_portal"><input type="hidden" name="portal_conta_id" value="<?=(int)$pc['id']?>"><input type="hidden" name="portal_novo_status" value="<?=$pc['status']==='ATIVA'?'DESATIVADA':'ATIVA'?>"><button class="btn btn-sm <?=$pc['status']==='ATIVA'?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Confirmar alteração do status desta conta?')"><?=$pc['status']==='ATIVA'?'Desativar':'Ativar'?></button></form><?php endif; ?>
+<div class="card shadow-sm border-0"><div class="card-header bg-dark text-white d-flex justify-content-between"><span>Contas do Portal</span><small class="fw-normal">Acompanhamento global do MASTER</small></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover align-middle mb-0"><thead><tr><th>Escritório</th><th>Cliente</th><th>E-mail</th><th>Permissões</th><th>Conta</th><th>Último convite</th><th class="text-end">Ações</th></tr></thead><tbody>
+<?php if(!$portalContas): ?><tr><td colspan="7" class="text-center text-muted py-4">Nenhuma conta criada.</td></tr><?php else: foreach($portalContas as $pc): ?>
+<tr><td><strong><?=htmlspecialchars($pc['escritorio_nome'])?></strong><br><code><?=htmlspecialchars($pc['tenant_id'])?></code></td><td><?=htmlspecialchars($pc['cliente_nome'])?><br><small><?=htmlspecialchars($pc['cliente_id'])?></small></td><td><?=htmlspecialchars($pc['email'])?></td><td><small><?php $qtdPermissoes=array_sum(array_map('intval',[$pc['ver_processos']??0,$pc['ver_documentos']??0,$pc['enviar_documentos']??0,$pc['ver_honorarios']??0,$pc['ver_recibos']??0,$pc['ver_agenda']??0,$pc['receber_notificacoes']??0])); ?><?=$qtdPermissoes?> de 7 habilitadas</small></td><td><span class="badge <?=($pc['status']==='ATIVA')?'bg-success':(($pc['status']==='CONVITE_PENDENTE')?'bg-warning text-dark':'bg-secondary')?>"><?=htmlspecialchars($pc['status'])?></span></td><td><small><?php if(empty($pc['convite_token_id'])): ?><span class="text-muted">Não gerado</span><?php elseif(!empty($pc['convite_utilizado_em'])): ?><span class="text-success fw-semibold">Utilizado</span><br><?=date('d/m/Y H:i',strtotime((string)$pc['convite_utilizado_em']))?><?php elseif(!empty($pc['convite_revogado_em'])): ?><span class="text-secondary fw-semibold">Revogado</span><br><?=date('d/m/Y H:i',strtotime((string)$pc['convite_revogado_em']))?><?php elseif(!empty($pc['convite_expira_em']) && strtotime((string)$pc['convite_expira_em'])>time()): ?><span class="text-warning-emphasis fw-semibold">Pendente</span><br>Expira <?=date('d/m/Y H:i',strtotime((string)$pc['convite_expira_em']))?><?php else: ?><span class="text-danger fw-semibold">Expirado</span><?php endif; ?></small></td><td class="text-end">
+    <?php if($pc['status']==='CONVITE_PENDENTE'): ?><form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="reemitir_convite_portal"><input type="hidden" name="portal_conta_id" value="<?=(int)$pc['id']?>"><input type="hidden" name="portal_tenant_id" value="<?=htmlspecialchars((string)$pc['tenant_id'])?>"><input type="hidden" name="portal_escritorio_id" value="<?=(int)$pc['escritorio_id']?>"><input type="hidden" name="portal_cliente_id" value="<?=htmlspecialchars((string)$pc['cliente_id'])?>"><button class="btn btn-sm btn-outline-primary" onclick="return confirm('Revogar o convite anterior e gerar um novo?')">Novo convite</button></form><?php endif; ?>
+    <?php if(in_array($pc['status'],['ATIVA','DESATIVADA'],true)): ?><form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_conta_portal"><input type="hidden" name="portal_conta_id" value="<?=(int)$pc['id']?>"><input type="hidden" name="portal_tenant_id" value="<?=htmlspecialchars((string)$pc['tenant_id'])?>"><input type="hidden" name="portal_escritorio_id" value="<?=(int)$pc['escritorio_id']?>"><input type="hidden" name="portal_cliente_id" value="<?=htmlspecialchars((string)$pc['cliente_id'])?>"><input type="hidden" name="portal_novo_status" value="<?=$pc['status']==='ATIVA'?'DESATIVADA':'ATIVA'?>"><button class="btn btn-sm <?=$pc['status']==='ATIVA'?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Confirmar alteração do status desta conta?')"><?=$pc['status']==='ATIVA'?'Desativar':'Ativar'?></button></form><?php endif; ?>
 </td></tr><?php endforeach; endif; ?></tbody></table></div></div></div>
 <script>(function(){const e=document.getElementById('portalEscritorioConta'),c=document.getElementById('portalClienteConta'),m=document.getElementById('portalEmailConta');function f(){const id=e.value;for(const o of c.options){if(!o.value)continue;o.hidden=o.dataset.escritorio!==id;}if(c.selectedOptions[0]?.hidden)c.value='';m.value=c.selectedOptions[0]?.dataset.email||'';}e?.addEventListener('change',f);c?.addEventListener('change',()=>{m.value=c.selectedOptions[0]?.dataset.email||'';});f();})();</script>
 <?php endif; ?>

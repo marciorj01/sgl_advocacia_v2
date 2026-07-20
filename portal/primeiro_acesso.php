@@ -110,17 +110,18 @@ try {
             $escritorioId = (int)$convite['escritorio_id']; $clienteId = (string)$convite['cliente_id']; $tenantId = (string)$convite['tenant_id'];
             $conn->begin_transaction();
             try {
-                $stmt = $conn->prepare("SELECT id FROM portal_clientes_tokens WHERE id=? AND conta_id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND utilizado_em IS NULL AND revogado_em IS NULL AND expira_em>NOW() LIMIT 1 FOR UPDATE");
-                $stmt->bind_param('iisis', $tokenId, $contaId, $tenantId, $escritorioId, $clienteId); $stmt->execute();
+                $stmt = $conn->prepare("SELECT id FROM portal_clientes_tokens WHERE id=? AND conta_id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND token_hash=? AND tipo='CONVITE' AND utilizado_em IS NULL AND revogado_em IS NULL AND expira_em>NOW() LIMIT 1 FOR UPDATE");
+                $stmt->bind_param('iisiss', $tokenId, $contaId, $tenantId, $escritorioId, $clienteId, $tokenHash); $stmt->execute();
                 $valido = $stmt->get_result()->fetch_assoc(); $stmt->close();
                 if (!$valido) throw new RuntimeException('O convite deixou de ser válido.');
                 $stmt = $conn->prepare("UPDATE portal_clientes_contas SET senha_hash=?,status='ATIVA',primeiro_acesso_pendente=0,email_verificado_em=NOW(),senha_definida_em=NOW(),falhas_consecutivas=0,bloqueado_ate=NULL WHERE id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND status='CONVITE_PENDENTE'");
                 $stmt->bind_param('sisis', $senhaHash, $contaId, $tenantId, $escritorioId, $clienteId); $stmt->execute();
                 if ($stmt->affected_rows !== 1) { $stmt->close(); throw new RuntimeException('A conta não pôde ser ativada.'); } $stmt->close();
-                $stmt = $conn->prepare("UPDATE portal_clientes_tokens SET utilizado_em=NOW() WHERE id=? AND conta_id=?");
-                $stmt->bind_param('ii', $tokenId, $contaId); $stmt->execute(); $stmt->close();
-                $stmt = $conn->prepare("UPDATE portal_clientes_tokens SET revogado_em=NOW() WHERE conta_id=? AND id<>? AND utilizado_em IS NULL AND revogado_em IS NULL");
-                $stmt->bind_param('ii', $contaId, $tokenId); $stmt->execute(); $stmt->close();
+                $stmt = $conn->prepare("UPDATE portal_clientes_tokens SET utilizado_em=NOW() WHERE id=? AND conta_id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND token_hash=? AND tipo='CONVITE' AND utilizado_em IS NULL AND revogado_em IS NULL AND expira_em>NOW()");
+                $stmt->bind_param('iisiss', $tokenId, $contaId, $tenantId, $escritorioId, $clienteId, $tokenHash); $stmt->execute();
+                if ($stmt->affected_rows !== 1) { $stmt->close(); throw new RuntimeException('O convite não pôde ser consumido com segurança.'); } $stmt->close();
+                $stmt = $conn->prepare("UPDATE portal_clientes_tokens SET revogado_em=NOW() WHERE conta_id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND id<>? AND tipo='CONVITE' AND utilizado_em IS NULL AND revogado_em IS NULL");
+                $stmt->bind_param('isisi', $contaId, $tenantId, $escritorioId, $clienteId, $tokenId); $stmt->execute(); $stmt->close();
                 $conn->commit(); $sucesso = true; $erro = '';
                 rojexPortalRotacionarCsrf();
             } catch (Throwable $e) { $conn->rollback(); throw $e; }

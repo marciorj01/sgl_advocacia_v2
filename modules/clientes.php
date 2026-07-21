@@ -275,12 +275,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['salvar_cliente']) ||
     }
 }
 
-// SOFT DELETE
-if (isset($_GET['excluir'])) {
-    if (!validarTokenCsrf($_GET['csrf_token'] ?? null)) {
+// SOFT DELETE — somente POST + CSRF
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['excluir_cliente'])) {
+    if (!validarTokenCsrf($_POST['csrf_token'] ?? null)) {
         $msg = '<div class="alert alert-danger">Ação bloqueada por segurança. Tente novamente.</div>';
     } else {
-        $id = (string)$_GET['excluir'];
+        $id = (string)($_POST['id_cliente'] ?? '');
         $dadosAnteriores = buscarClienteAuditoria($conn, $tenantId, $escritorioId, $id);
 
         $stmt = $conn->prepare(
@@ -619,7 +619,11 @@ $queryBase = http_build_query(['mod' => 'clientes', 'busca' => $busca, 'status' 
                         <td><span class="badge bg-<?= $badge ?>"><?= h($row['status']) ?></span></td>
                         <td class="text-end text-nowrap">
                             <a href="?mod=clientes&acao=editar&id=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-warning"><i class="bi bi-pencil"></i></a>
-                            <a href="?mod=clientes&excluir=<?= urlencode($row['id']) ?>&csrf_token=<?= h($csrf) ?>" class="btn btn-sm btn-danger" onclick="return confirm('Deseja mover este cliente para a lixeira?')"><i class="bi bi-trash"></i></a>
+                            <form method="POST" class="d-inline" onsubmit="return confirm('Deseja mover este cliente para a lixeira?')">
+                                <input type="hidden" name="csrf_token" value="<?= h($csrf) ?>">
+                                <input type="hidden" name="id_cliente" value="<?= h($row['id']) ?>">
+                                <button type="submit" name="excluir_cliente" value="1" class="btn btn-sm btn-danger"><i class="bi bi-trash"></i></button>
+                            </form>
                         </td>
                     </tr>
                     <?php endwhile; ?>

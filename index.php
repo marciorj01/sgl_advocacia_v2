@@ -213,8 +213,8 @@ $nomeContexto = $modoPlataforma
  */
 if (
     $modulo === 'configuracoes'
-    && $_SERVER['REQUEST_METHOD'] === 'GET'
-    && ($_GET['acao_cfg'] ?? '') === 'baixar_log_backup'
+    && $_SERVER['REQUEST_METHOD'] === 'POST'
+    && ($_POST['acao_cfg'] ?? '') === 'baixar_log_backup'
 ) {
     require __DIR__ . '/modules/configuracoes.php';
     exit;

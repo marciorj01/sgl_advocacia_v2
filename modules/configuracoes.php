@@ -7,8 +7,8 @@
 
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
-if (function_exists('sgl_garantir_logs')) { sgl_garantir_logs($conn); }
-if (function_exists('sgl_completar_logs_sem_responsavel')) { sgl_completar_logs_sem_responsavel($conn); }
+/* Estrutura e saneamentos do banco são executados exclusivamente por migrações SQL.
+ * Nenhum DDL ou backfill é disparado durante a requisição HTTP. */
 $upload_dir = __DIR__ . '/../assets/img/';
 $upload_marca_dir = $upload_dir . 'branding/';
 if (!is_dir($upload_dir)) {
@@ -19,358 +19,12 @@ if (!is_dir($upload_marca_dir)) {
 }
 
 // -----------------------------------------------------------------------------
-// Base estrutural mínima
+// Estrutura do banco
 // -----------------------------------------------------------------------------
-$conn->query("CREATE TABLE IF NOT EXISTS configuracoes (
-    chave VARCHAR(80) NOT NULL,
-    valor TEXT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    PRIMARY KEY (chave)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-$conn->query("CREATE TABLE IF NOT EXISTS logs_sistema (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    usuario_id INT NULL,
-    acao VARCHAR(120) NOT NULL,
-    tabela VARCHAR(80) NULL,
-    registro_id VARCHAR(30) NULL,
-    detalhes TEXT NULL,
-    ip VARCHAR(45) NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_logs_usuario (usuario_id),
-    INDEX idx_logs_acao (acao)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-
-// Complementos compatíveis para a gestão Enterprise de usuários.
-// As colunas são adicionadas somente quando ainda não existem.
-if (sgl_tabela_existe($conn, 'usuarios')) {
-    $colunasUsuarioEnterprise = [
-        'telefone' => "VARCHAR(40) NULL",
-        'cargo' => "VARCHAR(100) NULL",
-        'departamento' => "VARCHAR(100) NULL",
-        'observacoes' => "TEXT NULL",
-        'vinculo_status' => "VARCHAR(30) NOT NULL DEFAULT 'ativo'",
-        'desligado_em' => "DATETIME NULL",
-        'desligado_por' => "INT NULL",
-    ];
-
-    foreach ($colunasUsuarioEnterprise as $colunaUsuario => $definicaoUsuario) {
-        if (!sgl_coluna_existe($conn, 'usuarios', $colunaUsuario)) {
-            try {
-                $conn->query("ALTER TABLE usuarios ADD COLUMN `$colunaUsuario` $definicaoUsuario");
-            } catch (Throwable $e) {
-                // Mantém a tela funcional mesmo em bancos sem permissão de ALTER.
-            }
-        }
-    }
-}
-
-$conn->query("CREATE TABLE IF NOT EXISTS usuarios_historico (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    usuario_id INT NOT NULL,
-    acao VARCHAR(80) NOT NULL,
-    dados_snapshot LONGTEXT NOT NULL,
-    realizado_por INT NULL,
-    realizado_por_nome VARCHAR(140) NULL,
-    ip VARCHAR(45) NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_uh_usuario (usuario_id),
-    INDEX idx_uh_acao (acao),
-    INDEX idx_uh_criado (criado_em)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-
-// Base da Sprint 4.1.3 — Administração Enterprise.
-// As tabelas centrais são criadas de forma não destrutiva e ainda não executam
-// bloqueios, cobranças, backups ou atualizações automáticas.
-$conn->query("CREATE TABLE IF NOT EXISTS escritorios_saas (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    tenant_id VARCHAR(80) NOT NULL,
-    nome VARCHAR(180) NOT NULL,
-    documento VARCHAR(30) NULL,
-    responsavel VARCHAR(140) NULL,
-    email VARCHAR(140) NULL,
-    subdominio VARCHAR(180) NULL,
-    status VARCHAR(30) NOT NULL DEFAULT 'implantacao',
-    plano VARCHAR(30) NOT NULL DEFAULT 'enterprise',
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_escritorios_tenant (tenant_id),
-    INDEX idx_escritorios_status (status),
-    INDEX idx_escritorios_plano (plano)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-// Complementos não destrutivos da Etapa 3 — Gestão de Escritórios.
-foreach ([
-    'telefone' => "VARCHAR(40) NULL",
-    'cidade' => "VARCHAR(100) NULL",
-    'uf' => "VARCHAR(2) NULL",
-    'ultimo_acesso' => "DATETIME NULL",
-    'observacoes' => "TEXT NULL",
-    'encerrado_em' => "DATETIME NULL",
-] as $colunaEscritorio => $definicaoEscritorio) {
-    if (!sgl_coluna_existe($conn, 'escritorios_saas', $colunaEscritorio)) {
-        try {
-            $conn->query("ALTER TABLE escritorios_saas ADD COLUMN `$colunaEscritorio` $definicaoEscritorio");
-        } catch (Throwable $e) {
-            // Compatibilidade com hospedagens sem permissão de ALTER.
-        }
-    }
-}
-
-$conn->query("CREATE TABLE IF NOT EXISTS licencas_saas (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    escritorio_id BIGINT NULL,
-    chave_licenca VARCHAR(120) NOT NULL,
-    plano VARCHAR(30) NOT NULL DEFAULT 'enterprise',
-    status VARCHAR(30) NOT NULL DEFAULT 'teste',
-    limite_usuarios INT NOT NULL DEFAULT 100,
-    limite_armazenamento_gb INT NOT NULL DEFAULT 50,
-    ativada_em DATE NULL,
-    renovacao_em DATE NULL,
-    observacoes TEXT NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_licencas_chave (chave_licenca),
-    INDEX idx_licencas_escritorio (escritorio_id),
-    INDEX idx_licencas_status (status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-$conn->query("CREATE TABLE IF NOT EXISTS backups_sistema (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    tipo VARCHAR(40) NOT NULL DEFAULT 'manual',
-    status VARCHAR(30) NOT NULL DEFAULT 'planejado',
-    arquivo VARCHAR(255) NULL,
-    tamanho_bytes BIGINT NULL,
-    hash_arquivo VARCHAR(128) NULL,
-    iniciado_por INT NULL,
-    detalhes TEXT NULL,
-    iniciado_em DATETIME NULL,
-    concluido_em DATETIME NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_backups_status (status),
-    INDEX idx_backups_criado (criado_em)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-// Sprint 4.6.5 — inventário imutável dos backups isolados do LOG.
-$conn->query("CREATE TABLE IF NOT EXISTS logs_backups (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    tenant_id VARCHAR(80) NOT NULL,
-    escritorio_id BIGINT NOT NULL,
-    escritorio_nome VARCHAR(180) NULL,
-    periodo_inicio DATETIME NOT NULL,
-    periodo_fim DATETIME NOT NULL,
-    arquivo VARCHAR(500) NOT NULL,
-    nome_arquivo VARCHAR(255) NOT NULL,
-    sha256 CHAR(64) NOT NULL,
-    tamanho_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    total_registros BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    ids_json LONGTEXT NOT NULL,
-    status VARCHAR(30) NOT NULL DEFAULT 'GERADO',
-    verificado_em DATETIME NULL,
-    download_em DATETIME NULL,
-    arquivado_em DATETIME NULL,
-    criado_por INT NULL,
-    criado_por_nome VARCHAR(150) NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    INDEX idx_lb_tenant_escritorio (tenant_id, escritorio_id),
-    INDEX idx_lb_status (status),
-    INDEX idx_lb_criado (criado_em)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-foreach ([
-    'tenant_id' => "VARCHAR(80) NOT NULL DEFAULT ''",
-    'escritorio_id' => "BIGINT NOT NULL DEFAULT 0",
-    'escritorio_nome' => "VARCHAR(180) NULL",
-    'periodo_inicio' => "DATETIME NULL",
-    'periodo_fim' => "DATETIME NULL",
-    'arquivo' => "VARCHAR(500) NULL",
-    'nome_arquivo' => "VARCHAR(255) NULL",
-    'sha256' => "CHAR(64) NULL",
-    'tamanho_bytes' => "BIGINT UNSIGNED NOT NULL DEFAULT 0",
-    'total_registros' => "BIGINT UNSIGNED NOT NULL DEFAULT 0",
-    'ids_json' => "LONGTEXT NULL",
-    'status' => "VARCHAR(30) NOT NULL DEFAULT 'GERADO'",
-    'verificado_em' => "DATETIME NULL",
-    'download_em' => "DATETIME NULL",
-    'arquivado_em' => "DATETIME NULL",
-    'criado_por' => "INT NULL",
-    'criado_por_nome' => "VARCHAR(150) NULL",
-    'criado_em' => "DATETIME NULL DEFAULT CURRENT_TIMESTAMP",
-    'atualizado_em' => "DATETIME NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
-] as $colunaLogBackup => $definicaoLogBackup) {
-    if (sgl_tabela_existe($conn, 'logs_backups') && !sgl_coluna_existe($conn, 'logs_backups', $colunaLogBackup)) {
-        try {
-            $conn->query("ALTER TABLE logs_backups ADD COLUMN `$colunaLogBackup` $definicaoLogBackup");
-        } catch (Throwable $e) {
-            // A migração oficial deve fornecer a estrutura; mantém a tela disponível.
-        }
-    }
-}
-
-// Complementos não destrutivos da Etapa 8 — Backup Enterprise.
-foreach ([
-    'nome_original' => "VARCHAR(255) NULL",
-    'escopo' => "VARCHAR(40) NULL",
-    'quantidade_arquivos' => "INT NOT NULL DEFAULT 0",
-    'verificado_em' => "DATETIME NULL",
-    'verificacao_status' => "VARCHAR(30) NULL",
-    'responsavel_nome' => "VARCHAR(140) NULL",
-] as $colunaBackup => $definicaoBackup) {
-    if (!sgl_coluna_existe($conn, 'backups_sistema', $colunaBackup)) {
-        try {
-            $conn->query("ALTER TABLE backups_sistema ADD COLUMN `$colunaBackup` $definicaoBackup");
-        } catch (Throwable $e) {
-            // Mantém compatibilidade com hospedagens sem permissão de ALTER.
-        }
-    }
-}
-
-$conn->query("CREATE TABLE IF NOT EXISTS atualizacoes_sistema (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    versao VARCHAR(40) NOT NULL,
-    titulo VARCHAR(180) NOT NULL,
-    descricao TEXT NULL,
-    status VARCHAR(30) NOT NULL DEFAULT 'planejada',
-    obrigatoria TINYINT(1) NOT NULL DEFAULT 0,
-    publicada_em DATETIME NULL,
-    aplicada_em DATETIME NULL,
-    aplicada_por INT NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_atualizacoes_versao (versao),
-    INDEX idx_atualizacoes_status (status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-// Complementos não destrutivos da Etapa 9 — Central de Atualizações.
-foreach ([
-    'tipo' => "VARCHAR(30) NOT NULL DEFAULT 'melhoria'",
-    'changelog' => "LONGTEXT NULL",
-    'requisitos' => "LONGTEXT NULL",
-    'impacto' => "VARCHAR(30) NOT NULL DEFAULT 'baixo'",
-    'versao_php_minima' => "VARCHAR(20) NULL",
-    'versao_banco_minima' => "VARCHAR(30) NULL",
-    'tamanho_estimado_bytes' => "BIGINT NOT NULL DEFAULT 0",
-    'arquivos_estimados' => "INT NOT NULL DEFAULT 0",
-    'responsavel_nome' => "VARCHAR(140) NULL",
-    'verificada_em' => "DATETIME NULL",
-    'compatibilidade_status' => "VARCHAR(30) NULL",
-] as $colunaAtualizacao => $definicaoAtualizacao) {
-    if (!sgl_coluna_existe($conn, 'atualizacoes_sistema', $colunaAtualizacao)) {
-        try {
-            $conn->query("ALTER TABLE atualizacoes_sistema ADD COLUMN `$colunaAtualizacao` $definicaoAtualizacao");
-        } catch (Throwable $e) {
-            // Mantém compatibilidade com hospedagens sem permissão de ALTER.
-        }
-    }
-}
-
-$conn->query("CREATE TABLE IF NOT EXISTS manutencoes_sistema (
-    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    tipo VARCHAR(60) NOT NULL,
-    modo VARCHAR(20) NOT NULL DEFAULT 'execucao',
-    status VARCHAR(30) NOT NULL DEFAULT 'concluida',
-    resumo TEXT NULL,
-    detalhes LONGTEXT NULL,
-    executado_por INT NULL,
-    executado_por_nome VARCHAR(140) NULL,
-    iniciado_em DATETIME NULL,
-    concluido_em DATETIME NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_manutencoes_tipo (tipo),
-    INDEX idx_manutencoes_status (status),
-    INDEX idx_manutencoes_criado (criado_em)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-
-// Complementos não destrutivos da Sprint 4.5 — Etapa 3.3.
-// Mantêm compatibilidade com o banco homologado e preparam o catálogo comercial.
-if (sgl_tabela_existe($conn, 'modulos_saas')) {
-    foreach ([
-        'status_lancamento' => "VARCHAR(30) NOT NULL DEFAULT 'producao'",
-        'requer_api' => "TINYINT(1) NOT NULL DEFAULT 0",
-        'exibir_portal' => "TINYINT(1) NOT NULL DEFAULT 0",
-        'exibir_menu' => "TINYINT(1) NOT NULL DEFAULT 1",
-        'exibir_venda' => "TINYINT(1) NOT NULL DEFAULT 1",
-    ] as $colunaModulo => $definicaoModulo) {
-        if (!sgl_coluna_existe($conn, 'modulos_saas', $colunaModulo)) {
-            try {
-                $conn->query("ALTER TABLE modulos_saas ADD COLUMN `$colunaModulo` $definicaoModulo");
-            } catch (Throwable $e) {
-                // A tela continua funcional em hospedagens sem permissão de ALTER.
-            }
-        }
-    }
-}
-
-
-// -----------------------------------------------------------------------------
-// Base não destrutiva do Provisionamento Enterprise — Sprint 4.5 / Etapa 3.4.4
-// As tabelas abaixo isolam contrato, módulos, vínculo do administrador e
-// configurações iniciais por tenant sem alterar as configurações globais atuais.
-// -----------------------------------------------------------------------------
-$conn->query("CREATE TABLE IF NOT EXISTS assinaturas_saas (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    escritorio_id BIGINT NOT NULL,
-    plano_id BIGINT UNSIGNED NOT NULL,
-    periodicidade VARCHAR(20) NOT NULL DEFAULT 'mensal',
-    valor_base DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    desconto_modulos DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    valor_extras DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    ajuste_comercial DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    valor_contratado DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    status VARCHAR(30) NOT NULL DEFAULT 'trial',
-    trial_inicio DATE NULL,
-    trial_fim DATE NULL,
-    inicio_vigencia DATE NULL,
-    proximo_vencimento DATE NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_assinaturas_escritorio (escritorio_id),
-    INDEX idx_assinaturas_plano (plano_id),
-    INDEX idx_assinaturas_status (status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-$conn->query("CREATE TABLE IF NOT EXISTS escritorios_modulos_saas (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    escritorio_id BIGINT NOT NULL,
-    modulo_id BIGINT UNSIGNED NOT NULL,
-    origem VARCHAR(30) NOT NULL DEFAULT 'plano',
-    ativo TINYINT(1) NOT NULL DEFAULT 1,
-    valor_ajuste DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_escritorio_modulo (escritorio_id, modulo_id),
-    INDEX idx_emod_modulo (modulo_id),
-    INDEX idx_emod_ativo (ativo)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-$conn->query("CREATE TABLE IF NOT EXISTS usuarios_escritorios_saas (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    usuario_id INT NOT NULL,
-    escritorio_id BIGINT NOT NULL,
-    tenant_id VARCHAR(80) NOT NULL,
-    papel VARCHAR(40) NOT NULL DEFAULT 'administrador',
-    principal TINYINT(1) NOT NULL DEFAULT 1,
-    ativo TINYINT(1) NOT NULL DEFAULT 1,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_usuario_escritorio (usuario_id, escritorio_id),
-    INDEX idx_ues_escritorio (escritorio_id),
-    INDEX idx_ues_tenant (tenant_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
-
-$conn->query("CREATE TABLE IF NOT EXISTS escritorios_configuracoes_saas (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    escritorio_id BIGINT NOT NULL,
-    tenant_id VARCHAR(80) NOT NULL,
-    chave VARCHAR(80) NOT NULL,
-    valor TEXT NULL,
-    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uk_ecfg_tenant_chave (tenant_id, chave),
-    INDEX idx_ecfg_escritorio (escritorio_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+/*
+ * Tabelas, colunas e índices deste módulo são mantidos pelo SQL mestre e pelas
+ * migrações oficiais. Este arquivo não cria nem altera estruturas em requisições HTTP.
+ */
 
 // -----------------------------------------------------------------------------
 // Funções utilitárias
@@ -2102,6 +1756,7 @@ $acoesExclusivasMaster = [
     'verificar_backup',
     'gerar_log_backup',
     'verificar_log_backup',
+    'baixar_log_backup',
     'arquivar_log_backup',
     'salvar_atualizacao',
     'alterar_status_atualizacao',
@@ -2134,10 +1789,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !validarTokenCsrf($_POST['csrf_toke
 // HTML anterior aos cabeçalhos do arquivo.
 if (
     $ehUsuarioMaster
-    && ($_GET['acao_cfg'] ?? '') === 'baixar_log_backup'
-    && $_SERVER['REQUEST_METHOD'] === 'GET'
+    && $acao_cfg === 'baixar_log_backup'
+    && $_SERVER['REQUEST_METHOD'] === 'POST'
 ) {
-    $backupIdDownload = max(0, (int)($_GET['backup_id'] ?? 0));
+    $backupIdDownload = max(0, (int)($_POST['backup_id'] ?? 0));
     try {
         $backupDownload = rojex_log_backup_buscar($conn, $backupIdDownload);
         if (!$backupDownload || !rojex_log_backup_caminho_valido((string)$backupDownload['arquivo'])) {
@@ -4336,7 +3991,9 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
 // -----------------------------------------------------------------------------
 if ($acao_cfg === 'salvar_escritorio_saas') {
     $escritorioIdSaas = max(0, (int)($_POST['escritorio_saas_id'] ?? 0));
-    $tenantIdSaas = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($_POST['tenant_id_saas'] ?? '')));
+    if ($escritorioIdSaas <= 0) {
+        rojex_redirect_assistente(1, 'erro', 'Novos escritórios devem ser criados pelo Assistente. A licença, a assinatura, os módulos e o administrador serão provisionados automaticamente.');
+    }
     $nomeSaas = sgl_limpar_texto((string)($_POST['nome_escritorio_saas'] ?? ''), 180);
     $documentoSaas = sgl_limpar_texto((string)($_POST['documento_escritorio_saas'] ?? ''), 30);
     $responsavelSaas = sgl_limpar_texto((string)($_POST['responsavel_escritorio_saas'] ?? ''), 140);
@@ -4345,54 +4002,37 @@ if ($acao_cfg === 'salvar_escritorio_saas') {
     $cidadeSaas = sgl_limpar_texto((string)($_POST['cidade_escritorio_saas'] ?? ''), 100);
     $ufSaas = strtoupper(sgl_limpar_texto((string)($_POST['uf_escritorio_saas'] ?? ''), 2));
     $subdominioSaas = strtolower(preg_replace('/[^a-zA-Z0-9.-]/', '', (string)($_POST['subdominio_escritorio_saas'] ?? '')));
-    $statusEscritorioSaas = (string)($_POST['status_escritorio_saas'] ?? 'implantacao');
-    $planoEscritorioSaas = (string)($_POST['plano_escritorio_saas'] ?? 'enterprise');
     $observacoesEscritorioSaas = sgl_limpar_texto((string)($_POST['observacoes_escritorio_saas'] ?? ''), 1500);
 
     if ($nomeSaas === '') {
         sgl_redirect_cfg('administracao', 'erro', 'Informe o nome do escritório.');
     }
-    if ($tenantIdSaas === '') {
-        try { $tenantIdSaas = 'ROJEX-TENANT-' . strtoupper(bin2hex(random_bytes(8))); }
-        catch (Throwable $e) { $tenantIdSaas = 'ROJEX-TENANT-' . strtoupper(substr(hash('sha256', uniqid('', true)), 0, 16)); }
-    }
     if ($emailSaas !== '' && !filter_var($emailSaas, FILTER_VALIDATE_EMAIL)) {
         sgl_redirect_cfg('administracao', 'erro', 'Informe um e-mail válido para o escritório.');
     }
-    if (!in_array($statusEscritorioSaas, ['implantacao','ativo','suspenso','bloqueado','encerrado'], true)) {
-        $statusEscritorioSaas = 'implantacao';
-    }
-    if (!in_array($planoEscritorioSaas, ['starter','professional','enterprise'], true)) {
-        $planoEscritorioSaas = 'enterprise';
-    }
 
     try {
-        $stmtDup = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? AND id <> ? LIMIT 1");
-        $stmtDup->bind_param('si', $tenantIdSaas, $escritorioIdSaas);
-        $stmtDup->execute();
-        $duplicadoTenant = $stmtDup->get_result()->fetch_assoc();
-        $stmtDup->close();
-        if ($duplicadoTenant) {
-            sgl_redirect_cfg('administracao', 'erro', 'Este Tenant ID já pertence a outro escritório.');
+        // Tenant, plano e situação operacional são governados pelos fluxos
+        // próprios do MASTER. A edição cadastral não pode alterá-los.
+        $stmtAtual = $conn->prepare("SELECT tenant_id, status, plano FROM escritorios_saas WHERE id=? LIMIT 1");
+        $stmtAtual->bind_param('i', $escritorioIdSaas);
+        $stmtAtual->execute();
+        $escritorioAtual = $stmtAtual->get_result()->fetch_assoc();
+        $stmtAtual->close();
+        if (!$escritorioAtual) {
+            sgl_redirect_cfg('administracao', 'erro', 'Escritório não encontrado.');
         }
+        $tenantIdSaas = (string)$escritorioAtual['tenant_id'];
+        $statusEscritorioSaas = (string)$escritorioAtual['status'];
+        $planoEscritorioSaas = (string)$escritorioAtual['plano'];
 
-        if ($escritorioIdSaas > 0) {
-            $stmt = $conn->prepare("UPDATE escritorios_saas SET tenant_id=?, nome=?, documento=?, responsavel=?, email=?, telefone=?, cidade=?, uf=?, subdominio=?, status=?, plano=?, observacoes=?, encerrado_em=IF(?='encerrado', COALESCE(encerrado_em,NOW()), NULL) WHERE id=?");
-            $stmt->bind_param('sssssssssssssi', $tenantIdSaas, $nomeSaas, $documentoSaas, $responsavelSaas, $emailSaas, $telefoneSaas, $cidadeSaas, $ufSaas, $subdominioSaas, $statusEscritorioSaas, $planoEscritorioSaas, $observacoesEscritorioSaas, $statusEscritorioSaas, $escritorioIdSaas);
-            $stmt->execute();
-            $stmt->close();
-            $registroEscritorioLog = (string)$escritorioIdSaas;
-            $mensagemEscritorio = 'Escritório atualizado com sucesso.';
-            $acaoEscritorioLog = 'Atualizou escritório SaaS';
-        } else {
-            $stmt = $conn->prepare("INSERT INTO escritorios_saas (tenant_id,nome,documento,responsavel,email,telefone,cidade,uf,subdominio,status,plano,observacoes,encerrado_em) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,IF(?='encerrado',NOW(),NULL))");
-            $stmt->bind_param('sssssssssssss', $tenantIdSaas, $nomeSaas, $documentoSaas, $responsavelSaas, $emailSaas, $telefoneSaas, $cidadeSaas, $ufSaas, $subdominioSaas, $statusEscritorioSaas, $planoEscritorioSaas, $observacoesEscritorioSaas, $statusEscritorioSaas);
-            $stmt->execute();
-            $registroEscritorioLog = (string)$stmt->insert_id;
-            $stmt->close();
-            $mensagemEscritorio = 'Escritório cadastrado com sucesso.';
-            $acaoEscritorioLog = 'Criou escritório SaaS';
-        }
+        $stmt = $conn->prepare("UPDATE escritorios_saas SET nome=?, documento=?, responsavel=?, email=?, telefone=?, cidade=?, uf=?, subdominio=?, observacoes=? WHERE id=?");
+        $stmt->bind_param('sssssssssi', $nomeSaas, $documentoSaas, $responsavelSaas, $emailSaas, $telefoneSaas, $cidadeSaas, $ufSaas, $subdominioSaas, $observacoesEscritorioSaas, $escritorioIdSaas);
+        $stmt->execute();
+        $stmt->close();
+        $registroEscritorioLog = (string)$escritorioIdSaas;
+        $mensagemEscritorio = 'Dados cadastrais do escritório atualizados com sucesso.';
+        $acaoEscritorioLog = 'Atualizou dados cadastrais de escritório SaaS';
 
         sgl_log($conn, $acaoEscritorioLog, 'escritorios_saas', $registroEscritorioLog, "Tenant: {$tenantIdSaas}; Status: {$statusEscritorioSaas}; Plano: {$planoEscritorioSaas}");
         sgl_redirect_cfg('administracao', 'sucesso', $mensagemEscritorio);
@@ -4408,6 +4048,33 @@ if ($acao_cfg === 'alterar_status_escritorio_saas') {
         sgl_redirect_cfg('administracao', 'erro', 'Escritório ou status inválido.');
     }
     try {
+        if ($novoStatusEscritorio === 'ativo') {
+            // Falha segura: um tenant só pode entrar em operação quando o
+            // provisionamento automático estiver completo e vigente.
+            $stmtProntidao = $conn->prepare(
+                "SELECT
+                    (SELECT COUNT(*) FROM licencas_saas l
+                      WHERE l.escritorio_id=e.id
+                        AND l.status IN ('teste','ativa')
+                        AND (l.renovacao_em IS NULL OR l.renovacao_em >= CURDATE())) AS licencas_validas,
+                    (SELECT COUNT(*) FROM licencas_saas l
+                      WHERE l.escritorio_id=e.id AND l.plano<>e.plano
+                        AND l.status IN ('teste','ativa')) AS planos_divergentes,
+                    (SELECT COUNT(*) FROM usuarios_escritorios_saas ue
+                      INNER JOIN usuarios u ON u.id=ue.usuario_id
+                      WHERE ue.escritorio_id=e.id
+                        AND LOWER(ue.papel)='administrador'
+                        AND ue.principal=1 AND ue.ativo=1 AND u.ativo=1) AS administradores_principais
+                   FROM escritorios_saas e WHERE e.id=? LIMIT 1"
+            );
+            $stmtProntidao->bind_param('i', $escritorioIdSaas);
+            $stmtProntidao->execute();
+            $prontidao = $stmtProntidao->get_result()->fetch_assoc();
+            $stmtProntidao->close();
+            if (!$prontidao || (int)$prontidao['licencas_validas'] < 1 || (int)$prontidao['administradores_principais'] < 1 || (int)$prontidao['planos_divergentes'] > 0) {
+                sgl_redirect_cfg('administracao', 'erro', 'Ativação bloqueada: o escritório precisa de licença automática válida, plano coerente e administrador principal ativo. Use o Assistente para novos escritórios.');
+            }
+        }
         $stmt = $conn->prepare("UPDATE escritorios_saas SET status=?, encerrado_em=IF(?='encerrado',COALESCE(encerrado_em,NOW()),NULL) WHERE id=?");
         $stmt->bind_param('ssi', $novoStatusEscritorio, $novoStatusEscritorio, $escritorioIdSaas);
         $stmt->execute();
@@ -4424,25 +4091,14 @@ if ($acao_cfg === 'alterar_status_escritorio_saas') {
 // -----------------------------------------------------------------------------
 if ($acao_cfg === 'salvar_licenca_saas') {
     $licencaId = max(0, (int)($_POST['licenca_id'] ?? 0));
-    $chaveLicenca = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($_POST['chave_licenca'] ?? '')));
-    $planoLicenca = (string)($_POST['plano_licenca_saas'] ?? 'enterprise');
-    $statusLicencaSaas = (string)($_POST['status_licenca_saas'] ?? 'teste');
+    if ($licencaId <= 0) {
+        rojex_redirect_assistente(1, 'erro', 'A licença é criada automaticamente junto com o novo escritório. Inicie o cadastro pelo Assistente.');
+    }
     $limiteUsuariosSaas = max(1, min(1000, (int)($_POST['limite_usuarios_saas'] ?? 100)));
     $limiteArmazenamentoSaas = max(1, min(100000, (int)($_POST['limite_armazenamento_saas'] ?? 50)));
     $ativadaEm = trim((string)($_POST['ativada_em'] ?? ''));
     $renovacaoEm = trim((string)($_POST['renovacao_em'] ?? ''));
     $observacoesLicenca = sgl_limpar_texto((string)($_POST['observacoes_licenca'] ?? ''), 1500);
-    $escritorioId = max(0, (int)($_POST['escritorio_id'] ?? 0));
-
-    if ($chaveLicenca === '' || strlen($chaveLicenca) < 8) {
-        sgl_redirect_cfg('administracao', 'erro', 'Informe uma chave de licença válida com pelo menos 8 caracteres.');
-    }
-    if (!in_array($planoLicenca, ['starter','professional','enterprise'], true)) {
-        $planoLicenca = 'enterprise';
-    }
-    if (!in_array($statusLicencaSaas, ['teste','ativa','suspensa','expirada','cancelada'], true)) {
-        $statusLicencaSaas = 'teste';
-    }
     foreach ([$ativadaEm, $renovacaoEm] as $dataLicencaSaas) {
         if ($dataLicencaSaas !== '') {
             $obj = DateTime::createFromFormat('Y-m-d', $dataLicencaSaas);
@@ -4456,36 +4112,32 @@ if ($acao_cfg === 'salvar_licenca_saas') {
     }
 
     try {
-        $stmtDup = $conn->prepare("SELECT id FROM licencas_saas WHERE chave_licenca = ? AND id <> ? LIMIT 1");
-        $stmtDup->bind_param('si', $chaveLicenca, $licencaId);
-        $stmtDup->execute();
-        $duplicada = $stmtDup->get_result()->fetch_assoc();
-        $stmtDup->close();
-        if ($duplicada) {
-            sgl_redirect_cfg('administracao', 'erro', 'Esta chave de licença já está cadastrada.');
+        $stmtAtual = $conn->prepare("SELECT escritorio_id, chave_licenca, plano, status FROM licencas_saas WHERE id=? LIMIT 1");
+        $stmtAtual->bind_param('i', $licencaId);
+        $stmtAtual->execute();
+        $licencaAtual = $stmtAtual->get_result()->fetch_assoc();
+        $stmtAtual->close();
+        if (!$licencaAtual) {
+            sgl_redirect_cfg('administracao', 'erro', 'Licença não encontrada.');
         }
 
+        // Vínculo, chave, plano e status não são recriados nesta tela. O vínculo
+        // e o plano nascem no Assistente; o status possui ação administrativa própria.
+        $escritorioId = (int)$licencaAtual['escritorio_id'];
         $escritorioVinculo = $escritorioId > 0 ? $escritorioId : null;
+        $chaveLicenca = (string)$licencaAtual['chave_licenca'];
+        $planoLicenca = (string)$licencaAtual['plano'];
+        $statusLicencaSaas = (string)$licencaAtual['status'];
         $ativadaSql = $ativadaEm !== '' ? $ativadaEm : null;
         $renovacaoSql = $renovacaoEm !== '' ? $renovacaoEm : null;
 
-        if ($licencaId > 0) {
-            $stmt = $conn->prepare("UPDATE licencas_saas SET escritorio_id = ?, chave_licenca = ?, plano = ?, status = ?, limite_usuarios = ?, limite_armazenamento_gb = ?, ativada_em = ?, renovacao_em = ?, observacoes = ? WHERE id = ?");
-            $stmt->bind_param('isssiisssi', $escritorioVinculo, $chaveLicenca, $planoLicenca, $statusLicencaSaas, $limiteUsuariosSaas, $limiteArmazenamentoSaas, $ativadaSql, $renovacaoSql, $observacoesLicenca, $licencaId);
-            $stmt->execute();
-            $stmt->close();
-            $registroLog = (string)$licencaId;
-            $acaoLog = 'Atualizou licença SaaS';
-            $mensagem = 'Licença atualizada com sucesso.';
-        } else {
-            $stmt = $conn->prepare("INSERT INTO licencas_saas (escritorio_id, chave_licenca, plano, status, limite_usuarios, limite_armazenamento_gb, ativada_em, renovacao_em, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            $stmt->bind_param('isssiisss', $escritorioVinculo, $chaveLicenca, $planoLicenca, $statusLicencaSaas, $limiteUsuariosSaas, $limiteArmazenamentoSaas, $ativadaSql, $renovacaoSql, $observacoesLicenca);
-            $stmt->execute();
-            $registroLog = (string)$stmt->insert_id;
-            $stmt->close();
-            $acaoLog = 'Criou licença SaaS';
-            $mensagem = 'Licença cadastrada com sucesso.';
-        }
+        $stmt = $conn->prepare("UPDATE licencas_saas SET limite_usuarios=?, limite_armazenamento_gb=?, ativada_em=?, renovacao_em=?, observacoes=? WHERE id=?");
+        $stmt->bind_param('iisssi', $limiteUsuariosSaas, $limiteArmazenamentoSaas, $ativadaSql, $renovacaoSql, $observacoesLicenca, $licencaId);
+        $stmt->execute();
+        $stmt->close();
+        $registroLog = (string)$licencaId;
+        $acaoLog = 'Atualizou vigência e limites de licença SaaS';
+        $mensagem = 'Vigência e limites da licença atualizados com sucesso.';
 
         // Se a licença pertence ao tenant desta instalação, mantém compatibilidade
         // com as chaves antigas já consumidas por outras telas do sistema.
@@ -5672,6 +5324,23 @@ $lixeira_itens = array_slice($lixeira_filtrados, $lixeira_offset, $lixeira_por_p
 
 $backup_resumo = sgl_backup_resumo($conn);
 
+$contextoMetricasTenant = null;
+if (!$ehUsuarioMaster
+    && function_exists('rojexContextoTenantValido')
+    && function_exists('rojexTenantId')
+    && function_exists('rojexEscritorioId')
+    && rojexContextoTenantValido()
+) {
+    $tenantMetricas = trim((string)rojexTenantId());
+    $escritorioMetricas = (int)rojexEscritorioId();
+    if ($tenantMetricas !== '' && $escritorioMetricas > 0) {
+        $contextoMetricasTenant = [
+            'tenant_id' => $tenantMetricas,
+            'escritorio_id' => $escritorioMetricas,
+        ];
+    }
+}
+
 $usuarios = [];
 if (sgl_tabela_existe($conn, 'usuarios')) {
     $camposUsuarios = ['id', 'nome', 'usuario', 'email', 'perfil', 'ativo'];
@@ -5682,12 +5351,40 @@ if (sgl_tabela_existe($conn, 'usuarios')) {
         }
     }
 
-    $resUsuarios = $conn->query(
-        "SELECT " . implode(', ', $camposUsuarios) . " FROM usuarios ORDER BY ativo DESC, nome ASC"
-    );
-    if ($resUsuarios) {
-        while ($u = $resUsuarios->fetch_assoc()) {
-            $usuarios[] = $u;
+    if ($ehUsuarioMaster) {
+        $resUsuarios = $conn->query(
+            "SELECT " . implode(', ', $camposUsuarios) . " FROM usuarios ORDER BY ativo DESC, nome ASC"
+        );
+        if ($resUsuarios) {
+            while ($u = $resUsuarios->fetch_assoc()) {
+                $usuarios[] = $u;
+            }
+        }
+    } elseif ($contextoMetricasTenant && sgl_tabela_existe($conn, 'usuarios_escritorios_saas')) {
+        try {
+            $camposUsuariosTenant = array_map(
+                static fn(string $campo): string => 'u.`' . $campo . '`',
+                $camposUsuarios
+            );
+            $stmtUsuarios = $conn->prepare(
+                "SELECT DISTINCT " . implode(', ', $camposUsuariosTenant) . "
+                   FROM usuarios u
+             INNER JOIN usuarios_escritorios_saas ue ON ue.usuario_id=u.id
+                  WHERE ue.tenant_id=? AND ue.escritorio_id=? AND ue.ativo=1
+                  ORDER BY u.ativo DESC, u.nome ASC"
+            );
+            $tenantUsuarios = $contextoMetricasTenant['tenant_id'];
+            $escritorioUsuarios = $contextoMetricasTenant['escritorio_id'];
+            $stmtUsuarios->bind_param('si', $tenantUsuarios, $escritorioUsuarios);
+            $stmtUsuarios->execute();
+            $resUsuarios = $stmtUsuarios->get_result();
+            while ($u = $resUsuarios->fetch_assoc()) {
+                $usuarios[] = $u;
+            }
+            $stmtUsuarios->close();
+        } catch (Throwable $e) {
+            // Falha segura: nunca retorna a lista global para uma sessão tenant.
+            $usuarios = [];
         }
     }
 }
@@ -5704,6 +5401,20 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
         $whereLogs = [];
         $tiposLogs = '';
         $valoresLogs = [];
+
+        if (!$ehUsuarioMaster) {
+            if (!$contextoMetricasTenant
+                || !sgl_coluna_existe($conn, 'logs_sistema', 'tenant_id')
+                || !sgl_coluna_existe($conn, 'logs_sistema', 'escritorio_id')
+            ) {
+                throw new RuntimeException('Contexto tenant indisponível para a auditoria.');
+            }
+            $whereLogs[] = 'l.tenant_id = ?';
+            $whereLogs[] = 'l.escritorio_id = ?';
+            $tiposLogs .= 'si';
+            $valoresLogs[] = $contextoMetricasTenant['tenant_id'];
+            $valoresLogs[] = $contextoMetricasTenant['escritorio_id'];
+        }
 
         if ($logDataInicio !== '') {
             $whereLogs[] = "l.criado_em >= ?";
@@ -5808,13 +5519,60 @@ $totalAdvogadosUsuarios = count(array_filter($usuarios, fn($u) => ($u['perfil'] 
 $totalFinanceiroUsuarios = count(array_filter($usuarios, fn($u) => ($u['perfil'] ?? '') === 'Financeiro'));
 $limiteUsuariosLicenca = max(1, min(100, (int)$cfg['limite_usuarios_licenca']));
 $percentualLicencaUsuarios = min(100, (int)round(($totalUsuarios / $limiteUsuariosLicenca) * 100));
-$totalLogs = sgl_select_count($conn, "SELECT COUNT(*) AS total FROM logs_sistema");
+$totalLogs = 0;
+if ($ehUsuarioMaster) {
+    $totalLogs = sgl_select_count($conn, "SELECT COUNT(*) AS total FROM logs_sistema");
+} elseif ($contextoMetricasTenant
+    && sgl_tabela_existe($conn, 'logs_sistema')
+    && sgl_coluna_existe($conn, 'logs_sistema', 'tenant_id')
+    && sgl_coluna_existe($conn, 'logs_sistema', 'escritorio_id')
+) {
+    try {
+        $tenantTotalLogs = $contextoMetricasTenant['tenant_id'];
+        $escritorioTotalLogs = $contextoMetricasTenant['escritorio_id'];
+        $stmtTotalLogs = $conn->prepare(
+            "SELECT COUNT(*) AS total FROM logs_sistema WHERE tenant_id=? AND escritorio_id=?"
+        );
+        $stmtTotalLogs->bind_param('si', $tenantTotalLogs, $escritorioTotalLogs);
+        $stmtTotalLogs->execute();
+        $totalLogs = (int)($stmtTotalLogs->get_result()->fetch_assoc()['total'] ?? 0);
+        $stmtTotalLogs->close();
+    } catch (Throwable $e) {
+        $totalLogs = 0;
+    }
+}
 $inventarioLogs = [];
 if (sgl_tabela_existe($conn, 'logs_sistema')) {
     try {
-        $resInv = $conn->query("SELECT COALESCE(l.usuario_nome, u.nome, 'Sistema') AS usuario_nome, COALESCE(l.usuario_perfil, u.perfil, '-') AS perfil, COALESCE(l.tabela, '-') AS modulo, COUNT(*) AS total, MAX(l.criado_em) AS ultimo_registro FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id GROUP BY usuario_nome, perfil, modulo ORDER BY total DESC, ultimo_registro DESC LIMIT 30");
-        if ($resInv) { while ($i = $resInv->fetch_assoc()) { $inventarioLogs[] = $i; } }
-    } catch (Throwable $e) {}
+        if ($ehUsuarioMaster) {
+            $resInv = $conn->query("SELECT COALESCE(l.usuario_nome, u.nome, 'Sistema') AS usuario_nome, COALESCE(l.usuario_perfil, u.perfil, '-') AS perfil, COALESCE(l.tabela, '-') AS modulo, COUNT(*) AS total, MAX(l.criado_em) AS ultimo_registro FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id GROUP BY usuario_nome, perfil, modulo ORDER BY total DESC, ultimo_registro DESC LIMIT 30");
+            if ($resInv) { while ($i = $resInv->fetch_assoc()) { $inventarioLogs[] = $i; } }
+        } elseif ($contextoMetricasTenant
+            && sgl_coluna_existe($conn, 'logs_sistema', 'tenant_id')
+            && sgl_coluna_existe($conn, 'logs_sistema', 'escritorio_id')
+        ) {
+            $tenantInventario = $contextoMetricasTenant['tenant_id'];
+            $escritorioInventario = $contextoMetricasTenant['escritorio_id'];
+            $stmtInv = $conn->prepare(
+                "SELECT COALESCE(l.usuario_nome, u.nome, 'Sistema') AS usuario_nome,
+                        COALESCE(l.usuario_perfil, u.perfil, '-') AS perfil,
+                        COALESCE(l.tabela, '-') AS modulo,
+                        COUNT(*) AS total, MAX(l.criado_em) AS ultimo_registro
+                   FROM logs_sistema l
+              LEFT JOIN usuarios u ON u.id=l.usuario_id
+                  WHERE l.tenant_id=? AND l.escritorio_id=?
+                  GROUP BY usuario_nome, perfil, modulo
+                  ORDER BY total DESC, ultimo_registro DESC LIMIT 30"
+            );
+            $stmtInv->bind_param('si', $tenantInventario, $escritorioInventario);
+            $stmtInv->execute();
+            $resInv = $stmtInv->get_result();
+            while ($i = $resInv->fetch_assoc()) { $inventarioLogs[] = $i; }
+            $stmtInv->close();
+        }
+    } catch (Throwable $e) {
+        $inventarioLogs = [];
+    }
 }
 $totalLixeira = count($lixeira_todos);
 
@@ -5868,13 +5626,21 @@ $licencasSaas = [];
 $licencaEditar = null;
 $escritorioEditar = null;
 $escritorioBusca = trim((string)($_GET['escritorio_q'] ?? ''));
-$escritorioStatusFiltro = trim((string)($_GET['escritorio_status'] ?? ''));
+$escritorioStatusFiltro = trim((string)($_GET['escritorio_status'] ?? 'operacionais'));
 $escritorioPlanoFiltro = trim((string)($_GET['escritorio_plano'] ?? ''));
 if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'escritorios_saas')) {
     try {
         $sqlEscritorios = "SELECT e.*,
             (SELECT COUNT(*) FROM licencas_saas l WHERE l.escritorio_id=e.id) AS total_licencas,
-            (SELECT COUNT(*) FROM licencas_saas l WHERE l.escritorio_id=e.id AND l.status='ativa') AS licencas_ativas
+            (SELECT COUNT(*) FROM licencas_saas l WHERE l.escritorio_id=e.id
+              AND l.status IN ('teste','ativa')
+              AND (l.renovacao_em IS NULL OR l.renovacao_em >= CURDATE())) AS licencas_validas,
+            (SELECT COUNT(*) FROM licencas_saas l WHERE l.escritorio_id=e.id
+              AND l.status IN ('teste','ativa') AND l.plano<>e.plano) AS planos_divergentes,
+            (SELECT COUNT(*) FROM usuarios_escritorios_saas ue
+              INNER JOIN usuarios u ON u.id=ue.usuario_id
+              WHERE ue.escritorio_id=e.id AND LOWER(ue.papel)='administrador'
+                AND ue.principal=1 AND ue.ativo=1 AND u.ativo=1) AS administradores_principais
             FROM escritorios_saas e WHERE 1=1";
         $tiposEscritorios = '';
         $valoresEscritorios = [];
@@ -5884,7 +5650,9 @@ if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'escritorios_saas')) {
             $tiposEscritorios .= 'ssss';
             array_push($valoresEscritorios, $buscaLike, $buscaLike, $buscaLike, $buscaLike);
         }
-        if (in_array($escritorioStatusFiltro, ['implantacao','ativo','suspenso','bloqueado','encerrado'], true)) {
+        if ($escritorioStatusFiltro === 'operacionais') {
+            $sqlEscritorios .= " AND e.status <> 'encerrado'";
+        } elseif (in_array($escritorioStatusFiltro, ['implantacao','ativo','suspenso','bloqueado','encerrado'], true)) {
             $sqlEscritorios .= " AND e.status = ?";
             $tiposEscritorios .= 's';
             $valoresEscritorios[] = $escritorioStatusFiltro;
@@ -5914,7 +5682,7 @@ if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'escritorios_saas')) {
 }
 if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'licencas_saas')) {
     try {
-        $res = $conn->query("SELECT l.*, e.nome AS escritorio_nome, e.tenant_id FROM licencas_saas l LEFT JOIN escritorios_saas e ON e.id = l.escritorio_id ORDER BY l.id DESC");
+        $res = $conn->query("SELECT l.*, e.nome AS escritorio_nome, e.tenant_id, e.plano AS escritorio_plano FROM licencas_saas l LEFT JOIN escritorios_saas e ON e.id = l.escritorio_id ORDER BY l.id DESC");
         if ($res) { while ($row = $res->fetch_assoc()) { $licencasSaas[] = $row; } }
         $editarLicencaId = max(0, (int)($_GET['editar_licenca'] ?? 0));
         if ($editarLicencaId > 0) {
@@ -7675,42 +7443,36 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
     </div>
     <div class="card-body">
         <div class="alert alert-info small border-0">
-            A licença vinculada ao tenant desta instalação permanece sincronizada com as configurações antigas, garantindo compatibilidade com os módulos existentes.
+            <strong>Criação automática:</strong> cada licença nasce junto com o escritório pelo Assistente. Esta central serve apenas para acompanhar, renovar, ajustar limites e alterar a situação de licenças existentes.
         </div>
+        <?php if (!$licencaEditar): ?>
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 border rounded p-3 bg-light mb-4">
+            <div>
+                <h6 class="mb-1">Novo escritório com licença automática</h6>
+                <p class="mb-0 text-muted small">O provisionamento também cria assinatura, módulos e administrador principal, com reversão integral se alguma etapa falhar.</p>
+            </div>
+            <a class="btn btn-success" href="?mod=configuracoes&tab=novo_escritorio&etapa=1"><i class="bi bi-building-add me-1"></i> Abrir Assistente</a>
+        </div>
+        <?php else: ?>
         <form method="post" class="row g-3 mb-4">
             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
             <input type="hidden" name="acao_cfg" value="salvar_licenca_saas">
             <input type="hidden" name="licenca_id" value="<?=(int)($licencaEditar['id'] ?? 0)?>">
             <div class="col-lg-4">
                 <label class="form-label">Escritório / tenant</label>
-                <select name="escritorio_id" class="form-select" required>
-                    <option value="">Selecione</option>
-                    <?php foreach ($escritoriosSaas as $escritorioLicenca): ?>
-                        <option value="<?=(int)$escritorioLicenca['id']?>" <?=((int)($licencaEditar['escritorio_id'] ?? $escritorioAtualSaasId)===(int)$escritorioLicenca['id'])?'selected':''?>>
-                            <?=htmlspecialchars($escritorioLicenca['nome'])?> — <?=htmlspecialchars($escritorioLicenca['tenant_id'])?>
-                        </option>
-                    <?php endforeach; ?>
-                </select>
+                <input class="form-control bg-light" readonly value="<?=htmlspecialchars((string)($licencaEditar['escritorio_nome'] ?? 'Sem vínculo'))?> — <?=htmlspecialchars((string)($licencaEditar['tenant_id'] ?? '-'))?>">
             </div>
             <div class="col-lg-4">
                 <label class="form-label">Chave da licença</label>
-                <input type="text" name="chave_licenca" class="form-control font-monospace" maxlength="120" required value="<?=htmlspecialchars((string)($licencaEditar['chave_licenca'] ?? ''))?>" placeholder="ROJEX-LICENCA-...">
+                <input type="text" class="form-control font-monospace bg-light" readonly value="<?=htmlspecialchars((string)($licencaEditar['chave_licenca'] ?? ''))?>">
             </div>
             <div class="col-lg-2">
                 <label class="form-label">Plano</label>
-                <select name="plano_licenca_saas" class="form-select">
-                    <?php foreach (['starter'=>'Starter','professional'=>'Professional','enterprise'=>'Enterprise'] as $valorPlano=>$nomePlano): ?>
-                        <option value="<?=$valorPlano?>" <?=(($licencaEditar['plano'] ?? 'enterprise')===$valorPlano)?'selected':''?>><?=$nomePlano?></option>
-                    <?php endforeach; ?>
-                </select>
+                <input class="form-control bg-light" readonly value="<?=htmlspecialchars(ucfirst((string)($licencaEditar['plano'] ?? '-')))?>">
             </div>
             <div class="col-lg-2">
                 <label class="form-label">Status</label>
-                <select name="status_licenca_saas" class="form-select">
-                    <?php foreach (['teste'=>'Teste','ativa'=>'Ativa','suspensa'=>'Suspensa','expirada'=>'Expirada','cancelada'=>'Cancelada'] as $valorStatus=>$nomeStatus): ?>
-                        <option value="<?=$valorStatus?>" <?=(($licencaEditar['status'] ?? 'teste')===$valorStatus)?'selected':''?>><?=$nomeStatus?></option>
-                    <?php endforeach; ?>
-                </select>
+                <input class="form-control bg-light" readonly value="<?=htmlspecialchars(ucfirst((string)($licencaEditar['status'] ?? '-')))?>">
             </div>
             <div class="col-md-3"><label class="form-label">Limite de usuários</label><input type="number" name="limite_usuarios_saas" class="form-control" min="1" max="1000" value="<?=(int)($licencaEditar['limite_usuarios'] ?? 100)?>"></div>
             <div class="col-md-3"><label class="form-label">Armazenamento (GB)</label><input type="number" name="limite_armazenamento_saas" class="form-control" min="1" max="100000" value="<?=(int)($licencaEditar['limite_armazenamento_gb'] ?? 50)?>"></div>
@@ -7718,10 +7480,11 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
             <div class="col-md-3"><label class="form-label">Renovação</label><input type="date" name="renovacao_em" class="form-control" value="<?=htmlspecialchars((string)($licencaEditar['renovacao_em'] ?? ''))?>"></div>
             <div class="col-12"><label class="form-label">Observações administrativas</label><textarea name="observacoes_licenca" class="form-control" rows="2" maxlength="1500"><?=htmlspecialchars((string)($licencaEditar['observacoes'] ?? ''))?></textarea></div>
             <div class="col-12 d-flex gap-2">
-                <button class="btn btn-primary"><i class="bi bi-save me-1"></i><?=$licencaEditar?'Atualizar licença':'Cadastrar licença'?></button>
-                <?php if ($licencaEditar): ?><a href="?mod=configuracoes&tab=administracao" class="btn btn-outline-secondary">Cancelar edição</a><?php endif; ?>
+                <button class="btn btn-primary"><i class="bi bi-save me-1"></i>Atualizar vigência e limites</button>
+                <a href="?mod=configuracoes&tab=administracao" class="btn btn-outline-secondary">Cancelar edição</a>
             </div>
         </form>
+        <?php endif; ?>
 
         <div class="table-responsive">
             <table class="table table-hover align-middle mb-0">
@@ -7735,7 +7498,12 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                     <tr>
                         <td><strong><?=htmlspecialchars((string)($licencaItem['escritorio_nome'] ?? 'Sem vínculo'))?></strong><br><small class="text-muted"><?=htmlspecialchars((string)($licencaItem['tenant_id'] ?? '-'))?></small></td>
                         <td><code><?=htmlspecialchars($licencaItem['chave_licenca'])?></code></td>
-                        <td><?=htmlspecialchars(ucfirst($licencaItem['plano']))?></td>
+                        <td>
+                            <?=htmlspecialchars(ucfirst($licencaItem['plano']))?>
+                            <?php if (!empty($licencaItem['escritorio_plano']) && $licencaItem['escritorio_plano'] !== $licencaItem['plano']): ?>
+                                <br><span class="badge bg-danger">Divergente do cadastro</span>
+                            <?php endif; ?>
+                        </td>
                         <td><span class="badge bg-<?=$statusBadge?>"><?=htmlspecialchars($licencaItem['status'])?></span></td>
                         <td><small><?=(int)$licencaItem['limite_usuarios']?> usuário(s)<br><?=(int)$licencaItem['limite_armazenamento_gb']?> GB</small></td>
                         <td><small>Ativação: <?=htmlspecialchars($licencaItem['ativada_em'] ?: '-')?><br>Renovação: <?=htmlspecialchars($licencaItem['renovacao_em'] ?: '-')?></small></td>
@@ -7767,26 +7535,28 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
         <span class="badge bg-light text-dark"><?=count($escritoriosSaas)?> resultado(s)</span>
     </div>
     <div class="card-body">
-        <div class="alert alert-warning small border-0">
-            Esta etapa administra o cadastro central dos tenants. O isolamento físico/lógico dos dados dos módulos será aplicado em etapa específica de migração, sem misturar registros atuais.
+        <div class="alert alert-primary small border-0 d-flex flex-wrap justify-content-between align-items-center gap-3">
+            <div><strong>Fluxo único e seguro:</strong> novos escritórios são provisionados pelo Assistente, que cria automaticamente tenant, assinatura, licença, módulos e administrador.</div>
+            <a class="btn btn-primary btn-sm" href="?mod=configuracoes&tab=novo_escritorio&etapa=1"><i class="bi bi-building-add me-1"></i> Novo Escritório</a>
         </div>
 
         <form method="get" class="row g-2 mb-4">
             <input type="hidden" name="mod" value="configuracoes">
             <input type="hidden" name="tab" value="administracao">
             <div class="col-lg-5"><input type="search" name="escritorio_q" class="form-control" value="<?=htmlspecialchars($escritorioBusca)?>" placeholder="Buscar por nome, tenant, documento ou responsável"></div>
-            <div class="col-lg-2"><select name="escritorio_status" class="form-select"><option value="">Todos os status</option><?php foreach(['implantacao'=>'Implantação','ativo'=>'Ativo','suspenso'=>'Suspenso','bloqueado'=>'Bloqueado','encerrado'=>'Encerrado'] as $v=>$n): ?><option value="<?=$v?>" <?=$escritorioStatusFiltro===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
+            <div class="col-lg-2"><select name="escritorio_status" class="form-select"><option value="operacionais" <?=$escritorioStatusFiltro==='operacionais'?'selected':''?>>Operacionais (padrão)</option><option value="" <?=$escritorioStatusFiltro===''?'selected':''?>>Todos, inclusive encerrados</option><?php foreach(['implantacao'=>'Implantação','ativo'=>'Ativo','suspenso'=>'Suspenso','bloqueado'=>'Bloqueado','encerrado'=>'Encerrado'] as $v=>$n): ?><option value="<?=$v?>" <?=$escritorioStatusFiltro===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
             <div class="col-lg-2"><select name="escritorio_plano" class="form-select"><option value="">Todos os planos</option><?php foreach(['starter'=>'Starter','professional'=>'Professional','enterprise'=>'Enterprise'] as $v=>$n): ?><option value="<?=$v?>" <?=$escritorioPlanoFiltro===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
             <div class="col-lg-3 d-flex gap-2"><button class="btn btn-outline-primary flex-grow-1"><i class="bi bi-search"></i> Filtrar</button><a href="?mod=configuracoes&tab=administracao" class="btn btn-outline-secondary">Limpar</a></div>
         </form>
 
+        <?php if ($escritorioEditar): ?>
         <form method="post" class="row g-3 border rounded p-3 bg-light mb-4">
             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
             <input type="hidden" name="acao_cfg" value="salvar_escritorio_saas">
             <input type="hidden" name="escritorio_saas_id" value="<?=(int)($escritorioEditar['id'] ?? 0)?>">
-            <div class="col-12"><h6 class="mb-0"><?=$escritorioEditar?'Editar escritório':'Cadastrar novo escritório'?></h6></div>
+            <div class="col-12"><h6 class="mb-0">Editar dados cadastrais do escritório</h6></div>
             <div class="col-lg-4"><label class="form-label">Nome do escritório *</label><input name="nome_escritorio_saas" class="form-control" maxlength="180" required value="<?=htmlspecialchars((string)($escritorioEditar['nome'] ?? ''))?>"></div>
-            <div class="col-lg-4"><label class="form-label">Tenant ID</label><input name="tenant_id_saas" class="form-control font-monospace" maxlength="80" value="<?=htmlspecialchars((string)($escritorioEditar['tenant_id'] ?? ''))?>" placeholder="Gerado automaticamente se vazio"></div>
+            <div class="col-lg-4"><label class="form-label">Tenant ID</label><input name="tenant_id_saas" class="form-control font-monospace bg-light" readonly value="<?=htmlspecialchars((string)($escritorioEditar['tenant_id'] ?? ''))?>"><div class="form-text">Identificador permanente criado pelo Assistente.</div></div>
             <div class="col-lg-4"><label class="form-label">CPF/CNPJ</label><input name="documento_escritorio_saas" class="form-control" maxlength="30" value="<?=htmlspecialchars((string)($escritorioEditar['documento'] ?? ''))?>"></div>
             <div class="col-lg-3"><label class="form-label">Responsável</label><input name="responsavel_escritorio_saas" class="form-control" maxlength="140" value="<?=htmlspecialchars((string)($escritorioEditar['responsavel'] ?? ''))?>"></div>
             <div class="col-lg-3"><label class="form-label">E-mail</label><input type="email" name="email_escritorio_saas" class="form-control" maxlength="140" value="<?=htmlspecialchars((string)($escritorioEditar['email'] ?? ''))?>"></div>
@@ -7794,26 +7564,32 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
             <div class="col-lg-2"><label class="form-label">Cidade</label><input name="cidade_escritorio_saas" class="form-control" maxlength="100" value="<?=htmlspecialchars((string)($escritorioEditar['cidade'] ?? ''))?>"></div>
             <div class="col-lg-2"><label class="form-label">UF</label><input name="uf_escritorio_saas" class="form-control text-uppercase" maxlength="2" value="<?=htmlspecialchars((string)($escritorioEditar['uf'] ?? ''))?>"></div>
             <div class="col-lg-4"><label class="form-label">Subdomínio</label><input name="subdominio_escritorio_saas" class="form-control" maxlength="180" value="<?=htmlspecialchars((string)($escritorioEditar['subdominio'] ?? ''))?>" placeholder="cliente.rojex.ai"></div>
-            <div class="col-lg-2"><label class="form-label">Plano</label><select name="plano_escritorio_saas" class="form-select"><?php foreach(['starter'=>'Starter','professional'=>'Professional','enterprise'=>'Enterprise'] as $v=>$n): ?><option value="<?=$v?>" <?=($escritorioEditar['plano'] ?? 'enterprise')===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
-            <div class="col-lg-2"><label class="form-label">Status</label><select name="status_escritorio_saas" class="form-select"><?php foreach(['implantacao'=>'Implantação','ativo'=>'Ativo','suspenso'=>'Suspenso','bloqueado'=>'Bloqueado','encerrado'=>'Encerrado'] as $v=>$n): ?><option value="<?=$v?>" <?=($escritorioEditar['status'] ?? 'implantacao')===$v?'selected':''?>><?=$n?></option><?php endforeach; ?></select></div>
+            <div class="col-lg-2"><label class="form-label">Plano</label><input class="form-control bg-light" readonly value="<?=htmlspecialchars(ucfirst((string)($escritorioEditar['plano'] ?? '-')))?>"><div class="form-text">Vinculado à contratação.</div></div>
+            <div class="col-lg-2"><label class="form-label">Status</label><input class="form-control bg-light" readonly value="<?=htmlspecialchars(ucfirst((string)($escritorioEditar['status'] ?? '-')))?>"><div class="form-text">Altere pela ação Status.</div></div>
             <div class="col-lg-4"><label class="form-label">Observações</label><input name="observacoes_escritorio_saas" class="form-control" maxlength="1500" value="<?=htmlspecialchars((string)($escritorioEditar['observacoes'] ?? ''))?>"></div>
-            <div class="col-12 d-flex gap-2"><button class="btn btn-dark"><i class="bi bi-save me-1"></i><?=$escritorioEditar?'Atualizar escritório':'Cadastrar escritório'?></button><?php if($escritorioEditar): ?><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=administracao">Cancelar edição</a><?php endif; ?></div>
+            <div class="col-12 d-flex gap-2"><button class="btn btn-dark"><i class="bi bi-save me-1"></i>Atualizar dados cadastrais</button><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=administracao">Cancelar edição</a></div>
         </form>
+        <?php endif; ?>
 
         <div class="table-responsive">
             <table class="table table-hover align-middle">
-                <thead class="table-light"><tr><th>Escritório / Tenant</th><th>Responsável</th><th>Plano</th><th>Status</th><th>Licenças</th><th>Atualização</th><th class="text-end">Ações</th></tr></thead>
+                <thead class="table-light"><tr><th>Escritório / Tenant</th><th>Responsável</th><th>Plano</th><th>Situação</th><th>Prontidão</th><th>Atualização</th><th class="text-end">Ações</th></tr></thead>
                 <tbody>
                 <?php if(!$escritoriosSaas): ?><tr><td colspan="7" class="text-center text-muted py-4">Nenhum escritório encontrado.</td></tr>
                 <?php else: foreach($escritoriosSaas as $eItem):
                     $badgeE=['ativo'=>'success','implantacao'=>'info','suspenso'=>'warning','bloqueado'=>'danger','encerrado'=>'secondary'][$eItem['status']] ?? 'secondary';
+                    $provisionamentoCompleto = (int)$eItem['licencas_validas'] > 0
+                        && (int)$eItem['administradores_principais'] > 0
+                        && (int)$eItem['planos_divergentes'] === 0;
+                    $prontidaoRotulo = $eItem['status'] === 'encerrado' ? 'Encerrado' : ($provisionamentoCompleto ? 'Pronto' : 'Incompleto');
+                    $prontidaoClasse = $eItem['status'] === 'encerrado' ? 'secondary' : ($provisionamentoCompleto ? 'success' : 'danger');
                 ?>
                 <tr>
                     <td><strong><?=htmlspecialchars($eItem['nome'])?></strong><br><code><?=htmlspecialchars($eItem['tenant_id'])?></code><br><small class="text-muted"><?=htmlspecialchars(trim(($eItem['cidade'] ?? '').' '.($eItem['uf'] ?? '')) ?: '-')?></small></td>
                     <td><?=htmlspecialchars($eItem['responsavel'] ?: '-')?><br><small class="text-muted"><?=htmlspecialchars($eItem['email'] ?: '-')?></small></td>
                     <td><?=htmlspecialchars(ucfirst($eItem['plano']))?></td>
                     <td><span class="badge bg-<?=$badgeE?>"><?=htmlspecialchars($eItem['status'])?></span></td>
-                    <td><small><?=(int)$eItem['total_licencas']?> total<br><?=(int)$eItem['licencas_ativas']?> ativa(s)</small></td>
+                    <td><span class="badge bg-<?=$prontidaoClasse?>"><?=$prontidaoRotulo?></span><br><small class="text-muted"><?=(int)$eItem['licencas_validas']?> licença(s) válida(s)<br><?=(int)$eItem['administradores_principais']?> administrador principal<?php if ((int)$eItem['planos_divergentes'] > 0): ?><br><span class="text-danger">Plano divergente</span><?php endif; ?></small></td>
                     <td><small><?=!empty($eItem['atualizado_em'])?date('d/m/Y H:i',strtotime($eItem['atualizado_em'])):'-'?></small></td>
                     <td class="text-end">
                         <a href="?mod=configuracoes&tab=administracao&editar_escritorio=<?=(int)$eItem['id']?>" class="btn btn-sm btn-outline-primary" title="Editar"><i class="bi bi-pencil"></i></a>
@@ -9152,10 +8928,12 @@ function rojexEditarAtualizacao(dados) {
                                         <button class="btn btn-sm btn-outline-primary"><i class="bi bi-shield-check me-1"></i>Verificar</button>
                                     </form>
                                     <?php if ($logBackupVerificado): ?>
-                                        <a class="btn btn-sm btn-success"
-                                           href="?mod=configuracoes&tab=logs&acao_cfg=baixar_log_backup&backup_id=<?=(int)$logBackupItem['id']?>">
-                                            <i class="bi bi-download me-1"></i>Baixar ZIP
-                                        </a>
+                                        <form method="POST">
+                                            <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                                            <input type="hidden" name="acao_cfg" value="baixar_log_backup">
+                                            <input type="hidden" name="backup_id" value="<?=(int)$logBackupItem['id']?>">
+                                            <button class="btn btn-sm btn-success"><i class="bi bi-download me-1"></i>Baixar ZIP</button>
+                                        </form>
                                     <?php endif; ?>
                                 </div>
                                 <?php if ($logBackupVerificado && $logBackupBaixado): ?>

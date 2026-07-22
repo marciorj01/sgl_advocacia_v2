@@ -318,23 +318,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $usuarioLocalizado = null;
             $usuarioInativo = null;
             $tabelaOrigem = null;
+            $validacaoSenha = [
+                'ok' => false,
+                'legado' => false,
+                'tipo' => 'ausente',
+            ];
+            $candidatosAtivosValidos = [
+                'usuarios' => [],
+                'usuarios_sistema' => [],
+            ];
+            $candidatosInativosValidos = [
+                'usuarios' => [],
+                'usuarios_sistema' => [],
+            ];
+            $totalRegistrosLocalizados = 0;
 
             $consultasLogin = [
                 'usuarios' =>
                     "SELECT id, nome, usuario, senha, perfil, status
                      FROM usuarios
-                     WHERE usuario = ?
-                     LIMIT 1",
+                     WHERE usuario = ?",
                 'usuarios_sistema' =>
                     "SELECT id, nome, usuario, senha, perfil, status
                      FROM usuarios_sistema
-                     WHERE usuario = ?
-                     LIMIT 1",
-                'usuarios_sistema_backup_login' =>
-                    "SELECT id, nome, usuario, senha, perfil, status
-                     FROM usuarios_sistema_backup_login
-                     WHERE usuario = ?
-                     LIMIT 1",
+                     WHERE usuario = ?",
             ];
 
             foreach ($consultasLogin as $nomeTabela => $sql) {
@@ -348,31 +355,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $stmt->bind_param('s', $usuario);
                     $stmt->execute();
                     $result = $stmt->get_result();
-                    $registro = $result ? $result->fetch_assoc() : null;
 
-                    if ($result instanceof mysqli_result) {
-                        $result->free();
-                    }
+                    while ($result && ($registro = $result->fetch_assoc())) {
+                        $totalRegistrosLocalizados++;
 
-                    $stmt->close();
+                        if ($usuarioLocalizado === null) {
+                            $usuarioLocalizado = $registro;
+                        }
 
-                    if ($registro) {
-                        $usuarioLocalizado = $registro;
-                        $tabelaOrigem = $nomeTabela;
+                        $validacaoCandidato = rojexValidarSenhaCompatível(
+                            $senha,
+                            (string)($registro['senha'] ?? '')
+                        );
+
+                        if (!$validacaoCandidato['ok']) {
+                            continue;
+                        }
+
                         $status = trim((string)($registro['status'] ?? 'Ativo'));
+                        $candidato = [
+                            'registro' => $registro,
+                            'tabela' => $nomeTabela,
+                            'validacao' => $validacaoCandidato,
+                        ];
 
                         if (
                             $status === ''
                             || strcasecmp($status, 'Ativo') === 0
                             || $status === '1'
                         ) {
-                            $user = $registro;
+                            $candidatosAtivosValidos[$nomeTabela][] = $candidato;
                         } else {
-                            $usuarioInativo = $registro;
+                            $candidatosInativosValidos[$nomeTabela][] = $candidato;
                         }
-
-                        break;
                     }
+
+                    if ($result instanceof mysqli_result) {
+                        $result->free();
+                    }
+
+                    $stmt->close();
                 } catch (Throwable $eTabela) {
                     error_log(
                         'ROJEX LOGIN consulta ignorada em ' .
@@ -381,7 +403,89 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
 
-            if ($usuarioInativo) {
+            $ativosUsuarios = $candidatosAtivosValidos['usuarios'];
+            $ativosSistema = $candidatosAtivosValidos['usuarios_sistema'];
+            $inativosUsuarios = $candidatosInativosValidos['usuarios'];
+            $inativosSistema = $candidatosInativosValidos['usuarios_sistema'];
+
+            /*
+             * Um mesmo usuário pode estar legitimamente espelhado nas duas
+             * tabelas oficiais. Isso não é duplicidade: a fonte principal é
+             * `usuarios` e `usuarios_sistema` funciona como alternativa.
+             *
+             * O acesso só é ambíguo quando a mesma fonte possui mais de um
+             * cadastro ativo que aceita a credencial ou quando os dois
+             * espelhos válidos discordam sobre o perfil de autorização.
+             */
+            $duplicidadeMesmaFonte =
+                count($ativosUsuarios) > 1
+                || count($ativosSistema) > 1;
+            $conflitoPerfil = false;
+
+            if (
+                count($ativosUsuarios) === 1
+                && count($ativosSistema) === 1
+            ) {
+                $perfilUsuarios = rojexNormalizarPerfil(
+                    (string)($ativosUsuarios[0]['registro']['perfil'] ?? '')
+                );
+                $perfilSistema = rojexNormalizarPerfil(
+                    (string)($ativosSistema[0]['registro']['perfil'] ?? '')
+                );
+                $conflitoPerfil = $perfilUsuarios !== $perfilSistema;
+            }
+
+            $loginAmbiguo = $duplicidadeMesmaFonte || $conflitoPerfil;
+            $candidatoSelecionado = null;
+
+            if (!$loginAmbiguo && count($ativosUsuarios) === 1) {
+                $candidatoSelecionado = $ativosUsuarios[0];
+            } elseif (!$loginAmbiguo && count($ativosSistema) === 1) {
+                $candidatoSelecionado = $ativosSistema[0];
+            }
+
+            if ($candidatoSelecionado !== null) {
+                $user = $candidatoSelecionado['registro'];
+                $tabelaOrigem = $candidatoSelecionado['tabela'];
+                $validacaoSenha = $candidatoSelecionado['validacao'];
+                $usuarioLocalizado = $user;
+            } elseif (
+                !$loginAmbiguo
+                && count($ativosUsuarios) === 0
+                && count($ativosSistema) === 0
+                && (count($inativosUsuarios) > 0 || count($inativosSistema) > 0)
+            ) {
+                $candidatoInativo = count($inativosUsuarios) > 0
+                    ? $inativosUsuarios[0]
+                    : $inativosSistema[0];
+                $usuarioInativo = $candidatoInativo['registro'];
+                $usuarioLocalizado = $usuarioInativo;
+            }
+
+            if ($loginAmbiguo) {
+                rojexLoginRegistrarFalhaLocal();
+                rojexLoginAplicarAtrasoSeguro(
+                    (int)($_SESSION['login_falhas_total'] ?? 1)
+                );
+
+                rojexRegistrarEventoLogin(
+                    $conn,
+                    'Login recusado por duplicidade de credencial',
+                    'NEGADO',
+                    'ERRO',
+                    $usuario,
+                    $usuarioLocalizado,
+                    'Foi encontrada duplicidade ativa na mesma tabela ou conflito de perfil entre os cadastros oficiais. Total de registros localizados: ' .
+                    $totalRegistrosLocalizados . '.'
+                );
+
+                error_log(
+                    '[ROJEX LOGIN AMBIGUIDADE] Duplicidade na mesma fonte ou conflito de perfil para o usuário informado.'
+                );
+
+                $mensagem_erro = 'Usuário ou senha inválidos.';
+                $conn->close();
+            } elseif ($usuarioInativo) {
                 rojexLoginRegistrarFalhaLocal();
                 rojexLoginAplicarAtrasoSeguro(
                     (int)($_SESSION['login_falhas_total'] ?? 1)
@@ -400,18 +504,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $mensagem_erro = 'Usuário ou senha inválidos.';
                 $conn->close();
             } else {
-                $validacaoSenha = [
-                    'ok' => false,
-                    'legado' => false,
-                    'tipo' => 'ausente',
-                ];
-
-                if ($user) {
-                    $validacaoSenha = rojexValidarSenhaCompatível(
-                        $senha,
-                        (string)$user['senha']
-                    );
-                } else {
+                if (!$user && $totalRegistrosLocalizados === 0) {
                     /*
                      * Equaliza parcialmente o custo temporal para usuário inexistente.
                      * O hash é estático e não representa nenhuma credencial real.

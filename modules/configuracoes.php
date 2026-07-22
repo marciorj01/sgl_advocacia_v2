@@ -1828,6 +1828,7 @@ function rojex_equipe_contexto_sessao(mysqli $conn, int $usuarioId, bool $ehMast
          INNER JOIN usuarios u ON u.id=ue.usuario_id
               WHERE ue.usuario_id=? AND ue.tenant_id=? AND ue.escritorio_id=?
                 AND ue.ativo=1 AND u.ativo=1
+                AND LOWER(TRIM(u.perfil))='administrador'
                 AND LOWER(ue.papel)='administrador'
               LIMIT 1"
         );

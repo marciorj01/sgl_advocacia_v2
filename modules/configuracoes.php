@@ -1930,6 +1930,9 @@ function rojex_equipe_usuario_alvo(
 
 $contextoEquipeSessao = rojex_equipe_contexto_sessao($conn, $usuarioSessaoId, $ehUsuarioMaster);
 $podeGerirEquipe = $podeSupervisionarEquipesGlobais || $contextoEquipeSessao !== null;
+$podeConsultarLogsTenant = !$ehUsuarioMaster
+    && !$ehEquipeInternaRojex
+    && $contextoEquipeSessao !== null;
 
 $msg = '';
 $msg_tipo = 'success';
@@ -2027,8 +2030,16 @@ if ($tab_ativa === 'usuarios' && !$podeGerirEquipe) {
     sgl_redirect_cfg('escritorio', 'erro', 'Você não possui autorização para administrar a equipe deste escritório.');
 }
 
-if (in_array($tab_ativa, ['sistema', 'administracao', 'novo_escritorio', 'planos', 'modulos', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes', 'logs'], true) && !$ehUsuarioMaster && !$ehEquipeInternaRojex) {
+if (in_array($tab_ativa, ['sistema', 'administracao', 'novo_escritorio', 'planos', 'modulos', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes'], true) && !$ehUsuarioMaster && !$ehEquipeInternaRojex) {
     sgl_redirect_cfg('escritorio', 'erro', 'Área restrita ao usuário MASTER.');
+}
+
+if ($tab_ativa === 'logs'
+    && !$ehUsuarioMaster
+    && !$ehEquipeInternaRojex
+    && !$podeConsultarLogsTenant
+) {
+    sgl_redirect_cfg('escritorio', 'erro', 'A consulta de LOGs é permitida somente ao administrador do escritório.');
 }
 
 if ($tab_ativa === 'portal' && !$portalPodeAcessar) {
@@ -2063,38 +2074,77 @@ if (
             throw new RuntimeException('Download bloqueado: o SHA-256 do ZIP não confere.');
         }
 
-        $agoraDownload = date('Y-m-d H:i:s');
-        $stmt = $conn->prepare(
-            "UPDATE logs_backups
-                SET download_em = ?, status = CASE WHEN status = 'VERIFICADO' THEN 'BAIXADO' ELSE status END
-              WHERE id = ?"
-        );
-        $stmt->bind_param('si', $agoraDownload, $backupIdDownload);
-        $stmt->execute();
-        $stmt->close();
-        sgl_log(
-            $conn,
-            'Download de backup de LOG iniciado',
-            'logs_backups',
-            (string)$backupIdDownload,
-            'Arquivo: ' . (string)$backupDownload['nome_arquivo']
-        );
-
         while (ob_get_level() > 0) {
             ob_end_clean();
         }
         $arquivoDownload = (string)$backupDownload['arquivo'];
         $nomeDownload = basename((string)$backupDownload['nome_arquivo']);
+        $tamanhoDownload = filesize($arquivoDownload);
+        if ($tamanhoDownload === false || $tamanhoDownload <= 0) {
+            throw new RuntimeException('O ZIP está vazio ou seu tamanho não pôde ser confirmado.');
+        }
+        $handleDownload = fopen($arquivoDownload, 'rb');
+        if (!$handleDownload) {
+            throw new RuntimeException('Não foi possível abrir o ZIP para download.');
+        }
+
         header('Content-Type: application/zip');
         header('Content-Disposition: attachment; filename="' . str_replace('"', '', $nomeDownload) . '"');
-        header('Content-Length: ' . (string)filesize($arquivoDownload));
+        header('Content-Length: ' . (string)$tamanhoDownload);
         header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
         header('Pragma: no-cache');
         header('X-Content-Type-Options: nosniff');
-        $handleDownload = fopen($arquivoDownload, 'rb');
-        if (!$handleDownload) throw new RuntimeException('Não foi possível abrir o ZIP para download.');
-        fpassthru($handleDownload);
+
+        $ignorarAbortAnterior = ignore_user_abort(true);
+        @set_time_limit(0);
+        $bytesEnviados = 0;
+        while (!feof($handleDownload)) {
+            $bloco = fread($handleDownload, 1024 * 1024);
+            if ($bloco === false) {
+                break;
+            }
+            if ($bloco === '') {
+                continue;
+            }
+            echo $bloco;
+            $bytesEnviados += strlen($bloco);
+            flush();
+            if (connection_aborted()) {
+                break;
+            }
+        }
         fclose($handleDownload);
+        ignore_user_abort($ignorarAbortAnterior);
+
+        $downloadCompleto = $bytesEnviados === (int)$tamanhoDownload
+            && connection_status() === CONNECTION_NORMAL;
+        if ($downloadCompleto) {
+            $agoraDownload = date('Y-m-d H:i:s');
+            $stmt = $conn->prepare(
+                "UPDATE logs_backups
+                    SET download_em = ?, status = CASE WHEN status = 'VERIFICADO' THEN 'BAIXADO' ELSE status END
+                  WHERE id = ?"
+            );
+            if (!$stmt) {
+                error_log('[ROJEX LOG BACKUP] Falha ao registrar download concluído do backup #' . $backupIdDownload);
+                exit;
+            }
+            $stmt->bind_param('si', $agoraDownload, $backupIdDownload);
+            $stmt->execute();
+            $stmt->close();
+            sgl_log(
+                $conn,
+                'Download de backup de LOG concluído',
+                'logs_backups',
+                (string)$backupIdDownload,
+                'Arquivo: ' . (string)$backupDownload['nome_arquivo'] . '; bytes: ' . $bytesEnviados
+            );
+        } else {
+            error_log(
+                '[ROJEX LOG BACKUP] Download incompleto do backup #' . $backupIdDownload
+                . '; enviados: ' . $bytesEnviados . '/' . (int)$tamanhoDownload
+            );
+        }
         exit;
     } catch (Throwable $e) {
         sgl_redirect_cfg('logs', 'erro', $e->getMessage());
@@ -2234,8 +2284,8 @@ if ($acao_cfg === 'verificar_log_backup') {
 if ($acao_cfg === 'arquivar_log_backup') {
     $backupId = max(0, (int)($_POST['backup_id'] ?? 0));
     $confirmacao = strtoupper(trim((string)($_POST['confirmacao_arquivar'] ?? '')));
-    if ($confirmacao !== 'ARQUIVAR') {
-        sgl_redirect_cfg('logs', 'erro', 'Confirmação inválida. Digite ARQUIVAR.');
+    if ($confirmacao !== 'ARQUIVAR E EXCLUIR') {
+        sgl_redirect_cfg('logs', 'erro', 'Confirmação inválida. Digite ARQUIVAR E EXCLUIR.');
     }
 
     $transacaoAberta = false;
@@ -4861,14 +4911,70 @@ if ($acao_cfg === 'novo_usuario') {
     }
 
     try {
-        $stmtDup = $conn->prepare("SELECT id FROM usuarios WHERE usuario = ? OR (? <> '' AND email = ?) LIMIT 1");
+        $colunaLoginUsuarios = sgl_coluna_existe($conn, 'usuarios', 'usuario')
+            ? 'usuario'
+            : (sgl_coluna_existe($conn, 'usuarios', 'username') ? 'username' : '');
+        if ($colunaLoginUsuarios === '') {
+            throw new RuntimeException('A tabela usuarios não possui uma coluna de login compatível.');
+        }
+
+        $stmtDup = $conn->prepare(
+            "SELECT id
+               FROM usuarios
+              WHERE LOWER(`{$colunaLoginUsuarios}`) = LOWER(?)
+                 OR (? <> '' AND LOWER(email) = LOWER(?))
+              LIMIT 1"
+        );
+        if (!$stmtDup) {
+            throw new RuntimeException('Falha ao preparar a validação de duplicidade em usuarios: ' . $conn->error);
+        }
         $stmtDup->bind_param('sss', $usuario, $email, $email);
-        $stmtDup->execute();
+        if (!$stmtDup->execute()) {
+            throw new RuntimeException('Falha ao validar duplicidade em usuarios: ' . $stmtDup->error);
+        }
         $duplicado = $stmtDup->get_result()->fetch_assoc();
         $stmtDup->close();
 
         if ($duplicado) {
             sgl_redirect_cfg('usuarios', 'erro', 'Já existe usuário com este login ou e-mail.');
+        }
+
+        // O login consulta também usuarios_sistema. Impedir aqui uma identidade
+        // ambígua evita criar uma conta que depois seria recusada na autenticação.
+        if (sgl_tabela_existe($conn, 'usuarios_sistema')) {
+            $colunaLoginSistema = sgl_coluna_existe($conn, 'usuarios_sistema', 'usuario')
+                ? 'usuario'
+                : (sgl_coluna_existe($conn, 'usuarios_sistema', 'username') ? 'username' : '');
+            if ($colunaLoginSistema !== '') {
+                $condicoesSistema = ["LOWER(`{$colunaLoginSistema}`) = LOWER(?)"];
+                $tiposSistema = 's';
+                $valoresSistema = [$usuario];
+                if ($email !== '' && sgl_coluna_existe($conn, 'usuarios_sistema', 'email')) {
+                    $condicoesSistema[] = 'LOWER(email) = LOWER(?)';
+                    $tiposSistema .= 's';
+                    $valoresSistema[] = $email;
+                }
+
+                $stmtDupSistema = $conn->prepare(
+                    'SELECT id FROM usuarios_sistema WHERE ' . implode(' OR ', $condicoesSistema) . ' LIMIT 1'
+                );
+                if (!$stmtDupSistema) {
+                    throw new RuntimeException('Falha ao preparar a validação de duplicidade em usuarios_sistema: ' . $conn->error);
+                }
+                $stmtDupSistema->bind_param($tiposSistema, ...$valoresSistema);
+                if (!$stmtDupSistema->execute()) {
+                    throw new RuntimeException('Falha ao validar duplicidade em usuarios_sistema: ' . $stmtDupSistema->error);
+                }
+                $duplicadoSistema = $stmtDupSistema->get_result()->fetch_assoc();
+                $stmtDupSistema->close();
+                if ($duplicadoSistema) {
+                    sgl_redirect_cfg(
+                        'usuarios',
+                        'erro',
+                        'Este login ou e-mail já pertence a uma conta de acesso existente.'
+                    );
+                }
+            }
         }
 
         $hash = password_hash($senha, PASSWORD_DEFAULT);
@@ -4890,7 +4996,7 @@ if ($acao_cfg === 'novo_usuario') {
             }
         }
 
-        $colunasSql = "nome, usuario, email, senha, perfil, nivel, status, ativo";
+        $colunasSql = "nome, `{$colunaLoginUsuarios}`, email, senha, perfil, nivel, status, ativo";
         $placeholders = "?, ?, ?, ?, ?, ?, ?, 1";
         if ($colunasExtras) {
             $colunasSql .= ", " . implode(", ", $colunasExtras);
@@ -4899,13 +5005,21 @@ if ($acao_cfg === 'novo_usuario') {
 
         $conn->begin_transaction();
         $stmt = $conn->prepare("INSERT INTO usuarios ($colunasSql) VALUES ($placeholders)");
+        if (!$stmt) {
+            throw new RuntimeException('Falha ao preparar a inclusão em usuarios: ' . $conn->error);
+        }
         $tipos = 'sssssss' . $tiposExtras;
         $valores = array_merge([$nome, $usuario, $email, $hash, $perfil, $perfil, 'Ativo'], $valoresExtras);
         $stmt->bind_param($tipos, ...$valores);
-        $stmt->execute();
+        if (!$stmt->execute()) {
+            throw new RuntimeException('Falha ao incluir o usuário: ' . $stmt->error);
+        }
         $novoIdInt = (int)$stmt->insert_id;
         $novoId = (string)$novoIdInt;
         $stmt->close();
+        if ($novoIdInt <= 0) {
+            throw new RuntimeException('A inclusão não retornou um identificador válido para o usuário.');
+        }
 
         if (!$novoUsuarioPlataforma) {
             $papelVinculo = $perfil === 'Administrador' ? 'administrador' : 'usuario';
@@ -4916,6 +5030,9 @@ if ($acao_cfg === 'novo_usuario') {
                     (usuario_id, escritorio_id, tenant_id, papel, principal, ativo)
                  VALUES (?, ?, ?, ?, ?, ?)"
             );
+            if (!$stmtVinculo) {
+                throw new RuntimeException('Falha ao preparar o vínculo do usuário com o escritório: ' . $conn->error);
+            }
             $stmtVinculo->bind_param(
                 'iissii',
                 $novoIdInt,
@@ -4925,8 +5042,56 @@ if ($acao_cfg === 'novo_usuario') {
                 $principalVinculo,
                 $ativoVinculo
             );
-            $stmtVinculo->execute();
+            if (!$stmtVinculo->execute()) {
+                throw new RuntimeException('Falha ao vincular o usuário ao escritório: ' . $stmtVinculo->error);
+            }
+            if ($stmtVinculo->affected_rows !== 1) {
+                throw new RuntimeException('O vínculo do usuário com o escritório não foi confirmado.');
+            }
             $stmtVinculo->close();
+        }
+
+        // Confirma dentro da mesma transação que a identidade criada e, quando
+        // aplicável, o vínculo pertencem exatamente ao escopo escolhido.
+        if ($novoUsuarioPlataforma) {
+            $stmtConfirma = $conn->prepare(
+                "SELECT id
+                   FROM usuarios
+                  WHERE id=? AND LOWER(`{$colunaLoginUsuarios}`)=LOWER(?)
+                    AND ativo=1
+                  LIMIT 1"
+            );
+            if (!$stmtConfirma) {
+                throw new RuntimeException('Falha ao preparar a confirmação do usuário criado: ' . $conn->error);
+            }
+            $stmtConfirma->bind_param('is', $novoIdInt, $usuario);
+        } else {
+            $stmtConfirma = $conn->prepare(
+                "SELECT u.id
+                   FROM usuarios u
+             INNER JOIN usuarios_escritorios_saas ue ON ue.usuario_id=u.id
+                  WHERE u.id=? AND LOWER(u.`{$colunaLoginUsuarios}`)=LOWER(?)
+                    AND u.ativo=1 AND ue.tenant_id=? AND ue.escritorio_id=? AND ue.ativo=1
+                  LIMIT 1"
+            );
+            if (!$stmtConfirma) {
+                throw new RuntimeException('Falha ao preparar a confirmação do usuário e vínculo: ' . $conn->error);
+            }
+            $stmtConfirma->bind_param(
+                'issi',
+                $novoIdInt,
+                $usuario,
+                $tenantNovoUsuario,
+                $escritorioNovoUsuario
+            );
+        }
+        if (!$stmtConfirma->execute()) {
+            throw new RuntimeException('Falha ao confirmar o cadastro criado: ' . $stmtConfirma->error);
+        }
+        $cadastroConfirmado = (bool)$stmtConfirma->get_result()->fetch_assoc();
+        $stmtConfirma->close();
+        if (!$cadastroConfirmado) {
+            throw new RuntimeException('O usuário ou seu vínculo não pôde ser confirmado no escopo selecionado.');
         }
 
         $conn->commit();
@@ -4946,6 +5111,14 @@ if ($acao_cfg === 'novo_usuario') {
             : 'Usuário do escritório criado com sucesso.');
     } catch (Throwable $e) {
         try { $conn->rollback(); } catch (Throwable $rollbackError) {}
+        error_log(
+            '[ROJEX EQUIPE][CRIACAO] Falha ao criar integrante. ' .
+            'Login=' . ($usuario !== '' ? $usuario : '-') .
+            '; Perfil=' . ($perfil !== '' ? $perfil : '-') .
+            '; Escritorio=' . (string)$escritorioNovoUsuario .
+            '; TenantHash=' . ($tenantNovoUsuario !== '' ? substr(hash('sha256', $tenantNovoUsuario), 0, 12) : '-') .
+            '; Erro=' . get_class($e) . ': ' . $e->getMessage()
+        );
         sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível criar o usuário. Verifique os dados informados.');
     }
 }
@@ -6045,7 +6218,8 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
         $valoresLogs = [];
 
         if (!$podeConsultarLogsGlobais) {
-            if (!$contextoMetricasTenant
+            if (!$podeConsultarLogsTenant
+                || !$contextoEquipeSessao
                 || !sgl_coluna_existe($conn, 'logs_sistema', 'tenant_id')
                 || !sgl_coluna_existe($conn, 'logs_sistema', 'escritorio_id')
             ) {
@@ -6054,8 +6228,8 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
             $whereLogs[] = 'l.tenant_id = ?';
             $whereLogs[] = 'l.escritorio_id = ?';
             $tiposLogs .= 'si';
-            $valoresLogs[] = $contextoMetricasTenant['tenant_id'];
-            $valoresLogs[] = $contextoMetricasTenant['escritorio_id'];
+            $valoresLogs[] = $contextoEquipeSessao['tenant_id'];
+            $valoresLogs[] = $contextoEquipeSessao['escritorio_id'];
         }
 
         if ($logDataInicio !== '') {
@@ -6110,13 +6284,36 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
 }
 
 $logModulosDisponiveis = [];
-if (($podeConsultarLogsGlobais || $contextoMetricasTenant) && sgl_tabela_existe($conn, 'logs_sistema')) {
+if (($podeConsultarLogsGlobais || $podeConsultarLogsTenant) && sgl_tabela_existe($conn, 'logs_sistema')) {
     try {
-        $resModulosLog = $conn->query("SELECT DISTINCT tabela FROM logs_sistema WHERE tabela IS NOT NULL AND tabela <> '' ORDER BY tabela");
+        if ($podeConsultarLogsGlobais) {
+            $resModulosLog = $conn->query(
+                "SELECT DISTINCT tabela
+                   FROM logs_sistema
+                  WHERE tabela IS NOT NULL AND tabela <> ''
+                  ORDER BY tabela"
+            );
+        } else {
+            $tenantModulosLog = (string)$contextoEquipeSessao['tenant_id'];
+            $escritorioModulosLog = (int)$contextoEquipeSessao['escritorio_id'];
+            $stmtModulosLog = $conn->prepare(
+                "SELECT DISTINCT tabela
+                   FROM logs_sistema
+                  WHERE tenant_id=? AND escritorio_id=?
+                    AND tabela IS NOT NULL AND tabela <> ''
+                  ORDER BY tabela"
+            );
+            $stmtModulosLog->bind_param('si', $tenantModulosLog, $escritorioModulosLog);
+            $stmtModulosLog->execute();
+            $resModulosLog = $stmtModulosLog->get_result();
+        }
         if ($resModulosLog) {
             while ($moduloLog = $resModulosLog->fetch_assoc()) {
                 $logModulosDisponiveis[] = (string)$moduloLog['tabela'];
             }
+        }
+        if (isset($stmtModulosLog)) {
+            $stmtModulosLog->close();
         }
     } catch (Throwable $e) {}
 }
@@ -6981,7 +7178,8 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
     foreach ($tabDefs as $id => $tab) :
         if ($ehEquipeInternaRojex && !in_array($id, $abasEquipeInterna, true)) { continue; }
         if ($id === 'usuarios' && !$podeGerirEquipe) { continue; }
-        if (in_array($id, ['sistema','administracao','novo_escritorio','planos','modulos','desligados','relatorios','saude','manutencao','backup','atualizacoes','logs'], true) && !$ehUsuarioMaster && !$ehEquipeInternaRojex) { continue; }
+        if (in_array($id, ['sistema','administracao','novo_escritorio','planos','modulos','desligados','relatorios','saude','manutencao','backup','atualizacoes'], true) && !$ehUsuarioMaster && !$ehEquipeInternaRojex) { continue; }
+        if ($id === 'logs' && !$ehUsuarioMaster && !$ehEquipeInternaRojex && !$podeConsultarLogsTenant) { continue; }
         if ($id === 'portal' && !$portalPodeAcessar) { continue; }
         $active = $tab_ativa === $id ? 'active' : '';
         $badge = ($id === 'lixeira' && $totalLixeira > 0) ? '<span class="badge bg-danger ms-1">' . $totalLixeira . '</span>' : '';
@@ -9614,9 +9812,10 @@ function rojexEditarAtualizacao(dados) {
     </div>
     <div class="card-body">
         <div class="alert alert-info">
-            <strong>Fluxo obrigatório:</strong> gerar ZIP → verificar integridade → baixar → digitar
-            <code>ARQUIVAR</code>. A exclusão usa somente os IDs gravados no backup e sempre repete
-            o filtro por <code>tenant_id</code> e <code>escritorio_id</code>.
+            <strong>Fluxo obrigatório:</strong> gerar ZIP → verificar integridade → concluir o download → digitar
+            <code>ARQUIVAR E EXCLUIR</code>. Esta ação exclui definitivamente do LOG ativo somente os IDs
+            gravados no backup e sempre repete o filtro por <code>tenant_id</code> e <code>escritorio_id</code>.
+            Guarde o ZIP baixado em local seguro antes de continuar.
         </div>
         <form method="POST" class="row g-3 align-items-end mb-4">
             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
@@ -9695,8 +9894,8 @@ function rojexEditarAtualizacao(dados) {
                             </span>
                             <div class="small mt-1">
                                 <?=$logBackupVerificado?'✓ Verificado':'○ Verificar'?><br>
-                                <?=$logBackupBaixado?'✓ Download iniciado':'○ Baixar'?><br>
-                                <?=$logBackupArquivado?'✓ Arquivado':'○ Arquivar'?>
+                                <?=$logBackupBaixado?'✓ Download concluído':'○ Baixar'?><br>
+                                <?=$logBackupArquivado?'✓ Arquivado e excluído':'○ Arquivar e excluir'?>
                             </div>
                         </td>
                         <td style="min-width:260px">
@@ -9719,16 +9918,16 @@ function rojexEditarAtualizacao(dados) {
                                 </div>
                                 <?php if ($logBackupVerificado && $logBackupBaixado): ?>
                                     <form method="POST" class="input-group input-group-sm"
-                                          onsubmit="return confirm('Confirma o arquivamento? Somente os IDs deste backup serão removidos do LOG ativo.')">
+                                          onsubmit="return confirm('ATENÇÃO: esta ação excluirá definitivamente do LOG ativo somente os IDs contidos neste ZIP. Confirma o arquivamento e a exclusão?')">
                                         <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                                         <input type="hidden" name="acao_cfg" value="arquivar_log_backup">
                                         <input type="hidden" name="backup_id" value="<?=(int)$logBackupItem['id']?>">
                                         <input type="text" name="confirmacao_arquivar" class="form-control"
-                                               placeholder="Digite ARQUIVAR" required pattern="ARQUIVAR" autocomplete="off">
-                                        <button class="btn btn-danger"><i class="bi bi-archive me-1"></i>Arquivar</button>
+                                               placeholder="Digite ARQUIVAR E EXCLUIR" required pattern="ARQUIVAR E EXCLUIR" autocomplete="off">
+                                        <button class="btn btn-danger"><i class="bi bi-archive me-1"></i>Arquivar e excluir</button>
                                     </form>
                                 <?php else: ?>
-                                    <small class="text-muted">O arquivamento será liberado após verificação e download.</small>
+                                    <small class="text-muted">O arquivamento e a exclusão serão liberados após verificação e download concluído.</small>
                                 <?php endif; ?>
                             <?php else: ?>
                                 <span class="text-success"><i class="bi bi-check-circle-fill me-1"></i>Concluído</span>
@@ -9884,7 +10083,8 @@ function rojexEditarAtualizacao(dados) {
     </table>
 
     <div class="mt-4 small">
-        Relatório emitido em <?=date('d/m/Y H:i:s')?> pelo usuário MASTER
+        Relatório emitido em <?=date('d/m/Y H:i:s')?> pelo usuário
+        <?=htmlspecialchars($ehUsuarioMaster ? 'MASTER' : $perfilSessaoAtual)?>
         <?=htmlspecialchars($_SESSION['nome'] ?? $_SESSION['username'] ?? '')?>.
     </div>
 </div>

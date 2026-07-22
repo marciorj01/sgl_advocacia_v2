@@ -396,6 +396,14 @@ function sgl_log(mysqli $conn, string $acao, ?string $tabela = null, ?string $re
 
 function sgl_redirect_cfg(string $tab, string $tipo, string $msg): void {
     $url = '?mod=configuracoes&tab=' . rawurlencode($tab) . '&msg_' . rawurlencode($tipo) . '=' . rawurlencode($msg);
+    if ($tab === 'usuarios') {
+        $escritorioEquipe = max(0, (int)($_POST['equipe_escritorio_id'] ?? 0));
+        if ($escritorioEquipe > 0) {
+            $url .= '&equipe_visao=escritorios&equipe_escritorio=' . $escritorioEquipe;
+        } elseif ((string)($_POST['escopo_equipe'] ?? '') === 'plataforma') {
+            $url .= '&equipe_visao=rojex';
+        }
+    }
 
     // A URL será inserida dentro de JavaScript, portanto deve ser codificada
     // como string JavaScript/JSON. htmlspecialchars() transformava "&" em
@@ -1695,11 +1703,239 @@ $usuarioMasterId = (int)sgl_cfg_get($conn, 'usuario_master_id', '0');
 $ehUsuarioMaster = function_exists('rojexUsuarioEhMasterSaas')
     && rojexUsuarioEhMasterSaas($conn, $usuarioSessaoId, $perfilSessaoAtual);
 
+/** @return list<string> */
+function rojex_config_perfis_internos(): array {
+    return [
+        'Suporte ROJEX',
+        'Comercial ROJEX',
+        'Financeiro ROJEX',
+        'Operador ROJEX',
+        'Auditor ROJEX',
+    ];
+}
+
+/**
+ * A equipe interna existe somente no contexto da plataforma. Um perfil interno
+ * com tenant, escritório ou plataforma_total é recusado de forma segura.
+ */
+function rojex_config_equipe_interna_valida(string $perfil): bool {
+    if (!in_array($perfil, rojex_config_perfis_internos(), true)) {
+        return false;
+    }
+    if (!(function_exists('rojexModoPlataforma') && rojexModoPlataforma())) {
+        return false;
+    }
+    if (
+        (function_exists('rojexTenantId') && rojexTenantId() !== null)
+        || (function_exists('rojexEscritorioId') && rojexEscritorioId() !== null)
+    ) {
+        return false;
+    }
+
+    $permissoes = $_SESSION['permissoes_tenant'] ?? [];
+    return is_array($permissoes) && !in_array('plataforma_total', $permissoes, true);
+}
+
+/** @return array<string,list<string>> */
+function rojex_config_abas_perfil_interno(): array {
+    return [
+        'Suporte ROJEX' => ['usuarios', 'portal'],
+        'Comercial ROJEX' => ['administracao', 'novo_escritorio', 'planos', 'modulos'],
+        'Financeiro ROJEX' => ['administracao', 'relatorios'],
+        'Operador ROJEX' => ['saude', 'atualizacoes'],
+        'Auditor ROJEX' => ['relatorios', 'logs'],
+    ];
+}
+
+/** @return array<string,list<string>> */
+function rojex_config_acoes_perfil_interno(): array {
+    return [
+        'Suporte ROJEX' => [
+            'novo_usuario', 'editar_usuario', 'alterar_status_usuario',
+            'resetar_senha_usuario', 'encerrar_vinculo_usuario',
+        ],
+        'Comercial ROJEX' => [
+            'salvar_licenca_saas', 'alterar_status_licenca_saas',
+            'salvar_escritorio_saas', 'alterar_status_escritorio_saas',
+            'assistente_novo_escritorio_salvar',
+            'assistente_novo_escritorio_reiniciar',
+            'assistente_novo_escritorio_provisionar',
+            'salvar_plano_saas', 'alterar_status_plano_saas',
+            'salvar_modulo_saas', 'alterar_status_modulo_saas',
+            'salvar_configuracao_plano_modulos',
+        ],
+        'Financeiro ROJEX' => [
+            'salvar_licenca_saas', 'alterar_status_licenca_saas',
+        ],
+        'Operador ROJEX' => ['simular_atualizacao'],
+        'Auditor ROJEX' => [],
+    ];
+}
+
+$ehEquipeInternaRojex = !$ehUsuarioMaster
+    && rojex_config_equipe_interna_valida($perfilSessaoAtual);
+$abasEquipeInterna = $ehEquipeInternaRojex
+    ? (rojex_config_abas_perfil_interno()[$perfilSessaoAtual] ?? [])
+    : [];
+$acoesEquipeInterna = $ehEquipeInternaRojex
+    ? (rojex_config_acoes_perfil_interno()[$perfilSessaoAtual] ?? [])
+    : [];
+$tabInicialEquipeInterna = $abasEquipeInterna[0] ?? 'escritorio';
+$podeSupervisionarEquipesGlobais = $ehUsuarioMaster
+    || ($ehEquipeInternaRojex && $perfilSessaoAtual === 'Suporte ROJEX');
+$podeConsultarRelatoriosGlobais = $ehUsuarioMaster
+    || ($ehEquipeInternaRojex && in_array($perfilSessaoAtual, ['Financeiro ROJEX', 'Auditor ROJEX'], true));
+$podeConsultarLogsGlobais = $ehUsuarioMaster
+    || ($ehEquipeInternaRojex && $perfilSessaoAtual === 'Auditor ROJEX');
+$podeConsultarCadastrosSaas = $ehUsuarioMaster
+    || ($ehEquipeInternaRojex && in_array($perfilSessaoAtual, ['Comercial ROJEX', 'Financeiro ROJEX', 'Auditor ROJEX'], true));
+$podeConsultarCatalogoSaas = $ehUsuarioMaster
+    || ($ehEquipeInternaRojex && $perfilSessaoAtual === 'Comercial ROJEX');
+$podeConsultarUsuariosGlobais = $ehUsuarioMaster
+    || ($ehEquipeInternaRojex && $perfilSessaoAtual === 'Auditor ROJEX');
+$podeGerirCadastrosComerciais = $ehUsuarioMaster
+    || ($ehEquipeInternaRojex && $perfilSessaoAtual === 'Comercial ROJEX');
+$podeGerirLicencasComerciais = $ehUsuarioMaster
+    || ($ehEquipeInternaRojex && in_array($perfilSessaoAtual, ['Comercial ROJEX', 'Financeiro ROJEX'], true));
+
+/**
+ * Retorna o contexto de equipe administrável pela sessão atual.
+ * O MASTER opera em escopo global; o administrador do escritório opera somente
+ * no vínculo ativo informado pelo servidor, nunca por tenant enviado no POST.
+ *
+ * @return array{tenant_id:string,escritorio_id:int}|null
+ */
+function rojex_equipe_contexto_sessao(mysqli $conn, int $usuarioId, bool $ehMaster): ?array {
+    if ($ehMaster || $usuarioId <= 0
+        || !function_exists('rojexContextoTenantValido')
+        || !function_exists('rojexTenantId')
+        || !function_exists('rojexEscritorioId')
+        || !rojexContextoTenantValido()
+    ) {
+        return null;
+    }
+
+    $tenantId = trim((string)rojexTenantId());
+    $escritorioId = (int)rojexEscritorioId();
+    if ($tenantId === '' || $escritorioId <= 0 || !sgl_tabela_existe($conn, 'usuarios_escritorios_saas')) {
+        return null;
+    }
+
+    try {
+        $stmt = $conn->prepare(
+            "SELECT ue.id
+               FROM usuarios_escritorios_saas ue
+         INNER JOIN usuarios u ON u.id=ue.usuario_id
+              WHERE ue.usuario_id=? AND ue.tenant_id=? AND ue.escritorio_id=?
+                AND ue.ativo=1 AND u.ativo=1
+                AND LOWER(ue.papel)='administrador'
+              LIMIT 1"
+        );
+        $stmt->bind_param('isi', $usuarioId, $tenantId, $escritorioId);
+        $stmt->execute();
+        $autorizado = (bool)$stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        return $autorizado
+            ? ['tenant_id' => $tenantId, 'escritorio_id' => $escritorioId]
+            : null;
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/** @return array{tenant_id:string,escritorio_id:int}|null */
+function rojex_equipe_contexto_escritorio(mysqli $conn, int $escritorioId): ?array {
+    if ($escritorioId <= 0 || !sgl_tabela_existe($conn, 'escritorios_saas')) return null;
+    $stmt = $conn->prepare(
+        "SELECT tenant_id, id AS escritorio_id
+           FROM escritorios_saas
+          WHERE id=? AND status<>'encerrado' AND tenant_id<>''
+          LIMIT 1"
+    );
+    $stmt->bind_param('i', $escritorioId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row ? ['tenant_id' => (string)$row['tenant_id'], 'escritorio_id' => (int)$row['escritorio_id']] : null;
+}
+
+function rojex_equipe_limite_usuarios(mysqli $conn, int $escritorioId): int {
+    $limite = 1;
+    if ($escritorioId <= 0 || !sgl_tabela_existe($conn, 'licencas_saas')) return $limite;
+    $stmt = $conn->prepare(
+        "SELECT limite_usuarios
+           FROM licencas_saas
+          WHERE escritorio_id=?
+          ORDER BY (status IN ('ativa','teste')) DESC, id DESC
+          LIMIT 1"
+    );
+    $stmt->bind_param('i', $escritorioId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return max(1, min(1000, (int)($row['limite_usuarios'] ?? 1)));
+}
+
+/** @return array<string,mixed>|null */
+function rojex_equipe_usuario_alvo(
+    mysqli $conn,
+    int $usuarioId,
+    bool $ehMaster,
+    ?array $contextoSessao,
+    int $escritorioSolicitado = 0,
+    bool $podeSupervisionarEscritorios = false
+): ?array {
+    if ($usuarioId <= 0) return null;
+
+    if ($ehMaster && $escritorioSolicitado <= 0) {
+        // Equipe interna da plataforma: usuários sem vínculo tenant ativo.
+        // O MASTER principal continua protegido pelas ações específicas abaixo.
+        $stmt = $conn->prepare(
+            "SELECT u.*, NULL AS vinculo_id, NULL AS escritorio_id, NULL AS tenant_id
+               FROM usuarios u
+              WHERE u.id=?
+                AND (u.id=? OR COALESCE(u.vinculo_status,'ativo')<>'encerrado')
+                AND NOT EXISTS (
+                    SELECT 1 FROM usuarios_escritorios_saas ue
+                     WHERE ue.usuario_id=u.id AND ue.ativo=1
+                )
+              LIMIT 1"
+        );
+        $masterProtegidoId = (int)sgl_cfg_get($conn, 'usuario_master_id', '0');
+        $stmt->bind_param('ii', $usuarioId, $masterProtegidoId);
+    } else {
+        $contexto = ($ehMaster || $podeSupervisionarEscritorios)
+            ? rojex_equipe_contexto_escritorio($conn, $escritorioSolicitado)
+            : $contextoSessao;
+        if (!$contexto) return null;
+        $tenantId = (string)$contexto['tenant_id'];
+        $escritorioId = (int)$contexto['escritorio_id'];
+        $stmt = $conn->prepare(
+            "SELECT u.*, ue.id AS vinculo_id, ue.escritorio_id, ue.tenant_id,
+                    ue.papel, ue.principal, ue.ativo AS vinculo_ativo
+               FROM usuarios u
+         INNER JOIN usuarios_escritorios_saas ue ON ue.usuario_id=u.id
+              WHERE u.id=? AND ue.tenant_id=? AND ue.escritorio_id=? AND ue.ativo=1
+              LIMIT 1"
+        );
+        $stmt->bind_param('isi', $usuarioId, $tenantId, $escritorioId);
+    }
+
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row ?: null;
+}
+
+$contextoEquipeSessao = rojex_equipe_contexto_sessao($conn, $usuarioSessaoId, $ehUsuarioMaster);
+$podeGerirEquipe = $podeSupervisionarEquipesGlobais || $contextoEquipeSessao !== null;
+
 $msg = '';
 $msg_tipo = 'success';
 $acao_cfg = $_POST['acao_cfg'] ?? '';
 $csrf = gerarTokenCsrf();
-$tab_ativa = $_GET['tab'] ?? 'escritorio';
+$tab_ativa = $_GET['tab'] ?? ($ehEquipeInternaRojex ? $tabInicialEquipeInterna : 'escritorio');
 
 // RA-10 — capacidades efetivas do Portal conforme papel e contexto da sessão.
 $portalPodeHabilitar = function_exists('rojexPodeExecutarAcao')
@@ -1727,12 +1963,15 @@ $portalPodeAuditarTenant = function_exists('rojexPodeExecutarAcao')
     && rojexPodeExecutarAcao('tenant.portal.auditoria.visualizar');
 $portalPodeAcessar = $portalPodeSupervisionar || $portalPodeListarTenant;
 
-$acoesExclusivasMaster = [
+$acoesGestaoEquipe = [
     'novo_usuario',
     'editar_usuario',
     'alterar_status_usuario',
     'resetar_senha_usuario',
     'encerrar_vinculo_usuario',
+];
+
+$acoesExclusivasMaster = [
     'salvar_sistema',
     'salvar_licenca_saas',
     'alterar_status_licenca_saas',
@@ -1763,11 +2002,32 @@ $acoesExclusivasMaster = [
     'simular_atualizacao',
 ];
 
-if ($acao_cfg !== '' && in_array($acao_cfg, $acoesExclusivasMaster, true) && !$ehUsuarioMaster) {
+if ($acao_cfg !== '' && in_array($acao_cfg, $acoesGestaoEquipe, true) && !$podeGerirEquipe) {
+    sgl_redirect_cfg('escritorio', 'erro', 'Você não possui autorização para administrar a equipe deste escritório.');
+}
+
+if ($acao_cfg !== '' && $ehEquipeInternaRojex && !in_array($acao_cfg, $acoesEquipeInterna, true)) {
+    sgl_redirect_cfg($tabInicialEquipeInterna, 'erro', 'Ação não autorizada para o perfil interno ' . $perfilSessaoAtual . '.');
+}
+
+if (
+    $acao_cfg !== ''
+    && in_array($acao_cfg, $acoesExclusivasMaster, true)
+    && !$ehUsuarioMaster
+    && !($ehEquipeInternaRojex && in_array($acao_cfg, $acoesEquipeInterna, true))
+) {
     sgl_redirect_cfg('escritorio', 'erro', 'Ação permitida somente ao usuário MASTER.');
 }
 
-if (in_array($tab_ativa, ['usuarios', 'sistema', 'administracao', 'novo_escritorio', 'planos', 'modulos', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes', 'logs'], true) && !$ehUsuarioMaster) {
+if ($ehEquipeInternaRojex && !in_array($tab_ativa, $abasEquipeInterna, true)) {
+    sgl_redirect_cfg($tabInicialEquipeInterna, 'erro', 'Área não autorizada para o perfil interno ' . $perfilSessaoAtual . '.');
+}
+
+if ($tab_ativa === 'usuarios' && !$podeGerirEquipe) {
+    sgl_redirect_cfg('escritorio', 'erro', 'Você não possui autorização para administrar a equipe deste escritório.');
+}
+
+if (in_array($tab_ativa, ['sistema', 'administracao', 'novo_escritorio', 'planos', 'modulos', 'desligados', 'relatorios', 'saude', 'manutencao', 'backup', 'atualizacoes', 'logs'], true) && !$ehUsuarioMaster && !$ehEquipeInternaRojex) {
     sgl_redirect_cfg('escritorio', 'erro', 'Área restrita ao usuário MASTER.');
 }
 
@@ -4536,10 +4796,16 @@ if ($acao_cfg === 'novo_usuario') {
     $perfil = (string)($_POST['perfil'] ?? 'Usuário');
     $senha = (string)($_POST['senha'] ?? '');
 
-    $perfis = [
-        'Administrador Master','Administrador','Advogado','Coordenador',
+    $perfisEscritorio = [
+        'Administrador','Advogado','Coordenador',
         'Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'
     ];
+    $perfisPlataforma = ['Suporte ROJEX','Comercial ROJEX','Financeiro ROJEX','Operador ROJEX','Auditor ROJEX'];
+    $escopoNovoUsuario = $ehUsuarioMaster
+        ? (string)($_POST['escopo_equipe'] ?? 'escritorio')
+        : 'escritorio';
+    $novoUsuarioPlataforma = $ehUsuarioMaster && $escopoNovoUsuario === 'plataforma';
+    $perfis = $novoUsuarioPlataforma ? $perfisPlataforma : $perfisEscritorio;
 
     if ($nome === '' || $usuario === '' || strlen($senha) < 6 || !in_array($perfil, $perfis, true)) {
         sgl_redirect_cfg('usuarios', 'erro', 'Preencha nome, usuário, perfil e senha com no mínimo 6 caracteres.');
@@ -4548,10 +4814,50 @@ if ($acao_cfg === 'novo_usuario') {
         sgl_redirect_cfg('usuarios', 'erro', 'E-mail do usuário inválido.');
     }
 
-    $limiteUsuarios = max(1, min(100, (int)sgl_cfg_get($conn, 'limite_usuarios_licenca', '100')));
-    $totalUsuariosAtuais = sgl_select_count($conn, "SELECT COUNT(*) AS total FROM usuarios");
-    if ($totalUsuariosAtuais >= $limiteUsuarios) {
-        sgl_redirect_cfg('usuarios', 'erro', "Limite da licença atingido: {$limiteUsuarios} usuário(s).");
+    $tenantNovoUsuario = '';
+    $escritorioNovoUsuario = 0;
+    if ($novoUsuarioPlataforma) {
+        $limiteUsuarios = 5;
+        $stmtTotalEquipe = $conn->prepare(
+            "SELECT COUNT(*) AS total
+               FROM usuarios u
+              WHERE COALESCE(u.vinculo_status,'ativo')<>'encerrado'
+                AND NOT EXISTS (
+                    SELECT 1 FROM usuarios_escritorios_saas ue
+                     WHERE ue.usuario_id=u.id AND ue.ativo=1
+                )"
+        );
+        $stmtTotalEquipe->execute();
+        $totalUsuariosAtuais = (int)($stmtTotalEquipe->get_result()->fetch_assoc()['total'] ?? 0);
+        $stmtTotalEquipe->close();
+        if ($totalUsuariosAtuais >= $limiteUsuarios) {
+            sgl_redirect_cfg('usuarios', 'erro', "Limite da equipe interna ROJEX.AI atingido: {$limiteUsuarios} usuário(s).");
+        }
+    } else {
+        $contextoNovoUsuario = $podeSupervisionarEquipesGlobais
+            ? rojex_equipe_contexto_escritorio($conn, max(0, (int)($_POST['equipe_escritorio_id'] ?? 0)))
+            : $contextoEquipeSessao;
+        if (!$contextoNovoUsuario) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Selecione um escritório válido para vincular o novo usuário.');
+        }
+        $tenantNovoUsuario = (string)$contextoNovoUsuario['tenant_id'];
+        $escritorioNovoUsuario = (int)$contextoNovoUsuario['escritorio_id'];
+        $limiteUsuarios = rojex_equipe_limite_usuarios($conn, $escritorioNovoUsuario);
+
+        $stmtTotalEquipe = $conn->prepare(
+            "SELECT COUNT(DISTINCT ue.usuario_id) AS total
+               FROM usuarios_escritorios_saas ue
+          LEFT JOIN usuarios u ON u.id=ue.usuario_id
+              WHERE ue.tenant_id=? AND ue.escritorio_id=? AND ue.ativo=1
+                AND COALESCE(u.vinculo_status,'ativo')<>'encerrado'"
+        );
+        $stmtTotalEquipe->bind_param('si', $tenantNovoUsuario, $escritorioNovoUsuario);
+        $stmtTotalEquipe->execute();
+        $totalUsuariosAtuais = (int)($stmtTotalEquipe->get_result()->fetch_assoc()['total'] ?? 0);
+        $stmtTotalEquipe->close();
+        if ($totalUsuariosAtuais >= $limiteUsuarios) {
+            sgl_redirect_cfg('usuarios', 'erro', "Limite deste escritório atingido: {$limiteUsuarios} usuário(s).");
+        }
     }
 
     try {
@@ -4584,36 +4890,69 @@ if ($acao_cfg === 'novo_usuario') {
             }
         }
 
-        $colunasSql = "nome, usuario, email, senha, perfil, ativo";
-        $placeholders = "?, ?, ?, ?, ?, 1";
+        $colunasSql = "nome, usuario, email, senha, perfil, nivel, status, ativo";
+        $placeholders = "?, ?, ?, ?, ?, ?, ?, 1";
         if ($colunasExtras) {
             $colunasSql .= ", " . implode(", ", $colunasExtras);
             $placeholders .= ", " . implode(", ", array_fill(0, count($colunasExtras), "?"));
         }
 
+        $conn->begin_transaction();
         $stmt = $conn->prepare("INSERT INTO usuarios ($colunasSql) VALUES ($placeholders)");
-        $tipos = 'sssss' . $tiposExtras;
-        $valores = array_merge([$nome, $usuario, $email, $hash, $perfil], $valoresExtras);
+        $tipos = 'sssssss' . $tiposExtras;
+        $valores = array_merge([$nome, $usuario, $email, $hash, $perfil, $perfil, 'Ativo'], $valoresExtras);
         $stmt->bind_param($tipos, ...$valores);
         $stmt->execute();
-        $novoId = (string)$stmt->insert_id;
+        $novoIdInt = (int)$stmt->insert_id;
+        $novoId = (string)$novoIdInt;
         $stmt->close();
+
+        if (!$novoUsuarioPlataforma) {
+            $papelVinculo = $perfil === 'Administrador' ? 'administrador' : 'usuario';
+            $principalVinculo = 0;
+            $ativoVinculo = 1;
+            $stmtVinculo = $conn->prepare(
+                "INSERT INTO usuarios_escritorios_saas
+                    (usuario_id, escritorio_id, tenant_id, papel, principal, ativo)
+                 VALUES (?, ?, ?, ?, ?, ?)"
+            );
+            $stmtVinculo->bind_param(
+                'iissii',
+                $novoIdInt,
+                $escritorioNovoUsuario,
+                $tenantNovoUsuario,
+                $papelVinculo,
+                $principalVinculo,
+                $ativoVinculo
+            );
+            $stmtVinculo->execute();
+            $stmtVinculo->close();
+        }
+
+        $conn->commit();
 
         sgl_log(
             $conn,
             'Criou usuário Enterprise',
             'usuarios',
             $novoId,
-            "Login: {$usuario}; Perfil: {$perfil}; Departamento: " . ($departamento ?: '-')
+            "Login: {$usuario}; Perfil: {$perfil}; Departamento: " . ($departamento ?: '-') .
+            ($novoUsuarioPlataforma
+                ? '; Escopo: equipe interna ROJEX.AI'
+                : "; Tenant: {$tenantNovoUsuario}; Escritório: {$escritorioNovoUsuario}")
         );
-        sgl_redirect_cfg('usuarios', 'sucesso', 'Usuário criado com sucesso.');
+        sgl_redirect_cfg('usuarios', 'sucesso', $novoUsuarioPlataforma
+            ? 'Integrante da equipe ROJEX.AI criado com sucesso.'
+            : 'Usuário do escritório criado com sucesso.');
     } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $rollbackError) {}
         sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível criar o usuário. Verifique os dados informados.');
     }
 }
 
 if ($acao_cfg === 'editar_usuario' && !empty($_POST['usuario_id'])) {
     $id = (int)$_POST['usuario_id'];
+    $escritorioAlvoId = max(0, (int)($_POST['equipe_escritorio_id'] ?? 0));
     $nome = sgl_limpar_texto((string)($_POST['nome'] ?? ''), 120);
     $email = sgl_limpar_texto((string)($_POST['email'] ?? ''), 120);
     $telefone = sgl_limpar_texto((string)($_POST['telefone'] ?? ''), 40);
@@ -4623,39 +4962,60 @@ if ($acao_cfg === 'editar_usuario' && !empty($_POST['usuario_id'])) {
     $perfil = (string)($_POST['perfil'] ?? 'Usuário');
 
     $perfis = [
-        'Administrador Master','Administrador','Advogado','Coordenador',
+        'Administrador','Advogado','Coordenador',
         'Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'
     ];
-
-    if ($nome === '' || !in_array($perfil, $perfis, true)) {
-        sgl_redirect_cfg('usuarios', 'erro', 'Nome ou perfil inválido.');
-    }
     if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) {
         sgl_redirect_cfg('usuarios', 'erro', 'E-mail do usuário inválido.');
     }
 
     try {
-        $stmtAtual = $conn->prepare("SELECT perfil FROM usuarios WHERE id = ? LIMIT 1");
-        $stmtAtual->bind_param('i', $id);
-        $stmtAtual->execute();
-        $usuarioAtual = $stmtAtual->get_result()->fetch_assoc();
-        $stmtAtual->close();
-
+        $usuarioAtual = rojex_equipe_usuario_alvo(
+            $conn,
+            $id,
+            $ehUsuarioMaster,
+            $contextoEquipeSessao,
+            $escritorioAlvoId,
+            $podeSupervisionarEquipesGlobais
+        );
         if (!$usuarioAtual) {
-            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado.');
+            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado na equipe autorizada.');
         }
 
         $perfilAtual = (string)$usuarioAtual['perfil'];
-        $ehAdminAtual = in_array($perfilAtual, ['Administrador', 'Administrador Master'], true);
-        $seraAdmin = in_array($perfil, ['Administrador', 'Administrador Master'], true);
+        $alvoEhMaster = $id === $usuarioMasterId;
+        $alvoEhEquipeRojex = $ehUsuarioMaster
+            && !$alvoEhMaster
+            && (int)($usuarioAtual['escritorio_id'] ?? 0) === 0;
+        if ($alvoEhEquipeRojex) {
+            $perfis = ['Suporte ROJEX','Comercial ROJEX','Financeiro ROJEX','Operador ROJEX','Auditor ROJEX'];
+        }
+        if ($alvoEhMaster) {
+            $perfil = $perfilAtual;
+        }
+        if ($nome === '' || (!$alvoEhMaster && !in_array($perfil, $perfis, true))) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Nome ou perfil inválido.');
+        }
 
-        if ($ehAdminAtual && !$seraAdmin) {
-            $totalAdminsAtivos = sgl_select_count(
-                $conn,
-                "SELECT COUNT(*) AS total FROM usuarios WHERE ativo = 1 AND perfil IN ('Administrador','Administrador Master')"
+        $ehAdminAtual = $perfilAtual === 'Administrador';
+        $seraAdmin = $perfil === 'Administrador';
+
+        if (!$alvoEhMaster && $ehAdminAtual && !$seraAdmin && (int)($usuarioAtual['escritorio_id'] ?? 0) > 0) {
+            $tenantAlvo = (string)($usuarioAtual['tenant_id'] ?? '');
+            $escritorioAlvo = (int)($usuarioAtual['escritorio_id'] ?? 0);
+            $stmtAdmins = $conn->prepare(
+                "SELECT COUNT(DISTINCT u.id) AS total
+                   FROM usuarios u
+             INNER JOIN usuarios_escritorios_saas ue ON ue.usuario_id=u.id
+                  WHERE ue.tenant_id=? AND ue.escritorio_id=? AND ue.ativo=1
+                    AND u.ativo=1 AND u.perfil='Administrador'"
             );
+            $stmtAdmins->bind_param('si', $tenantAlvo, $escritorioAlvo);
+            $stmtAdmins->execute();
+            $totalAdminsAtivos = (int)($stmtAdmins->get_result()->fetch_assoc()['total'] ?? 0);
+            $stmtAdmins->close();
             if ($totalAdminsAtivos <= 1) {
-                sgl_redirect_cfg('usuarios', 'erro', 'Não é possível remover o perfil do último administrador ativo.');
+                sgl_redirect_cfg('usuarios', 'erro', 'Não é possível remover o perfil do último administrador ativo deste escritório.');
             }
         }
 
@@ -4669,9 +5029,9 @@ if ($acao_cfg === 'editar_usuario' && !empty($_POST['usuario_id'])) {
             sgl_redirect_cfg('usuarios', 'erro', 'Este e-mail já está vinculado a outro usuário.');
         }
 
-        $sets = ["nome = ?", "email = ?", "perfil = ?"];
-        $tipos = "sss";
-        $valores = [$nome, $email, $perfil];
+        $sets = ["nome = ?", "email = ?", "perfil = ?", "nivel = ?"];
+        $tipos = "ssss";
+        $valores = [$nome, $email, $perfil, $perfil];
 
         foreach ([
             'telefone' => $telefone,
@@ -4698,12 +5058,22 @@ if ($acao_cfg === 'editar_usuario' && !empty($_POST['usuario_id'])) {
         $stmt->execute();
         $stmt->close();
 
+        if (!$alvoEhMaster && !empty($usuarioAtual['vinculo_id'])) {
+            $papelVinculo = $perfil === 'Administrador' ? 'administrador' : 'usuario';
+            $vinculoId = (int)$usuarioAtual['vinculo_id'];
+            $stmtPapel = $conn->prepare("UPDATE usuarios_escritorios_saas SET papel=? WHERE id=?");
+            $stmtPapel->bind_param('si', $papelVinculo, $vinculoId);
+            $stmtPapel->execute();
+            $stmtPapel->close();
+        }
+
         sgl_log(
             $conn,
             'Atualizou usuário Enterprise',
             'usuarios',
             (string)$id,
-            "Perfil anterior: {$perfilAtual}; Novo perfil: {$perfil}; Departamento: " . ($departamento ?: '-')
+            "Perfil anterior: {$perfilAtual}; Novo perfil: {$perfil}; Departamento: " . ($departamento ?: '-') .
+            '; Escritório: ' . (string)($usuarioAtual['escritorio_id'] ?? 'plataforma')
         );
         sgl_redirect_cfg('usuarios', 'sucesso', 'Dados do usuário atualizados.');
     } catch (Throwable $e) {
@@ -4713,30 +5083,45 @@ if ($acao_cfg === 'editar_usuario' && !empty($_POST['usuario_id'])) {
 
 if ($acao_cfg === 'alterar_status_usuario' && !empty($_POST['usuario_id'])) {
     $id = (int)$_POST['usuario_id'];
+    $escritorioAlvoId = max(0, (int)($_POST['equipe_escritorio_id'] ?? 0));
     $ativo = ((int)($_POST['ativo'] ?? 1) === 1) ? 1 : 0;
 
-    if ($id === (int)($_SESSION['user_id'] ?? 0) && $ativo === 0) {
+    if (($id === (int)($_SESSION['user_id'] ?? 0) || $id === $usuarioMasterId) && $ativo === 0) {
         sgl_redirect_cfg('usuarios', 'erro', 'Você não pode desativar o próprio usuário logado.');
     }
 
     try {
-        $stmtPerfil = $conn->prepare("SELECT perfil FROM usuarios WHERE id = ? LIMIT 1");
-        $stmtPerfil->bind_param('i', $id);
-        $stmtPerfil->execute();
-        $usuarioAlvo = $stmtPerfil->get_result()->fetch_assoc();
-        $stmtPerfil->close();
-
+        $usuarioAlvo = rojex_equipe_usuario_alvo(
+            $conn,
+            $id,
+            $ehUsuarioMaster,
+            $contextoEquipeSessao,
+            $escritorioAlvoId,
+            $podeSupervisionarEquipesGlobais
+        );
         if (!$usuarioAlvo) {
-            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado.');
+            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado na equipe autorizada.');
         }
 
-        if ($ativo === 0 && in_array($usuarioAlvo['perfil'], ['Administrador','Administrador Master'], true)) {
-            $totalAdminsAtivos = sgl_select_count(
-                $conn,
-                "SELECT COUNT(*) AS total FROM usuarios WHERE ativo = 1 AND perfil IN ('Administrador','Administrador Master')"
+        if ($ativo === 0
+            && (string)$usuarioAlvo['perfil'] === 'Administrador'
+            && (int)($usuarioAlvo['escritorio_id'] ?? 0) > 0
+        ) {
+            $tenantAlvo = (string)($usuarioAlvo['tenant_id'] ?? '');
+            $escritorioAlvo = (int)($usuarioAlvo['escritorio_id'] ?? 0);
+            $stmtAdmins = $conn->prepare(
+                "SELECT COUNT(DISTINCT u.id) AS total
+                   FROM usuarios u
+             INNER JOIN usuarios_escritorios_saas ue ON ue.usuario_id=u.id
+                  WHERE ue.tenant_id=? AND ue.escritorio_id=? AND ue.ativo=1
+                    AND u.ativo=1 AND u.perfil='Administrador'"
             );
+            $stmtAdmins->bind_param('si', $tenantAlvo, $escritorioAlvo);
+            $stmtAdmins->execute();
+            $totalAdminsAtivos = (int)($stmtAdmins->get_result()->fetch_assoc()['total'] ?? 0);
+            $stmtAdmins->close();
             if ($totalAdminsAtivos <= 1) {
-                sgl_redirect_cfg('usuarios', 'erro', 'Não é possível desativar o último administrador ativo.');
+                sgl_redirect_cfg('usuarios', 'erro', 'Não é possível desativar o último administrador ativo deste escritório.');
             }
         }
 
@@ -4749,7 +5134,13 @@ if ($acao_cfg === 'alterar_status_usuario' && !empty($_POST['usuario_id'])) {
         $stmt->execute();
         $stmt->close();
 
-        sgl_log($conn, $ativo ? 'Ativou usuário' : 'Desativou usuário', 'usuarios', (string)$id);
+        sgl_log(
+            $conn,
+            $ativo ? 'Ativou usuário' : 'Desativou usuário',
+            'usuarios',
+            (string)$id,
+            'Escritório: ' . (string)($usuarioAlvo['escritorio_id'] ?? 'plataforma')
+        );
         sgl_redirect_cfg('usuarios', 'sucesso', 'Status do usuário atualizado.');
     } catch (Throwable $e) {
         sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível alterar o status do usuário.');
@@ -4758,60 +5149,115 @@ if ($acao_cfg === 'alterar_status_usuario' && !empty($_POST['usuario_id'])) {
 
 if ($acao_cfg === 'encerrar_vinculo_usuario' && !empty($_POST['usuario_id'])) {
     $id = (int)$_POST['usuario_id'];
+    $escritorioAlvoId = max(0, (int)($_POST['equipe_escritorio_id'] ?? 0));
 
     if ($id === $usuarioSessaoId || $id === $usuarioMasterId) {
         sgl_redirect_cfg('usuarios', 'erro', 'O usuário MASTER não pode ter o vínculo encerrado.');
     }
 
     try {
-        $stmt = $conn->prepare("SELECT id, nome, usuario, perfil, ativo FROM usuarios WHERE id = ? LIMIT 1");
-        $stmt->bind_param('i', $id);
-        $stmt->execute();
-        $alvo = $stmt->get_result()->fetch_assoc();
-        $stmt->close();
-
+        $alvo = rojex_equipe_usuario_alvo(
+            $conn,
+            $id,
+            $ehUsuarioMaster,
+            $contextoEquipeSessao,
+            $escritorioAlvoId,
+            $podeSupervisionarEquipesGlobais
+        );
         if (!$alvo) {
-            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado.');
+            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado na equipe autorizada.');
         }
 
+        if ((string)($alvo['perfil'] ?? '') === 'Administrador'
+            && (int)($alvo['escritorio_id'] ?? 0) > 0
+        ) {
+            $tenantAlvo = (string)($alvo['tenant_id'] ?? '');
+            $escritorioAlvo = (int)($alvo['escritorio_id'] ?? 0);
+            $stmtAdmins = $conn->prepare(
+                "SELECT COUNT(DISTINCT u.id) AS total
+                   FROM usuarios u
+             INNER JOIN usuarios_escritorios_saas ue ON ue.usuario_id=u.id
+                  WHERE ue.tenant_id=? AND ue.escritorio_id=? AND ue.ativo=1
+                    AND u.ativo=1 AND u.perfil='Administrador'"
+            );
+            $stmtAdmins->bind_param('si', $tenantAlvo, $escritorioAlvo);
+            $stmtAdmins->execute();
+            $totalAdminsAtivos = (int)($stmtAdmins->get_result()->fetch_assoc()['total'] ?? 0);
+            $stmtAdmins->close();
+            if ($totalAdminsAtivos <= 1) {
+                sgl_redirect_cfg('usuarios', 'erro', 'Não é possível encerrar o vínculo do último administrador ativo deste escritório.');
+            }
+        }
+
+        $conn->begin_transaction();
         if (!sgl_registrar_historico_usuario($conn, $id, 'ENCERRAMENTO_DE_VINCULO')) {
+            $conn->rollback();
             sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível criar o histórico de segurança. Nenhuma alteração foi realizada.');
         }
 
-        $sets = ["ativo = 0"];
-        if (sgl_coluna_existe($conn, 'usuarios', 'vinculo_status')) {
-            $sets[] = "vinculo_status = 'encerrado'";
-        }
-        if (sgl_coluna_existe($conn, 'usuarios', 'desligado_em')) {
-            $sets[] = "desligado_em = NOW()";
-        }
-        if (sgl_coluna_existe($conn, 'usuarios', 'desligado_por')) {
-            $sets[] = "desligado_por = " . (int)$usuarioSessaoId;
-        }
-        if (sgl_coluna_existe($conn, 'usuarios', 'atualizado_em')) {
-            $sets[] = "atualizado_em = NOW()";
+        $vinculoId = (int)($alvo['vinculo_id'] ?? 0);
+        if ($vinculoId > 0) {
+            $stmtVinculo = $conn->prepare("UPDATE usuarios_escritorios_saas SET ativo=0 WHERE id=?");
+            $stmtVinculo->bind_param('i', $vinculoId);
+            $stmtVinculo->execute();
+            $stmtVinculo->close();
+
+            $stmtOutros = $conn->prepare(
+                "SELECT COUNT(*) AS total FROM usuarios_escritorios_saas WHERE usuario_id=? AND ativo=1"
+            );
+            $stmtOutros->bind_param('i', $id);
+            $stmtOutros->execute();
+            $outrosVinculosAtivos = (int)($stmtOutros->get_result()->fetch_assoc()['total'] ?? 0);
+            $stmtOutros->close();
+        } elseif ($ehUsuarioMaster && (int)($alvo['escritorio_id'] ?? 0) === 0) {
+            // Integrante interno da plataforma: não possui vínculo tenant por definição.
+            $outrosVinculosAtivos = 0;
+        } else {
+            throw new RuntimeException('Vínculo inválido para encerramento.');
         }
 
-        $stmt = $conn->prepare("UPDATE usuarios SET " . implode(', ', $sets) . " WHERE id = ?");
-        $stmt->bind_param('i', $id);
-        $stmt->execute();
-        $stmt->close();
+        if ($outrosVinculosAtivos === 0) {
+            $sets = ["ativo = 0"];
+            if (sgl_coluna_existe($conn, 'usuarios', 'vinculo_status')) {
+                $sets[] = "vinculo_status = 'encerrado'";
+            }
+            if (sgl_coluna_existe($conn, 'usuarios', 'desligado_em')) {
+                $sets[] = "desligado_em = NOW()";
+            }
+            if (sgl_coluna_existe($conn, 'usuarios', 'desligado_por')) {
+                $sets[] = "desligado_por = " . (int)$usuarioSessaoId;
+            }
+            if (sgl_coluna_existe($conn, 'usuarios', 'atualizado_em')) {
+                $sets[] = "atualizado_em = NOW()";
+            }
+
+            $stmt = $conn->prepare("UPDATE usuarios SET " . implode(', ', $sets) . " WHERE id = ?");
+            $stmt->bind_param('i', $id);
+            $stmt->execute();
+            $stmt->close();
+        }
+        $conn->commit();
 
         sgl_log(
             $conn,
             'Encerrou vínculo de usuário',
             'usuarios',
             (string)$id,
-            'Cadastro preservado integralmente em usuarios_historico para auditoria e prova futura.'
+            'Cadastro preservado integralmente em usuarios_historico. Escopo: ' .
+            ((int)($alvo['escritorio_id'] ?? 0) > 0
+                ? 'escritório ' . (string)$alvo['escritorio_id']
+                : 'equipe interna ROJEX.AI') . '.'
         );
         sgl_redirect_cfg('usuarios', 'aviso', 'Vínculo encerrado. O cadastro e o histórico foram preservados.');
     } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $rollbackError) {}
         sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível encerrar o vínculo do usuário.');
     }
 }
 
 if ($acao_cfg === 'resetar_senha_usuario' && !empty($_POST['usuario_id'])) {
     $id = (int)$_POST['usuario_id'];
+    $escritorioAlvoId = max(0, (int)($_POST['equipe_escritorio_id'] ?? 0));
     $nova = (string)($_POST['nova_senha'] ?? '');
 
     // Política atual preservada conforme decisão do projeto.
@@ -4820,6 +5266,20 @@ if ($acao_cfg === 'resetar_senha_usuario' && !empty($_POST['usuario_id'])) {
     }
 
     try {
+        $usuarioAlvo = rojex_equipe_usuario_alvo(
+            $conn,
+            $id,
+            $ehUsuarioMaster,
+            $contextoEquipeSessao,
+            $escritorioAlvoId,
+            $podeSupervisionarEquipesGlobais
+        );
+        if (!$usuarioAlvo) {
+            sgl_redirect_cfg('usuarios', 'erro', 'Usuário não encontrado na equipe autorizada.');
+        }
+        if (!$ehUsuarioMaster && $id === $usuarioMasterId) {
+            sgl_redirect_cfg('usuarios', 'erro', 'O usuário MASTER é protegido.');
+        }
         $hash = password_hash($nova, PASSWORD_DEFAULT);
         $sqlAtualizacao = sgl_coluna_existe($conn, 'usuarios', 'atualizado_em')
             ? "UPDATE usuarios SET senha = ?, atualizado_em = NOW() WHERE id = ?"
@@ -4830,7 +5290,13 @@ if ($acao_cfg === 'resetar_senha_usuario' && !empty($_POST['usuario_id'])) {
         $stmt->execute();
         $stmt->close();
 
-        sgl_log($conn, 'Redefiniu senha de usuário', 'usuarios', (string)$id);
+        sgl_log(
+            $conn,
+            'Redefiniu senha de usuário',
+            'usuarios',
+            (string)$id,
+            'Escritório: ' . (string)($usuarioAlvo['escritorio_id'] ?? 'plataforma')
+        );
         sgl_redirect_cfg('usuarios', 'sucesso', 'Senha redefinida com sucesso.');
     } catch (Throwable $e) {
         sgl_redirect_cfg('usuarios', 'erro', 'Não foi possível redefinir a senha.');
@@ -5341,6 +5807,25 @@ if (!$ehUsuarioMaster
     }
 }
 
+$escritoriosEquipe = [];
+if ($podeSupervisionarEquipesGlobais && sgl_tabela_existe($conn, 'escritorios_saas')) {
+    try {
+        $resEquipeEscritorios = $conn->query(
+            "SELECT id, tenant_id, nome, status
+               FROM escritorios_saas
+              WHERE status<>'encerrado' AND tenant_id<>''
+              ORDER BY nome ASC"
+        );
+        if ($resEquipeEscritorios) {
+            while ($escritorioEquipe = $resEquipeEscritorios->fetch_assoc()) {
+                $escritoriosEquipe[] = $escritorioEquipe;
+            }
+        }
+    } catch (Throwable $e) {
+        $escritoriosEquipe = [];
+    }
+}
+
 $usuarios = [];
 if (sgl_tabela_existe($conn, 'usuarios')) {
     $camposUsuarios = ['id', 'nome', 'usuario', 'email', 'perfil', 'ativo'];
@@ -5351,14 +5836,62 @@ if (sgl_tabela_existe($conn, 'usuarios')) {
         }
     }
 
-    if ($ehUsuarioMaster) {
-        $resUsuarios = $conn->query(
-            "SELECT " . implode(', ', $camposUsuarios) . " FROM usuarios ORDER BY ativo DESC, nome ASC"
+    if ($podeConsultarUsuariosGlobais) {
+        $camposUsuariosMaster = array_map(
+            static fn(string $campo): string => 'u.`' . $campo . '`',
+            $camposUsuarios
         );
-        if ($resUsuarios) {
+        $stmtUsuariosMaster = $conn->prepare(
+            "SELECT " . implode(', ', $camposUsuariosMaster) . ",
+                    ue.id AS vinculo_id, ue.escritorio_id, ue.tenant_id,
+                    ue.papel, ue.principal, e.nome AS escritorio_nome
+               FROM usuarios u
+          LEFT JOIN usuarios_escritorios_saas ue ON ue.usuario_id=u.id AND ue.ativo=1
+          LEFT JOIN escritorios_saas e ON e.id=ue.escritorio_id AND e.tenant_id=ue.tenant_id
+              WHERE u.id=? OR ue.id IS NOT NULL OR (
+                    COALESCE(u.vinculo_status,'ativo')<>'encerrado'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM usuarios_escritorios_saas ue_ativo
+                         WHERE ue_ativo.usuario_id=u.id AND ue_ativo.ativo=1
+                    )
+              )
+              ORDER BY e.nome IS NULL DESC, e.nome ASC, u.ativo DESC, u.nome ASC"
+        );
+        $stmtUsuariosMaster->bind_param('i', $usuarioMasterId);
+        $stmtUsuariosMaster->execute();
+        $resUsuarios = $stmtUsuariosMaster->get_result();
+        while ($u = $resUsuarios->fetch_assoc()) {
+            $usuarios[] = $u;
+        }
+        $stmtUsuariosMaster->close();
+    } elseif ($podeSupervisionarEquipesGlobais && sgl_tabela_existe($conn, 'usuarios_escritorios_saas')) {
+        // O Suporte ROJEX recebe somente usuários vinculados a escritórios.
+        // A equipe interna e o MASTER principal nunca entram nesta consulta.
+        try {
+            $camposUsuariosSuporte = array_map(
+                static fn(string $campo): string => 'u.`' . $campo . '`',
+                $camposUsuarios
+            );
+            $stmtUsuariosSuporte = $conn->prepare(
+                "SELECT DISTINCT " . implode(', ', $camposUsuariosSuporte) . ",
+                        ue.id AS vinculo_id, ue.escritorio_id, ue.tenant_id,
+                        ue.papel, ue.principal, e.nome AS escritorio_nome
+                   FROM usuarios u
+             INNER JOIN usuarios_escritorios_saas ue
+                     ON ue.usuario_id=u.id AND ue.ativo=1
+             INNER JOIN escritorios_saas e
+                     ON e.id=ue.escritorio_id AND e.tenant_id=ue.tenant_id
+                  WHERE e.status<>'encerrado' AND e.tenant_id<>''
+                  ORDER BY e.nome ASC, u.ativo DESC, u.nome ASC"
+            );
+            $stmtUsuariosSuporte->execute();
+            $resUsuarios = $stmtUsuariosSuporte->get_result();
             while ($u = $resUsuarios->fetch_assoc()) {
                 $usuarios[] = $u;
             }
+            $stmtUsuariosSuporte->close();
+        } catch (Throwable $e) {
+            $usuarios = [];
         }
     } elseif ($contextoMetricasTenant && sgl_tabela_existe($conn, 'usuarios_escritorios_saas')) {
         try {
@@ -5367,9 +5900,12 @@ if (sgl_tabela_existe($conn, 'usuarios')) {
                 $camposUsuarios
             );
             $stmtUsuarios = $conn->prepare(
-                "SELECT DISTINCT " . implode(', ', $camposUsuariosTenant) . "
+                "SELECT DISTINCT " . implode(', ', $camposUsuariosTenant) . ",
+                        ue.id AS vinculo_id, ue.escritorio_id, ue.tenant_id,
+                        ue.papel, ue.principal, e.nome AS escritorio_nome
                    FROM usuarios u
              INNER JOIN usuarios_escritorios_saas ue ON ue.usuario_id=u.id
+             INNER JOIN escritorios_saas e ON e.id=ue.escritorio_id AND e.tenant_id=ue.tenant_id
                   WHERE ue.tenant_id=? AND ue.escritorio_id=? AND ue.ativo=1
                   ORDER BY u.ativo DESC, u.nome ASC"
             );
@@ -5389,6 +5925,112 @@ if (sgl_tabela_existe($conn, 'usuarios')) {
     }
 }
 
+// Visões separadas da Gestão de Equipes. A equipe interna nunca consome vagas
+// das licenças dos escritórios e a supervisão MASTER abre um escritório por vez.
+$limiteEquipeRojex = 5;
+$usuariosRojex = [];
+$usuariosEscritorioSelecionado = [];
+$resumoEquipesEscritorios = [];
+$resumoEquipesFiltrado = [];
+$visaoEquipeMaster = $ehUsuarioMaster
+    ? ((string)($_GET['equipe_visao'] ?? 'rojex') === 'escritorios' ? 'escritorios' : 'rojex')
+    : ($podeSupervisionarEquipesGlobais ? 'escritorios' : 'tenant');
+$equipeBusca = trim((string)($_GET['equipe_busca'] ?? ''));
+$equipeStatus = trim((string)($_GET['equipe_status'] ?? ''));
+$equipePagina = max(1, (int)($_GET['equipe_pagina'] ?? 1));
+$equipePorPagina = 10;
+$escritorioEquipeSelecionadoId = $podeSupervisionarEquipesGlobais
+    ? max(0, (int)($_GET['equipe_escritorio'] ?? 0))
+    : (int)($contextoMetricasTenant['escritorio_id'] ?? 0);
+
+if ($podeSupervisionarEquipesGlobais) {
+    foreach ($usuarios as $usuarioEquipe) {
+        $escritorioUsuarioId = (int)($usuarioEquipe['escritorio_id'] ?? 0);
+        if ($ehUsuarioMaster && $escritorioUsuarioId <= 0) {
+            $usuariosRojex[] = $usuarioEquipe;
+        }
+        if ($escritorioEquipeSelecionadoId > 0 && $escritorioUsuarioId === $escritorioEquipeSelecionadoId) {
+            $usuariosEscritorioSelecionado[] = $usuarioEquipe;
+        }
+    }
+
+    if (sgl_tabela_existe($conn, 'escritorios_saas')
+        && sgl_tabela_existe($conn, 'usuarios_escritorios_saas')
+    ) {
+        try {
+            $sqlResumoEquipes =
+                "SELECT e.id, e.tenant_id, e.nome, e.status, e.plano,
+                        COUNT(DISTINCT CASE WHEN ue.ativo=1 AND COALESCE(u.vinculo_status,'ativo')<>'encerrado' THEN u.id END) AS total_usuarios,
+                        COUNT(DISTINCT CASE WHEN ue.ativo=1 AND u.ativo=1 AND COALESCE(u.vinculo_status,'ativo')<>'encerrado' THEN u.id END) AS usuarios_ativos,
+                        MAX(CASE WHEN ue.ativo=1 AND u.ativo=1 AND u.perfil='Administrador' THEN u.nome END) AS administrador_nome,
+                        COALESCE((
+                            SELECT l.limite_usuarios FROM licencas_saas l
+                             WHERE l.escritorio_id=e.id
+                             ORDER BY (l.status IN ('ativa','teste')) DESC, l.id DESC
+                             LIMIT 1
+                        ), 1) AS limite_usuarios
+                   FROM escritorios_saas e
+              LEFT JOIN usuarios_escritorios_saas ue
+                     ON ue.escritorio_id=e.id AND ue.tenant_id=e.tenant_id
+              LEFT JOIN usuarios u ON u.id=ue.usuario_id
+                  WHERE e.status<>'encerrado' AND e.tenant_id<>''
+               GROUP BY e.id, e.tenant_id, e.nome, e.status, e.plano
+               ORDER BY e.nome ASC";
+            $resResumoEquipes = $conn->query($sqlResumoEquipes);
+            while ($resResumoEquipes && ($resumoEquipe = $resResumoEquipes->fetch_assoc())) {
+                $resumoEquipesEscritorios[] = $resumoEquipe;
+            }
+        } catch (Throwable $e) {
+            $resumoEquipesEscritorios = [];
+        }
+    }
+
+    $statusPermitidosEquipe = ['ativo','teste','suspenso','implantacao'];
+    if (!in_array($equipeStatus, $statusPermitidosEquipe, true)) $equipeStatus = '';
+    foreach ($resumoEquipesEscritorios as $resumoEquipe) {
+        $textoBuscaEquipe = mb_strtolower(
+            (string)$resumoEquipe['nome'] . ' ' .
+            (string)$resumoEquipe['tenant_id'] . ' ' .
+            (string)($resumoEquipe['administrador_nome'] ?? '')
+        );
+        if ($equipeBusca !== '' && mb_strpos($textoBuscaEquipe, mb_strtolower($equipeBusca)) === false) continue;
+        if ($equipeStatus !== '' && (string)$resumoEquipe['status'] !== $equipeStatus) continue;
+        $resumoEquipesFiltrado[] = $resumoEquipe;
+    }
+}
+
+$equipeTotalPaginas = max(1, (int)ceil(count($resumoEquipesFiltrado) / $equipePorPagina));
+if ($equipePagina > $equipeTotalPaginas) $equipePagina = $equipeTotalPaginas;
+$resumoEquipesPagina = array_slice(
+    $resumoEquipesFiltrado,
+    ($equipePagina - 1) * $equipePorPagina,
+    $equipePorPagina
+);
+
+$usuariosExibicao = $podeSupervisionarEquipesGlobais
+    ? ($visaoEquipeMaster === 'rojex' ? $usuariosRojex : $usuariosEscritorioSelecionado)
+    : $usuarios;
+$limiteUsuariosExibicao = $podeSupervisionarEquipesGlobais
+    ? ($visaoEquipeMaster === 'rojex'
+        ? $limiteEquipeRojex
+        : ($escritorioEquipeSelecionadoId > 0
+            ? rojex_equipe_limite_usuarios($conn, $escritorioEquipeSelecionadoId)
+            : 0))
+    : rojex_equipe_limite_usuarios($conn, (int)($contextoMetricasTenant['escritorio_id'] ?? 0));
+$totalEscritoriosEquipe = count($resumoEquipesEscritorios);
+$totalEscritoriosAtivosEquipe = count(array_filter(
+    $resumoEquipesEscritorios,
+    fn($item) => in_array((string)($item['status'] ?? ''), ['ativo','teste'], true)
+));
+$totalUsuariosClientesEquipe = array_sum(array_map(
+    fn($item) => (int)($item['total_usuarios'] ?? 0),
+    $resumoEquipesEscritorios
+));
+$totalCapacidadeClientesEquipe = array_sum(array_map(
+    fn($item) => (int)($item['limite_usuarios'] ?? 0),
+    $resumoEquipesEscritorios
+));
+
 $logs = [];
 $logsRelatorio = [];
 $logDataInicio = trim((string)($_GET['log_data_inicio'] ?? ''));
@@ -5402,7 +6044,7 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
         $tiposLogs = '';
         $valoresLogs = [];
 
-        if (!$ehUsuarioMaster) {
+        if (!$podeConsultarLogsGlobais) {
             if (!$contextoMetricasTenant
                 || !sgl_coluna_existe($conn, 'logs_sistema', 'tenant_id')
                 || !sgl_coluna_existe($conn, 'logs_sistema', 'escritorio_id')
@@ -5468,7 +6110,7 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
 }
 
 $logModulosDisponiveis = [];
-if (sgl_tabela_existe($conn, 'logs_sistema')) {
+if (($podeConsultarLogsGlobais || $contextoMetricasTenant) && sgl_tabela_existe($conn, 'logs_sistema')) {
     try {
         $resModulosLog = $conn->query("SELECT DISTINCT tabela FROM logs_sistema WHERE tabela IS NOT NULL AND tabela <> '' ORDER BY tabela");
         if ($resModulosLog) {
@@ -5517,10 +6159,44 @@ $totalInativos = $totalUsuarios - $totalAtivos;
 $totalAdministradores = count(array_filter($usuarios, fn($u) => in_array($u['perfil'] ?? '', ['Administrador','Administrador Master'], true)));
 $totalAdvogadosUsuarios = count(array_filter($usuarios, fn($u) => ($u['perfil'] ?? '') === 'Advogado'));
 $totalFinanceiroUsuarios = count(array_filter($usuarios, fn($u) => ($u['perfil'] ?? '') === 'Financeiro'));
-$limiteUsuariosLicenca = max(1, min(100, (int)$cfg['limite_usuarios_licenca']));
+$limiteUsuariosLicenca = max(1, min(1000, (int)$cfg['limite_usuarios_licenca']));
+if ($podeConsultarCadastrosSaas && sgl_tabela_existe($conn, 'licencas_saas')) {
+    try {
+        $resLimiteGlobal = $conn->query(
+            "SELECT COALESCE(SUM(l.limite_usuarios),0) AS total
+               FROM licencas_saas l
+         INNER JOIN (
+                    SELECT escritorio_id, MAX(id) AS id
+                      FROM licencas_saas
+                     GROUP BY escritorio_id
+                    ) ultima ON ultima.id=l.id"
+        );
+        $limiteUsuariosLicenca = max(1, (int)($resLimiteGlobal->fetch_assoc()['total'] ?? 1));
+    } catch (Throwable $e) {}
+} elseif ($contextoMetricasTenant) {
+    $limiteUsuariosLicenca = rojex_equipe_limite_usuarios(
+        $conn,
+        (int)$contextoMetricasTenant['escritorio_id']
+    );
+}
 $percentualLicencaUsuarios = min(100, (int)round(($totalUsuarios / $limiteUsuariosLicenca) * 100));
+$totalUsuariosExibicao = count($usuariosExibicao);
+$totalAtivosExibicao = count(array_filter($usuariosExibicao, fn($u) => (int)$u['ativo'] === 1));
+$totalInativosExibicao = $totalUsuariosExibicao - $totalAtivosExibicao;
+$totalAdministradoresExibicao = count(array_filter(
+    $usuariosExibicao,
+    fn($u) => in_array($u['perfil'] ?? '', ['Administrador','Administrador Master'], true)
+));
+$totalAdvogadosExibicao = count(array_filter($usuariosExibicao, fn($u) => ($u['perfil'] ?? '') === 'Advogado'));
+$totalFinanceiroExibicao = count(array_filter(
+    $usuariosExibicao,
+    fn($u) => in_array(($u['perfil'] ?? ''), ['Financeiro','Financeiro ROJEX'], true)
+));
+$percentualUsuariosExibicao = $limiteUsuariosExibicao > 0
+    ? min(100, (int)round(($totalUsuariosExibicao / $limiteUsuariosExibicao) * 100))
+    : 0;
 $totalLogs = 0;
-if ($ehUsuarioMaster) {
+if ($podeConsultarLogsGlobais) {
     $totalLogs = sgl_select_count($conn, "SELECT COUNT(*) AS total FROM logs_sistema");
 } elseif ($contextoMetricasTenant
     && sgl_tabela_existe($conn, 'logs_sistema')
@@ -5544,7 +6220,7 @@ if ($ehUsuarioMaster) {
 $inventarioLogs = [];
 if (sgl_tabela_existe($conn, 'logs_sistema')) {
     try {
-        if ($ehUsuarioMaster) {
+        if ($podeConsultarLogsGlobais) {
             $resInv = $conn->query("SELECT COALESCE(l.usuario_nome, u.nome, 'Sistema') AS usuario_nome, COALESCE(l.usuario_perfil, u.perfil, '-') AS perfil, COALESCE(l.tabela, '-') AS modulo, COUNT(*) AS total, MAX(l.criado_em) AS ultimo_registro FROM logs_sistema l LEFT JOIN usuarios u ON u.id = l.usuario_id GROUP BY usuario_nome, perfil, modulo ORDER BY total DESC, ultimo_registro DESC LIMIT 30");
             if ($resInv) { while ($i = $resInv->fetch_assoc()) { $inventarioLogs[] = $i; } }
         } elseif ($contextoMetricasTenant
@@ -5577,50 +6253,6 @@ if (sgl_tabela_existe($conn, 'logs_sistema')) {
 $totalLixeira = count($lixeira_todos);
 
 
-// Sincroniza, sem duplicar, esta instalação com a estrutura SaaS central.
-// O cadastro nasce a partir das configurações homologadas na Sprint 4.1.2.
-$tenantAtualSaas = (string)($cfg['tenant_id'] ?? '');
-$escritorioAtualSaasId = 0;
-if ($tenantAtualSaas !== '' && sgl_tabela_existe($conn, 'escritorios_saas')) {
-    try {
-        $nomeSaas = (string)($cfg['nome_escritorio'] ?: 'Escritório sem nome');
-        $documentoSaas = (string)($cfg['cpf_cnpj_escritorio'] ?? '');
-        $responsavelSaas = (string)($cfg['responsavel_administrativo_escritorio'] ?: $cfg['responsavel_escritorio']);
-        $emailSaas = (string)($cfg['email_administrativo_escritorio'] ?: $cfg['email_escritorio']);
-        $subdominioSaas = (string)($cfg['subdominio_saas'] ?? '');
-        $planoAtualSaas = in_array(($cfg['plano_licenca'] ?? ''), ['starter','professional','enterprise'], true) ? (string)$cfg['plano_licenca'] : 'enterprise';
-
-        // O status não participa desta compatibilidade. Em uma eventual linha
-        // legada nova, o banco aplica o padrão "implantacao"; linhas existentes
-        // conservam integralmente o status definido pelo MASTER.
-        $stmt = $conn->prepare("INSERT INTO escritorios_saas (tenant_id, nome, documento, responsavel, email, subdominio, plano) VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE nome = VALUES(nome), documento = VALUES(documento), responsavel = VALUES(responsavel), email = VALUES(email), subdominio = CASE WHEN VALUES(subdominio) IS NULL OR TRIM(VALUES(subdominio)) = '' THEN escritorios_saas.subdominio ELSE VALUES(subdominio) END, plano = VALUES(plano)");
-        $stmt->bind_param('sssssss', $tenantAtualSaas, $nomeSaas, $documentoSaas, $responsavelSaas, $emailSaas, $subdominioSaas, $planoAtualSaas);
-        $stmt->execute();
-        $stmt->close();
-
-        $stmt = $conn->prepare("SELECT id FROM escritorios_saas WHERE tenant_id = ? LIMIT 1");
-        $stmt->bind_param('s', $tenantAtualSaas);
-        $stmt->execute();
-        $escritorioAtualSaasId = (int)($stmt->get_result()->fetch_assoc()['id'] ?? 0);
-        $stmt->close();
-
-        $chaveAtualSaas = (string)($cfg['chave_instalacao'] ?? '');
-        if ($escritorioAtualSaasId > 0 && $chaveAtualSaas !== '') {
-            $statusAtualSaas = in_array(($cfg['status_licenca'] ?? ''), ['teste','ativa','suspensa','expirada'], true) ? (string)$cfg['status_licenca'] : 'teste';
-            $limiteUsuariosAtualSaas = max(1, (int)($cfg['limite_usuarios_licenca'] ?? 100));
-            $limiteArmazenamentoAtualSaas = max(1, (int)($cfg['limite_armazenamento_gb'] ?? 50));
-            $ativacaoAtualSaas = ($cfg['data_ativacao_licenca'] ?? '') !== '' ? (string)$cfg['data_ativacao_licenca'] : null;
-            $renovacaoAtualSaas = ($cfg['data_renovacao_licenca'] ?? '') !== '' ? (string)$cfg['data_renovacao_licenca'] : null;
-            $stmt = $conn->prepare("INSERT INTO licencas_saas (escritorio_id, chave_licenca, plano, status, limite_usuarios, limite_armazenamento_gb, ativada_em, renovacao_em, observacoes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Licença sincronizada com a instalação atual.') ON DUPLICATE KEY UPDATE escritorio_id = VALUES(escritorio_id), plano = VALUES(plano), limite_usuarios = VALUES(limite_usuarios), limite_armazenamento_gb = VALUES(limite_armazenamento_gb)");
-            $stmt->bind_param('isssiiss', $escritorioAtualSaasId, $chaveAtualSaas, $planoAtualSaas, $statusAtualSaas, $limiteUsuariosAtualSaas, $limiteArmazenamentoAtualSaas, $ativacaoAtualSaas, $renovacaoAtualSaas);
-            $stmt->execute();
-            $stmt->close();
-        }
-    } catch (Throwable $e) {
-        // A sincronização administrativa nunca deve interromper Configurações.
-    }
-}
-
 $escritoriosSaas = [];
 $licencasSaas = [];
 $licencaEditar = null;
@@ -5628,7 +6260,7 @@ $escritorioEditar = null;
 $escritorioBusca = trim((string)($_GET['escritorio_q'] ?? ''));
 $escritorioStatusFiltro = trim((string)($_GET['escritorio_status'] ?? 'operacionais'));
 $escritorioPlanoFiltro = trim((string)($_GET['escritorio_plano'] ?? ''));
-if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'escritorios_saas')) {
+if ($podeConsultarCadastrosSaas && sgl_tabela_existe($conn, 'escritorios_saas')) {
     try {
         $sqlEscritorios = "SELECT e.*,
             (SELECT COUNT(*) FROM licencas_saas l WHERE l.escritorio_id=e.id) AS total_licencas,
@@ -5680,7 +6312,7 @@ if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'escritorios_saas')) {
         }
     } catch (Throwable $e) {}
 }
-if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'licencas_saas')) {
+if ($podeConsultarCadastrosSaas && sgl_tabela_existe($conn, 'licencas_saas')) {
     try {
         $res = $conn->query("SELECT l.*, e.nome AS escritorio_nome, e.tenant_id, e.plano AS escritorio_plano FROM licencas_saas l LEFT JOIN escritorios_saas e ON e.id = l.escritorio_id ORDER BY l.id DESC");
         if ($res) { while ($row = $res->fetch_assoc()) { $licencasSaas[] = $row; } }
@@ -5698,7 +6330,7 @@ if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'licencas_saas')) {
 $planosSaas = [];
 $planoEditar = null;
 $historicoPrecosPlanos = [];
-if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'planos_saas')) {
+if ($podeConsultarCatalogoSaas && sgl_tabela_existe($conn, 'planos_saas')) {
     try {
         $resPlanos = $conn->query("SELECT * FROM planos_saas ORDER BY ordem_exibicao ASC, nome ASC, id ASC");
         if ($resPlanos) {
@@ -5739,7 +6371,7 @@ foreach ($planosSaas as $planoContador) {
 
 // Dados do Cadastro de Módulos e Configurador Comercial — Sprint 4.5 / Etapa 3.3.
 $modulosSaas=[]; $moduloEditar=null; $configuradorPlanoId=max(0,(int)($_GET['configurar_plano']??0)); $vinculosPlanoModulo=[];
-if($ehUsuarioMaster && sgl_tabela_existe($conn,'modulos_saas')){
+if($podeConsultarCatalogoSaas && sgl_tabela_existe($conn,'modulos_saas')){
     try{
         $resMod=$conn->query("SELECT * FROM modulos_saas ORDER BY categoria ASC, ordem_exibicao ASC, nome ASC, id ASC");
         while($resMod && ($rowMod=$resMod->fetch_assoc())) $modulosSaas[]=$rowMod;
@@ -5818,7 +6450,7 @@ $desligadoAcao = trim((string)($_GET['desligado_acao'] ?? ''));
 $desligadoDataInicio = trim((string)($_GET['desligado_data_inicio'] ?? ''));
 $desligadoDataFim = trim((string)($_GET['desligado_data_fim'] ?? ''));
 
-if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'usuarios')) {
+if ($podeConsultarUsuariosGlobais && sgl_tabela_existe($conn, 'usuarios')) {
     try {
         $where = [];
         $tipos = '';
@@ -5860,7 +6492,7 @@ if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'usuarios')) {
     } catch (Throwable $e) { $usuariosDesligados = []; }
 }
 
-if ($ehUsuarioMaster && sgl_tabela_existe($conn, 'usuarios_historico')) {
+if ($podeConsultarUsuariosGlobais && sgl_tabela_existe($conn, 'usuarios_historico')) {
     try {
         $where = [];
         $tipos = '';
@@ -6064,7 +6696,9 @@ $linhasRelatorio = [];
 $periodoDescricao = 'Período: todos os registros';
 $nomeArquivoRelatorio = 'rojex_relatorio_' . date('Ymd_His');
 
-$tiposRelatorioPermitidos = ['resumo','escritorios','licencas','usuarios','desligados','saude'];
+$tiposRelatorioPermitidos = $ehEquipeInternaRojex && $perfilSessaoAtual === 'Financeiro ROJEX'
+    ? ['resumo', 'escritorios', 'licencas']
+    : ['resumo','escritorios','licencas','usuarios','desligados','saude'];
 if (!in_array($relatorioTipo, $tiposRelatorioPermitidos, true)) {
     $relatorioTipo = 'resumo';
 }
@@ -6079,7 +6713,7 @@ foreach ([$relatorioDataInicio, $relatorioDataFim] as $dataRelatorio) {
     }
 }
 
-if ($ehUsuarioMaster) {
+if ($podeConsultarRelatoriosGlobais) {
     $tituloRelatorio = 'Relatório Administrativo';
     $cabecalhosRelatorio = [];
     $linhasRelatorio = [];
@@ -6297,7 +6931,7 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         <p class="text-muted mb-0">Administração do escritório, usuários, identidade visual, segurança e manutenção do sistema.</p>
     </div>
     <div class="d-flex gap-2">
-        <a href="?mod=dashboard" class="btn btn-outline-secondary"><i class="bi bi-speedometer2 me-1"></i> Dashboard</a>
+        <a href="<?=$ehEquipeInternaRojex?'?mod=master_saas':'?mod=dashboard'?>" class="btn btn-outline-secondary"><i class="bi bi-speedometer2 me-1"></i> Dashboard</a>
     </div>
 </div>
 
@@ -6308,12 +6942,19 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
     </div>
 <?php endif; ?>
 
+<?php if (!$ehEquipeInternaRojex): ?>
 <div class="row g-3 mb-4">
     <div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted">USUÁRIOS</small><h3 class="mb-0"><?= $totalUsuarios ?></h3><small class="text-success"><?= $totalAtivos ?> ativo(s)</small></div></div></div>
     <div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted">LIXEIRA</small><h3 class="mb-0 text-danger"><?= $totalLixeira ?></h3><small class="text-muted">registro(s)</small></div></div></div>
     <div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted">AUDITORIA</small><h3 class="mb-0 text-primary"><?= $totalLogs ?></h3><small class="text-muted">evento(s)</small></div></div></div>
     <div class="col-md-3"><div class="card shadow-sm border-0"><div class="card-body"><small class="text-muted">BANCO</small><h3 class="mb-0 text-success"><i class="bi bi-check-circle"></i></h3><small class="text-success">conectado</small></div></div></div>
 </div>
+<?php else: ?>
+<div class="alert alert-secondary border-0 shadow-sm mb-4 d-flex flex-wrap justify-content-between align-items-center gap-2">
+    <span><i class="bi bi-person-lock me-1"></i> Acesso interno limitado às atribuições do seu perfil.</span>
+    <span class="badge text-bg-dark"><?=htmlspecialchars($perfilSessaoAtual)?></span>
+</div>
+<?php endif; ?>
 
 <ul class="nav nav-tabs mb-4" id="cfgTabs" role="tablist">
     <?php
@@ -6338,7 +6979,9 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         'logs' => ['Logs','bi-clock-history'],
     ];
     foreach ($tabDefs as $id => $tab) :
-        if (in_array($id, ['usuarios','sistema','administracao','novo_escritorio','planos','modulos','desligados','relatorios','saude','manutencao','backup','atualizacoes','logs'], true) && !$ehUsuarioMaster) { continue; }
+        if ($ehEquipeInternaRojex && !in_array($id, $abasEquipeInterna, true)) { continue; }
+        if ($id === 'usuarios' && !$podeGerirEquipe) { continue; }
+        if (in_array($id, ['sistema','administracao','novo_escritorio','planos','modulos','desligados','relatorios','saude','manutencao','backup','atualizacoes','logs'], true) && !$ehUsuarioMaster && !$ehEquipeInternaRojex) { continue; }
         if ($id === 'portal' && !$portalPodeAcessar) { continue; }
         $active = $tab_ativa === $id ? 'active' : '';
         $badge = ($id === 'lixeira' && $totalLixeira > 0) ? '<span class="badge bg-danger ms-1">' . $totalLixeira . '</span>' : '';
@@ -6621,29 +7264,124 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'usuarios'): ?>
-<div class="row g-3 mb-4">
-    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">TOTAL</small><h4 class="mb-0"><?= $totalUsuarios ?></h4><small><?= $limiteUsuariosLicenca ?> permitido(s)</small></div></div></div>
-    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ATIVOS</small><h4 class="mb-0 text-success"><?= $totalAtivos ?></h4><small><?= $totalInativos ?> inativo(s)</small></div></div></div>
-    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ADMINISTRAÇÃO</small><h4 class="mb-0 text-primary"><?= $totalAdministradores ?></h4><small>administrador(es)</small></div></div></div>
-    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ADVOGADOS</small><h4 class="mb-0"><?= $totalAdvogadosUsuarios ?></h4><small>perfil jurídico</small></div></div></div>
-    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">FINANCEIRO</small><h4 class="mb-0"><?= $totalFinanceiroUsuarios ?></h4><small>perfil financeiro</small></div></div></div>
-    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">LICENÇA</small><h4 class="mb-0"><?= $percentualLicencaUsuarios ?>%</h4><div class="progress mt-2" style="height:6px"><div class="progress-bar" style="width:<?=$percentualLicencaUsuarios?>%"></div></div></div></div></div>
+<?php if ($ehUsuarioMaster): ?>
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body d-flex flex-wrap gap-3 justify-content-between align-items-center">
+        <div>
+            <h5 class="mb-1"><i class="bi bi-people-fill me-1"></i> Gestão de pessoas da plataforma</h5>
+            <p class="text-muted mb-0">A equipe da ROJEX.AI e as equipes dos clientes possuem escopos e limites independentes.</p>
+        </div>
+        <div class="btn-group" role="group" aria-label="Visão da gestão de equipes">
+            <a class="btn <?=$visaoEquipeMaster==='rojex'?'btn-primary':'btn-outline-primary'?>" href="?mod=configuracoes&tab=usuarios&equipe_visao=rojex">
+                <i class="bi bi-shield-lock me-1"></i> Equipe ROJEX.AI
+            </a>
+            <a class="btn <?=$visaoEquipeMaster==='escritorios'?'btn-primary':'btn-outline-primary'?>" href="?mod=configuracoes&tab=usuarios&equipe_visao=escritorios">
+                <i class="bi bi-buildings me-1"></i> Equipes dos Escritórios
+            </a>
+        </div>
+    </div>
 </div>
+<?php elseif ($podeSupervisionarEquipesGlobais): ?>
+<div class="card border-0 shadow-sm mb-4">
+    <div class="card-body d-flex flex-wrap gap-3 justify-content-between align-items-center">
+        <div>
+            <h5 class="mb-1"><i class="bi bi-headset me-1"></i> Suporte às equipes dos escritórios</h5>
+            <p class="text-muted mb-0">Localize um cliente e abra somente a equipe necessária para o atendimento autorizado.</p>
+        </div>
+        <span class="badge text-bg-primary px-3 py-2">Suporte ROJEX</span>
+    </div>
+</div>
+<?php endif; ?>
+
+<?php if (!$podeSupervisionarEquipesGlobais || $visaoEquipeMaster === 'rojex' || $escritorioEquipeSelecionadoId > 0): ?>
+<div class="row g-3 mb-4">
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">TOTAL</small><h4 class="mb-0"><?= $totalUsuariosExibicao ?></h4><small><?= $limiteUsuariosExibicao ?> permitido(s)</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ATIVOS</small><h4 class="mb-0 text-success"><?= $totalAtivosExibicao ?></h4><small><?= $totalInativosExibicao ?> inativo(s)</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ADMINISTRAÇÃO</small><h4 class="mb-0 text-primary"><?= $totalAdministradoresExibicao ?></h4><small>administrador(es)</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ADVOGADOS</small><h4 class="mb-0"><?= $totalAdvogadosExibicao ?></h4><small>perfil jurídico</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">FINANCEIRO</small><h4 class="mb-0"><?= $totalFinanceiroExibicao ?></h4><small>perfil financeiro</small></div></div></div>
+    <div class="col-md-2"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted"><?=$ehUsuarioMaster&&$visaoEquipeMaster==='rojex'?'LIMITE INTERNO':'LICENÇA'?></small><h4 class="mb-0"><?= $percentualUsuariosExibicao ?>%</h4><div class="progress mt-2" style="height:6px"><div class="progress-bar" style="width:<?=$percentualUsuariosExibicao?>%"></div></div></div></div></div>
+</div>
+<?php else: ?>
+<div class="row g-3 mb-4">
+    <div class="col-md-3"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ESCRITÓRIOS</small><h4 class="mb-0"><?=$totalEscritoriosEquipe?></h4><small>clientes cadastrados</small></div></div></div>
+    <div class="col-md-3"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">ATIVOS / TESTE</small><h4 class="mb-0 text-success"><?=$totalEscritoriosAtivosEquipe?></h4><small>licenças em operação</small></div></div></div>
+    <div class="col-md-3"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">USUÁRIOS DOS CLIENTES</small><h4 class="mb-0"><?=$totalUsuariosClientesEquipe?></h4><small>não inclui a ROJEX.AI</small></div></div></div>
+    <div class="col-md-3"><div class="card border-0 shadow-sm h-100"><div class="card-body"><small class="text-muted">CAPACIDADE CONTRATADA</small><h4 class="mb-0"><?=$totalCapacidadeClientesEquipe?></h4><small>vagas somadas</small></div></div></div>
+</div>
+<?php endif; ?>
 
 <div class="alert alert-info border-0 shadow-sm">
     <i class="bi bi-shield-check me-1"></i>
-    A estrutura Enterprise está preparada para perfis, departamentos e limite de licença.
-    A política atual de senha com mínimo de 6 caracteres foi preservada nesta fase.
+    <?=$ehUsuarioMaster
+        ? ($visaoEquipeMaster === 'rojex'
+            ? 'Equipe interna da plataforma: limite inicial de 5 responsáveis, sem consumo das licenças dos clientes.'
+            : 'Supervisão dos clientes: pesquise um escritório e abra sua equipe somente quando precisar prestar suporte.')
+        : ($podeSupervisionarEquipesGlobais
+            ? 'Atendimento interno ROJEX.AI: selecione um escritório. A equipe da plataforma e o MASTER principal permanecem invisíveis e protegidos.'
+            : 'Você administra somente a equipe vinculada ao seu escritório.')?>
+    Senhas atuais nunca são exibidas; somente a definição inicial e a redefinição são permitidas.
+    A política atual de mínimo de 6 caracteres foi preservada nesta fase.
 </div>
 
+<?php if ($podeSupervisionarEquipesGlobais && $visaoEquipeMaster === 'escritorios'): ?>
+<div class="card shadow-sm border-0 mb-4">
+    <div class="card-header bg-dark text-white"><i class="bi bi-search me-1"></i> Localizar escritório cliente</div>
+    <div class="card-body">
+        <form method="GET" class="row g-2 align-items-end">
+            <input type="hidden" name="mod" value="configuracoes">
+            <input type="hidden" name="tab" value="usuarios">
+            <input type="hidden" name="equipe_visao" value="escritorios">
+            <div class="col-md-7"><label class="form-label">Escritório, tenant ou administrador</label><input name="equipe_busca" class="form-control" value="<?=htmlspecialchars($equipeBusca)?>" placeholder="Digite para pesquisar"></div>
+            <div class="col-md-3"><label class="form-label">Situação</label><select name="equipe_status" class="form-select"><option value="">Todas</option><?php foreach (['ativo'=>'Ativo','teste'=>'Teste','suspenso'=>'Suspenso','implantacao'=>'Implantação'] as $valorStatus=>$rotuloStatus): ?><option value="<?=$valorStatus?>" <?=$equipeStatus===$valorStatus?'selected':''?>><?=$rotuloStatus?></option><?php endforeach; ?></select></div>
+            <div class="col-md-2 d-grid"><button class="btn btn-primary"><i class="bi bi-search me-1"></i>Buscar</button></div>
+        </form>
+    </div>
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-light"><tr><th>Escritório</th><th>Plano</th><th>Usuários</th><th>Administrador</th><th>Situação</th><th class="text-end">Suporte</th></tr></thead>
+            <tbody>
+            <?php if (!$resumoEquipesPagina): ?><tr><td colspan="6" class="text-center text-muted py-4">Nenhum escritório encontrado.</td></tr><?php endif; ?>
+            <?php foreach ($resumoEquipesPagina as $resumoEquipe): ?>
+                <tr class="<?=(int)$resumoEquipe['id']===$escritorioEquipeSelecionadoId?'table-primary':''?>">
+                    <td><strong><?=htmlspecialchars((string)$resumoEquipe['nome'])?></strong><div><small class="text-muted"><?=htmlspecialchars((string)$resumoEquipe['tenant_id'])?></small></div></td>
+                    <td><span class="badge bg-primary"><?=htmlspecialchars((string)$resumoEquipe['plano'])?></span></td>
+                    <td><strong><?=(int)$resumoEquipe['total_usuarios']?> de <?=(int)$resumoEquipe['limite_usuarios']?></strong><div><small class="text-success"><?=(int)$resumoEquipe['usuarios_ativos']?> ativo(s)</small></div></td>
+                    <td><?=htmlspecialchars((string)($resumoEquipe['administrador_nome'] ?: 'Não identificado'))?></td>
+                    <td><span class="badge bg-secondary"><?=htmlspecialchars((string)$resumoEquipe['status'])?></span></td>
+                    <td class="text-end"><a class="btn btn-sm btn-outline-primary" href="?mod=configuracoes&tab=usuarios&equipe_visao=escritorios&equipe_escritorio=<?=(int)$resumoEquipe['id']?>&equipe_busca=<?=urlencode($equipeBusca)?>&equipe_status=<?=urlencode($equipeStatus)?>"><i class="bi bi-box-arrow-in-right me-1"></i>Abrir equipe</a></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php if ($equipeTotalPaginas > 1): ?><div class="card-footer d-flex justify-content-between"><span>Página <?=$equipePagina?> de <?=$equipeTotalPaginas?></span><div class="btn-group"><?php if ($equipePagina>1): ?><a class="btn btn-sm btn-outline-secondary" href="?mod=configuracoes&tab=usuarios&equipe_visao=escritorios&equipe_busca=<?=urlencode($equipeBusca)?>&equipe_status=<?=urlencode($equipeStatus)?>&equipe_pagina=<?=$equipePagina-1?>">Anterior</a><?php endif; ?><?php if ($equipePagina<$equipeTotalPaginas): ?><a class="btn btn-sm btn-outline-secondary" href="?mod=configuracoes&tab=usuarios&equipe_visao=escritorios&equipe_busca=<?=urlencode($equipeBusca)?>&equipe_status=<?=urlencode($equipeStatus)?>&equipe_pagina=<?=$equipePagina+1?>">Próxima</a><?php endif; ?></div></div><?php endif; ?>
+</div>
+<?php endif; ?>
+
+<?php if (!$podeSupervisionarEquipesGlobais || $visaoEquipeMaster === 'rojex' || $escritorioEquipeSelecionadoId > 0): ?>
 <div class="row g-4">
     <div class="col-xl-4">
         <div class="card shadow-sm border-0">
-            <div class="card-header bg-dark text-white"><i class="bi bi-person-plus me-1"></i> Novo Usuário Enterprise</div>
+            <div class="card-header bg-dark text-white"><i class="bi bi-person-plus me-1"></i> <?=$ehUsuarioMaster&&$visaoEquipeMaster==='rojex'?'Novo responsável ROJEX.AI':'Novo integrante do escritório'?></div>
             <div class="card-body">
                 <form method="POST" class="row g-3">
                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                     <input type="hidden" name="acao_cfg" value="novo_usuario">
+
+                    <?php if ($ehUsuarioMaster && $visaoEquipeMaster === 'rojex'): ?>
+                    <input type="hidden" name="escopo_equipe" value="plataforma">
+                    <div class="col-12"><div class="alert alert-warning py-2 mb-0"><i class="bi bi-shield-lock me-1"></i>Cadastro interno da plataforma. Não será vinculado a um escritório nem consumirá licença de cliente.</div></div>
+                    <?php elseif ($podeSupervisionarEquipesGlobais): ?>
+                    <input type="hidden" name="escopo_equipe" value="escritorio">
+                    <input type="hidden" name="equipe_escritorio_id" value="<?=$escritorioEquipeSelecionadoId?>">
+                    <div class="col-12">
+                        <label class="form-label">Escritório</label>
+                        <?php $nomeEscritorioSelecionado = ''; foreach ($resumoEquipesEscritorios as $resumoEquipeSelecionado) { if ((int)$resumoEquipeSelecionado['id'] === $escritorioEquipeSelecionadoId) { $nomeEscritorioSelecionado = (string)$resumoEquipeSelecionado['nome']; break; } } ?>
+                        <input class="form-control" value="<?=htmlspecialchars($nomeEscritorioSelecionado)?>" disabled>
+                        <div class="form-text">O vínculo e o limite serão aplicados somente a este escritório.</div>
+                    </div>
+                    <?php endif; ?>
 
                     <div class="col-12"><label class="form-label">Nome completo</label><input name="nome" class="form-control" maxlength="120" required></div>
                     <div class="col-md-6"><label class="form-label">Login</label><input name="usuario" class="form-control" maxlength="80" required></div>
@@ -6654,7 +7392,12 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                     <div class="col-12">
                         <label class="form-label">Perfil</label>
                         <select name="perfil" class="form-select">
-                            <?php foreach (['Administrador Master','Administrador','Advogado','Coordenador','Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'] as $perfilOpcao): ?>
+                            <?php
+                            $perfisFormulario = $ehUsuarioMaster && $visaoEquipeMaster === 'rojex'
+                                ? ['Suporte ROJEX','Comercial ROJEX','Financeiro ROJEX','Operador ROJEX','Auditor ROJEX']
+                                : ['Administrador','Advogado','Coordenador','Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'];
+                            foreach ($perfisFormulario as $perfilOpcao):
+                            ?>
                                 <option value="<?=htmlspecialchars($perfilOpcao)?>"><?=htmlspecialchars($perfilOpcao)?></option>
                             <?php endforeach; ?>
                         </select>
@@ -6674,26 +7417,26 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
     <div class="col-xl-8">
         <div class="card shadow-sm border-0">
             <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
-                <span><i class="bi bi-people me-1"></i> Usuários do Sistema</span>
-                <span><?=count($usuarios)?> de <?=$limiteUsuariosLicenca?></span>
+                <span><i class="bi bi-people me-1"></i> <?=$ehUsuarioMaster?($visaoEquipeMaster==='rojex'?'Equipe interna ROJEX.AI':'Equipe do escritório selecionado'):($podeSupervisionarEquipesGlobais?'Equipe do escritório em atendimento':'Equipe do escritório')?></span>
+                <span><?=count($usuariosExibicao)?> de <?=$limiteUsuariosExibicao?></span>
             </div>
 
             <div class="table-responsive">
                 <table class="table table-hover align-middle mb-0">
                     <thead class="table-light">
-                        <tr><th>Usuário</th><th>Perfil / setor</th><th>Último acesso</th><th>Status</th><th class="text-end">Ações</th></tr>
+                            <tr><th>Usuário</th><?php if ($podeSupervisionarEquipesGlobais): ?><th>Escritório</th><?php endif; ?><th>Perfil / setor</th><th>Último acesso</th><th>Status</th><th class="text-end">Ações</th></tr>
                     </thead>
                     <tbody>
-                    <?php if(empty($usuarios)): ?>
-                        <tr><td colspan="5" class="text-center py-4 text-muted">Nenhum usuário encontrado.</td></tr>
+                    <?php if(empty($usuariosExibicao)): ?>
+                        <tr><td colspan="<?=$podeSupervisionarEquipesGlobais?6:5?>" class="text-center py-4 text-muted">Nenhum usuário encontrado.</td></tr>
                     <?php endif; ?>
 
-                    <?php foreach($usuarios as $u): ?>
+                    <?php foreach($usuariosExibicao as $u): ?>
                     <?php
                         $perfilUsuario = (string)($u['perfil'] ?? 'Usuário');
                         $badgePerfil = in_array($perfilUsuario, ['Administrador','Administrador Master'], true)
                             ? 'bg-primary'
-                            : ($perfilUsuario === 'Financeiro' ? 'bg-success' : 'bg-secondary');
+                            : (in_array($perfilUsuario, ['Financeiro','Financeiro ROJEX'], true) ? 'bg-success' : 'bg-secondary');
                     ?>
                     <tr>
                         <td>
@@ -6701,6 +7444,16 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                             <div><code><?=htmlspecialchars($u['usuario'])?></code></div>
                             <small class="text-muted"><?=htmlspecialchars($u['email'] ?? '')?></small>
                         </td>
+                        <?php if ($podeSupervisionarEquipesGlobais): ?>
+                        <td>
+                            <?php if ((int)$u['id'] === $usuarioMasterId): ?>
+                                <span class="badge bg-warning text-dark">Plataforma ROJEX.AI</span>
+                            <?php else: ?>
+                                <strong><?=htmlspecialchars((string)($u['escritorio_nome'] ?? 'Escritório não identificado'))?></strong>
+                                <div><small class="text-muted"><?=htmlspecialchars((string)($u['tenant_id'] ?? ''))?></small></div>
+                            <?php endif; ?>
+                        </td>
+                        <?php endif; ?>
                         <td>
                             <span class="badge <?=$badgePerfil?>"><?=htmlspecialchars($perfilUsuario)?></span>
                             <?php if (!empty($u['cargo'])): ?><div class="small mt-1"><?=htmlspecialchars($u['cargo'])?></div><?php endif; ?>
@@ -6734,6 +7487,7 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                                 <input type="hidden" name="acao_cfg" value="alterar_status_usuario">
                                 <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
+                                <input type="hidden" name="equipe_escritorio_id" value="<?= (int)($u['escritorio_id'] ?? 0) ?>">
                                 <input type="hidden" name="ativo" value="<?=((int)$u['ativo']===1)?0:1?>">
                                 <button class="btn btn-sm <?=((int)$u['ativo']===1)?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Alterar status deste usuário?')">
                                     <?=((int)$u['ativo']===1)?'Desativar':'Ativar'?>
@@ -6747,6 +7501,7 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                                 <input type="hidden" name="acao_cfg" value="encerrar_vinculo_usuario">
                                 <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
+                                <input type="hidden" name="equipe_escritorio_id" value="<?= (int)($u['escritorio_id'] ?? 0) ?>">
                                 <button class="btn btn-sm btn-dark"><i class="bi bi-person-x me-1"></i>Encerrar vínculo</button>
                             </form>
                             <?php endif; ?>
@@ -6757,11 +7512,12 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                     </tr>
 
                     <tr class="collapse bg-light" id="editarUsuario<?= (int)$u['id'] ?>">
-                        <td colspan="5">
+                        <td colspan="<?=$podeSupervisionarEquipesGlobais?6:5?>">
                             <form method="POST" class="row g-3 p-2">
                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                                 <input type="hidden" name="acao_cfg" value="editar_usuario">
                                 <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
+                                <input type="hidden" name="equipe_escritorio_id" value="<?= (int)($u['escritorio_id'] ?? 0) ?>">
 
                                 <div class="col-md-4"><label class="form-label">Nome</label><input name="nome" class="form-control form-control-sm" value="<?=htmlspecialchars($u['nome'])?>" required></div>
                                 <div class="col-md-4"><label class="form-label">E-mail</label><input type="email" name="email" class="form-control form-control-sm" value="<?=htmlspecialchars($u['email'] ?? '')?>"></div>
@@ -6770,8 +7526,16 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                                 <div class="col-md-4"><label class="form-label">Departamento</label><input name="departamento" class="form-control form-control-sm" value="<?=htmlspecialchars($u['departamento'] ?? '')?>"></div>
                                 <div class="col-md-4">
                                     <label class="form-label">Perfil</label>
-                                    <select name="perfil" class="form-select form-select-sm">
-                                        <?php foreach (['Administrador Master','Administrador','Advogado','Coordenador','Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'] as $perfilOpcao): ?>
+                                    <select name="perfil" class="form-select form-select-sm" <?=(int)$u['id']===$usuarioMasterId?'disabled':''?>>
+                                        <?php
+                                        $perfisEdicao = $ehUsuarioMaster && (int)($u['escritorio_id'] ?? 0) === 0 && (int)$u['id'] !== $usuarioMasterId
+                                            ? ['Suporte ROJEX','Comercial ROJEX','Financeiro ROJEX','Operador ROJEX','Auditor ROJEX']
+                                            : ['Administrador','Advogado','Coordenador','Financeiro','Atendente','Estagiário','Consulta','Auditor','Usuário'];
+                                        if ((int)$u['id'] === $usuarioMasterId && !in_array($perfilUsuario, $perfisEdicao, true)) {
+                                            array_unshift($perfisEdicao, $perfilUsuario);
+                                        }
+                                        foreach ($perfisEdicao as $perfilOpcao):
+                                        ?>
                                             <option value="<?=htmlspecialchars($perfilOpcao)?>" <?=$perfilUsuario===$perfilOpcao?'selected':''?>><?=htmlspecialchars($perfilOpcao)?></option>
                                         <?php endforeach; ?>
                                     </select>
@@ -6783,11 +7547,12 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
                     </tr>
 
                     <tr class="collapse bg-light" id="senha<?= (int)$u['id'] ?>">
-                        <td colspan="5">
+                        <td colspan="<?=$podeSupervisionarEquipesGlobais?6:5?>">
                             <form method="POST" class="d-flex gap-2 justify-content-end align-items-center p-2">
                                 <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                                 <input type="hidden" name="acao_cfg" value="resetar_senha_usuario">
                                 <input type="hidden" name="usuario_id" value="<?= (int)$u['id'] ?>">
+                                <input type="hidden" name="equipe_escritorio_id" value="<?= (int)($u['escritorio_id'] ?? 0) ?>">
                                 <span class="small text-muted">Política atual: mínimo de 6 caracteres.</span>
                                 <input type="password" name="nova_senha" class="form-control form-control-sm" style="max-width:260px" minlength="6" placeholder="Nova senha" required>
                                 <button class="btn btn-primary btn-sm">Redefinir senha</button>
@@ -6813,6 +7578,7 @@ if (!in_array($tab_ativa, $tabs_validas, true)) { $tab_ativa = 'escritorio'; }
         </div>
     </div>
 </div>
+<?php endif; ?>
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'sistema'): ?>
@@ -7245,7 +8011,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
             <td><span class="badge <?=!empty($planoItem['ativo'])?'bg-success':'bg-secondary'?>"><?=!empty($planoItem['ativo'])?'Ativo':'Inativo'?></span></td>
             <td class="text-end"><a href="?mod=configuracoes&tab=planos&editar_plano=<?=(int)$planoItem['id']?>" class="btn btn-sm btn-outline-primary" title="Editar"><i class="bi bi-pencil"></i></a>
                 <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_plano_saas"><input type="hidden" name="plano_saas_id" value="<?=(int)$planoItem['id']?>"><input type="hidden" name="novo_status_plano_saas" value="<?=!empty($planoItem['ativo'])?0:1?>"><button class="btn btn-sm <?=!empty($planoItem['ativo'])?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Confirmar <?=!empty($planoItem['ativo'])?'inativação':'ativação'?> deste plano?')" title="<?=!empty($planoItem['ativo'])?'Inativar':'Ativar'?>"><i class="bi <?=!empty($planoItem['ativo'])?'bi-pause-circle':'bi-play-circle'?>"></i></button></form>
-                <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="excluir_plano_saas"><input type="hidden" name="plano_saas_id" value="<?=(int)$planoItem['id']?>"><button class="btn btn-sm btn-danger" onclick="return confirm('Deseja realmente excluir definitivamente o plano <?=htmlspecialchars(addslashes((string)$planoItem['nome']), ENT_QUOTES, 'UTF-8')?>?\n\nEsta ação removerá também os módulos e o histórico de preços vinculados e não poderá ser desfeita.\n\nPlanos utilizados por escritórios ou licenças não serão excluídos.')" title="Excluir definitivamente"><i class="bi bi-trash"></i></button></form>
+                <?php if ($ehUsuarioMaster): ?><form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="excluir_plano_saas"><input type="hidden" name="plano_saas_id" value="<?=(int)$planoItem['id']?>"><button class="btn btn-sm btn-danger" onclick="return confirm('Deseja realmente excluir definitivamente o plano <?=htmlspecialchars(addslashes((string)$planoItem['nome']), ENT_QUOTES, 'UTF-8')?>?\n\nEsta ação removerá também os módulos e o histórico de preços vinculados e não poderá ser desfeita.\n\nPlanos utilizados por escritórios ou licenças não serão excluídos.')" title="Excluir definitivamente"><i class="bi bi-trash"></i></button></form><?php endif; ?>
             </td>
         </tr><?php endforeach; endif; ?></tbody>
     </table></div></div>
@@ -7296,7 +8062,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
 <div class="col-12 d-flex gap-2"><button class="btn btn-primary"><i class="bi bi-check-lg me-1"></i>Salvar módulo</button><?php if($moduloEditar): ?><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=modulos">Cancelar</a><?php endif; ?></div>
 </form></div></div>
 <div class="card shadow-sm border-0 mb-4"><div class="card-header bg-primary text-white">Catálogo de módulos <span class="badge bg-light text-primary float-end"><?=$totalModulosSaas?></span></div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover align-middle mb-0"><thead><tr><th>Módulo</th><th>Categoria</th><th>Características</th><th>Status</th><th class="text-end">Ações</th></tr></thead><tbody>
-<?php foreach($modulosSaas as $m): ?><tr><td><i class="bi <?=htmlspecialchars($m['icone']?:'bi-box')?> me-2"></i><strong><?=htmlspecialchars($m['nome'])?></strong><br><code><?=htmlspecialchars($m['codigo'])?></code></td><td><?=htmlspecialchars(ucfirst($m['categoria']))?></td><td><?php if($m['modulo_essencial']): ?><span class="badge bg-dark">Essencial</span><?php endif; ?> <?php if($m['exige_ia_externa']): ?><span class="badge bg-primary">IA</span><?php endif; ?> <?php if(!empty($m['requer_api'])): ?><span class="badge bg-info text-dark">API</span><?php endif; ?></td><td><span class="badge <?=$m['ativo']?'bg-success':'bg-secondary'?>"><?=$m['ativo']?'Ativo':'Inativo'?></span> <span class="badge bg-light text-dark"><?=htmlspecialchars(ucfirst($m['status_lancamento']??'producao'))?></span></td><td class="text-end"><a class="btn btn-sm btn-outline-primary" href="?mod=configuracoes&tab=modulos&editar_modulo=<?=(int)$m['id']?>"><i class="bi bi-pencil"></i></a> <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_modulo_saas"><input type="hidden" name="modulo_saas_id" value="<?=(int)$m['id']?>"><input type="hidden" name="novo_status_modulo_saas" value="<?=$m['ativo']?0:1?>"><button class="btn btn-sm <?=$m['ativo']?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Confirmar alteração de status?')"><i class="bi <?=$m['ativo']?'bi-pause-circle':'bi-play-circle'?>"></i></button></form> <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="excluir_modulo_saas"><input type="hidden" name="modulo_saas_id" value="<?=(int)$m['id']?>"><button class="btn btn-sm btn-danger" onclick="return confirm('Excluir definitivamente este módulo? Módulos essenciais ou vinculados serão protegidos.')"><i class="bi bi-trash"></i></button></form></td></tr><?php endforeach; ?>
+<?php foreach($modulosSaas as $m): ?><tr><td><i class="bi <?=htmlspecialchars($m['icone']?:'bi-box')?> me-2"></i><strong><?=htmlspecialchars($m['nome'])?></strong><br><code><?=htmlspecialchars($m['codigo'])?></code></td><td><?=htmlspecialchars(ucfirst($m['categoria']))?></td><td><?php if($m['modulo_essencial']): ?><span class="badge bg-dark">Essencial</span><?php endif; ?> <?php if($m['exige_ia_externa']): ?><span class="badge bg-primary">IA</span><?php endif; ?> <?php if(!empty($m['requer_api'])): ?><span class="badge bg-info text-dark">API</span><?php endif; ?></td><td><span class="badge <?=$m['ativo']?'bg-success':'bg-secondary'?>"><?=$m['ativo']?'Ativo':'Inativo'?></span> <span class="badge bg-light text-dark"><?=htmlspecialchars(ucfirst($m['status_lancamento']??'producao'))?></span></td><td class="text-end"><a class="btn btn-sm btn-outline-primary" href="?mod=configuracoes&tab=modulos&editar_modulo=<?=(int)$m['id']?>"><i class="bi bi-pencil"></i></a> <form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="alterar_status_modulo_saas"><input type="hidden" name="modulo_saas_id" value="<?=(int)$m['id']?>"><input type="hidden" name="novo_status_modulo_saas" value="<?=$m['ativo']?0:1?>"><button class="btn btn-sm <?=$m['ativo']?'btn-outline-danger':'btn-outline-success'?>" onclick="return confirm('Confirmar alteração de status?')"><i class="bi <?=$m['ativo']?'bi-pause-circle':'bi-play-circle'?>"></i></button></form> <?php if ($ehUsuarioMaster): ?><form method="post" class="d-inline"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="excluir_modulo_saas"><input type="hidden" name="modulo_saas_id" value="<?=(int)$m['id']?>"><button class="btn btn-sm btn-danger" onclick="return confirm('Excluir definitivamente este módulo? Módulos essenciais ou vinculados serão protegidos.')"><i class="bi bi-trash"></i></button></form><?php endif; ?></td></tr><?php endforeach; ?>
 </tbody></table></div></div></div>
 <div class="card shadow-sm border-0"><div class="card-header bg-dark text-white"><i class="bi bi-diagram-3 me-1"></i>Montagem dos planos por módulos</div><div class="card-body">
 <form method="get" class="row g-2 mb-3"><input type="hidden" name="mod" value="configuracoes"><input type="hidden" name="tab" value="modulos"><div class="col-md-6"><select name="configurar_plano" class="form-select" onchange="this.form.submit()"><?php foreach($planosSaas as $p): ?><option value="<?=(int)$p['id']?>" <?=$configuradorPlanoId===(int)$p['id']?'selected':''?>><?=htmlspecialchars($p['nome'])?> — R$ <?=number_format((float)$p['valor_mensal'],2,',','.')?>/mês</option><?php endforeach; ?></select></div></form>
@@ -7445,7 +8211,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
         <div class="alert alert-info small border-0">
             <strong>Criação automática:</strong> cada licença nasce junto com o escritório pelo Assistente. Esta central serve apenas para acompanhar, renovar, ajustar limites e alterar a situação de licenças existentes.
         </div>
-        <?php if (!$licencaEditar): ?>
+        <?php if (!$licencaEditar && $podeGerirCadastrosComerciais): ?>
         <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 border rounded p-3 bg-light mb-4">
             <div>
                 <h6 class="mb-1">Novo escritório com licença automática</h6>
@@ -7453,7 +8219,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
             </div>
             <a class="btn btn-success" href="?mod=configuracoes&tab=novo_escritorio&etapa=1"><i class="bi bi-building-add me-1"></i> Abrir Assistente</a>
         </div>
-        <?php else: ?>
+        <?php elseif ($licencaEditar && $podeGerirLicencasComerciais): ?>
         <form method="post" class="row g-3 mb-4">
             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
             <input type="hidden" name="acao_cfg" value="salvar_licenca_saas">
@@ -7508,6 +8274,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                         <td><small><?=(int)$licencaItem['limite_usuarios']?> usuário(s)<br><?=(int)$licencaItem['limite_armazenamento_gb']?> GB</small></td>
                         <td><small>Ativação: <?=htmlspecialchars($licencaItem['ativada_em'] ?: '-')?><br>Renovação: <?=htmlspecialchars($licencaItem['renovacao_em'] ?: '-')?></small></td>
                         <td class="text-end">
+                            <?php if ($podeGerirLicencasComerciais): ?>
                             <a class="btn btn-sm btn-outline-primary" href="?mod=configuracoes&tab=administracao&editar_licenca=<?=(int)$licencaItem['id']?>" title="Editar"><i class="bi bi-pencil"></i></a>
                             <div class="dropdown d-inline-block">
                                 <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">Status</button>
@@ -7517,6 +8284,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                                     <?php endforeach; ?>
                                 </ul>
                             </div>
+                            <?php else: ?><span class="badge bg-secondary">Consulta</span><?php endif; ?>
                         </td>
                     </tr>
                 <?php endforeach; endif; ?>
@@ -7537,7 +8305,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
     <div class="card-body">
         <div class="alert alert-primary small border-0 d-flex flex-wrap justify-content-between align-items-center gap-3">
             <div><strong>Fluxo único e seguro:</strong> novos escritórios são provisionados pelo Assistente, que cria automaticamente tenant, assinatura, licença, módulos e administrador.</div>
-            <a class="btn btn-primary btn-sm" href="?mod=configuracoes&tab=novo_escritorio&etapa=1"><i class="bi bi-building-add me-1"></i> Novo Escritório</a>
+            <?php if ($podeGerirCadastrosComerciais): ?><a class="btn btn-primary btn-sm" href="?mod=configuracoes&tab=novo_escritorio&etapa=1"><i class="bi bi-building-add me-1"></i> Novo Escritório</a><?php endif; ?>
         </div>
 
         <form method="get" class="row g-2 mb-4">
@@ -7549,7 +8317,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
             <div class="col-lg-3 d-flex gap-2"><button class="btn btn-outline-primary flex-grow-1"><i class="bi bi-search"></i> Filtrar</button><a href="?mod=configuracoes&tab=administracao" class="btn btn-outline-secondary">Limpar</a></div>
         </form>
 
-        <?php if ($escritorioEditar): ?>
+        <?php if ($escritorioEditar && $podeGerirCadastrosComerciais): ?>
         <form method="post" class="row g-3 border rounded p-3 bg-light mb-4">
             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
             <input type="hidden" name="acao_cfg" value="salvar_escritorio_saas">
@@ -7592,6 +8360,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                     <td><span class="badge bg-<?=$prontidaoClasse?>"><?=$prontidaoRotulo?></span><br><small class="text-muted"><?=(int)$eItem['licencas_validas']?> licença(s) válida(s)<br><?=(int)$eItem['administradores_principais']?> administrador principal<?php if ((int)$eItem['planos_divergentes'] > 0): ?><br><span class="text-danger">Plano divergente</span><?php endif; ?></small></td>
                     <td><small><?=!empty($eItem['atualizado_em'])?date('d/m/Y H:i',strtotime($eItem['atualizado_em'])):'-'?></small></td>
                     <td class="text-end">
+                        <?php if ($podeGerirCadastrosComerciais): ?>
                         <a href="?mod=configuracoes&tab=administracao&editar_escritorio=<?=(int)$eItem['id']?>" class="btn btn-sm btn-outline-primary" title="Editar"><i class="bi bi-pencil"></i></a>
                         <div class="dropdown d-inline-block">
                             <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">Status</button>
@@ -7601,6 +8370,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                                 <?php endforeach; ?>
                             </ul>
                         </div>
+                        <?php else: ?><span class="badge bg-secondary">Consulta</span><?php endif; ?>
                     </td>
                 </tr>
                 <?php endforeach; endif; ?>
@@ -7736,6 +8506,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
     </div>
 </div>
 
+<?php if ($ehUsuarioMaster): ?>
 <div class="card shadow-sm border-0 mb-4">
     <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
         <span><i class="bi bi-arrow-repeat me-1"></i> Central de Atualizações Enterprise</span>
@@ -7845,6 +8616,11 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
         </form>
     </div>
 </div>
+<?php else: ?>
+<div class="alert alert-info border-0 shadow-sm mb-4">
+    <i class="bi bi-eye me-1"></i> Consulta técnica e simulação de compatibilidade. Cadastro, publicação e alteração de status permanecem exclusivos do MASTER principal.
+</div>
+<?php endif; ?>
 
 <?php if (is_array($atualizacaoPreview)): ?>
 <div class="card shadow-sm border-primary mb-4">
@@ -7950,6 +8726,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                         </td>
                         <td>
                             <div class="d-flex flex-wrap gap-1">
+                                <?php if ($ehUsuarioMaster): ?>
                                 <button
                                     type="button"
                                     class="btn btn-sm btn-outline-secondary"
@@ -7974,6 +8751,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                                     ], JSON_HEX_TAG|JSON_HEX_APOS|JSON_HEX_AMP|JSON_HEX_QUOT)?>)'>
                                     <i class="bi bi-pencil"></i>
                                 </button>
+                                <?php endif; ?>
 
                                 <form method="post" class="d-inline">
                                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
@@ -7984,7 +8762,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                                     </button>
                                 </form>
 
-                                <form method="post" class="d-inline">
+                                <?php if ($ehUsuarioMaster): ?><form method="post" class="d-inline">
                                     <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                                     <input type="hidden" name="acao_cfg" value="alterar_status_atualizacao">
                                     <input type="hidden" name="atualizacao_id" value="<?=(int)$itemAtualizacao['id']?>">
@@ -7993,7 +8771,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                                             <option value="<?=$statusOpcao?>" <?=$itemAtualizacao['status']===$statusOpcao?'selected':''?>><?=$statusOpcao?></option>
                                         <?php endforeach; ?>
                                     </select>
-                                </form>
+                                </form><?php endif; ?>
                             </div>
                         </td>
                     </tr>
@@ -8464,7 +9242,7 @@ function rojexEditarAtualizacao(dados) {
 <div class="card shadow-sm border-0 mb-4">
     <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
         <span><i class="bi bi-file-earmark-bar-graph-fill me-1"></i> Relatórios Administrativos Enterprise</span>
-        <span class="badge bg-primary">Acesso MASTER</span>
+        <span class="badge bg-primary"><?=htmlspecialchars($ehUsuarioMaster ? 'Acesso MASTER' : $perfilSessaoAtual)?></span>
     </div>
     <div class="card-body">
         <div class="alert alert-info border-0">
@@ -8480,9 +9258,11 @@ function rojexEditarAtualizacao(dados) {
                     <option value="resumo" <?=$relatorioTipo==='resumo'?'selected':''?>>Resumo consolidado</option>
                     <option value="escritorios" <?=$relatorioTipo==='escritorios'?'selected':''?>>Escritórios SaaS</option>
                     <option value="licencas" <?=$relatorioTipo==='licencas'?'selected':''?>>Licenças SaaS</option>
+                    <?php if (!($ehEquipeInternaRojex && $perfilSessaoAtual === 'Financeiro ROJEX')): ?>
                     <option value="usuarios" <?=$relatorioTipo==='usuarios'?'selected':''?>>Usuários</option>
                     <option value="desligados" <?=$relatorioTipo==='desligados'?'selected':''?>>Usuários desligados</option>
                     <option value="saude" <?=$relatorioTipo==='saude'?'selected':''?>>Saúde do sistema</option>
+                    <?php endif; ?>
                 </select>
             </div>
             <div class="col-md-3">
@@ -8826,6 +9606,7 @@ function rojexEditarAtualizacao(dados) {
 <?php endif; ?>
 
 <?php if ($tab_ativa === 'logs'): ?>
+<?php if ($ehUsuarioMaster): ?>
 <div class="card shadow-sm border-primary mb-4 d-print-none">
     <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
         <span><i class="bi bi-file-earmark-zip-fill me-1"></i> Backup e Arquivamento do LOG por Escritório</span>
@@ -8961,6 +9742,11 @@ function rojexEditarAtualizacao(dados) {
         </div>
     </div>
 </div>
+<?php else: ?>
+<div class="alert alert-info border-0 shadow-sm d-print-none">
+    <i class="bi bi-eye me-1"></i> Consulta de auditoria em modo somente leitura. Backup, download, arquivamento e exclusão do LOG permanecem exclusivos do MASTER principal.
+</div>
+<?php endif; ?>
 
 <div class="card shadow-sm border-0 mb-4 d-print-none">
     <div class="card-header bg-dark text-white"><i class="bi bi-funnel me-1"></i> Filtros e Relatório do LOG</div>

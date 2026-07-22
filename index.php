@@ -49,24 +49,112 @@ if (!function_exists('rojexEhAdministrador')) {
     }
 }
 
+if (!function_exists('rojexPerfisEquipeInterna')) {
+    function rojexPerfisEquipeInterna(): array
+    {
+        return [
+            'Suporte ROJEX',
+            'Comercial ROJEX',
+            'Financeiro ROJEX',
+            'Operador ROJEX',
+            'Auditor ROJEX',
+        ];
+    }
+}
+
+if (!function_exists('rojexEhEquipeInterna')) {
+    function rojexEhEquipeInterna(): bool
+    {
+        return in_array(rojexPerfilAtual(), rojexPerfisEquipeInterna(), true);
+    }
+}
+
 if (!function_exists('rojexEhMasterSaas')) {
     function rojexEhMasterSaas(): bool
     {
-        if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
+        static $resultado = null;
+
+        if (is_bool($resultado)) {
+            return $resultado;
+        }
+
+        $usuarioId = (int)($_SESSION['user_id'] ?? 0);
+        if ($usuarioId <= 0) {
+            return $resultado = false;
+        }
+
+        if (strcasecmp(rojexPerfilAtual(), 'Administrador Master') === 0) {
+            return $resultado = true;
+        }
+
+        $connAutorizacao = null;
+
+        try {
+            $connAutorizacao = conectar();
+
+            if (function_exists('rojexUsuarioEhMasterSaas')) {
+                $resultado = rojexUsuarioEhMasterSaas(
+                    $connAutorizacao,
+                    $usuarioId,
+                    rojexPerfilAtual()
+                );
+            } else {
+                $resultado = false;
+            }
+        } catch (Throwable $e) {
+            error_log('[ROJEX AUTORIZAÇÃO MASTER] ' . $e->getMessage());
+            $resultado = false;
+        } finally {
+            if ($connAutorizacao instanceof mysqli) {
+                $connAutorizacao->close();
+            }
+        }
+
+        return $resultado;
+    }
+}
+
+if (!function_exists('rojexEhUsuarioPlataforma')) {
+    function rojexEhUsuarioPlataforma(): bool
+    {
+        if (!(function_exists('rojexModoPlataforma') && rojexModoPlataforma())) {
+            return false;
+        }
+
+        if (rojexEhMasterSaas()) {
             return true;
         }
 
-        return rojexPerfilAtual() === 'Administrador Master';
+        return rojexEhEquipeInterna();
+    }
+}
+
+if (!function_exists('rojexModulosPlataformaPorPerfil')) {
+    function rojexModulosPlataformaPorPerfil(): array
+    {
+        /*
+         * Esta é apenas a barreira de navegação entre módulos. Cada módulo
+         * mantém sua própria autorização de abas, dados e ações no servidor.
+         */
+        return match (rojexPerfilAtual()) {
+            'Suporte ROJEX' => ['master_saas', 'configuracoes'],
+            'Comercial ROJEX' => ['master_saas', 'configuracoes'],
+            'Financeiro ROJEX' => ['master_saas', 'configuracoes'],
+            'Operador ROJEX' => ['master_saas', 'configuracoes'],
+            'Auditor ROJEX' => ['master_saas', 'configuracoes'],
+            default => rojexEhMasterSaas()
+                ? ['master_saas', 'configuracoes']
+                : [],
+        };
     }
 }
 
 if (!function_exists('rojexPodeAcessarModulo')) {
     function rojexPodeAcessarModulo(string $modulo): bool
     {
-        $modulosPlataforma = ['master_saas', 'configuracoes'];
-
         if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
-            return rojexEhMasterSaas() && in_array($modulo, $modulosPlataforma, true);
+            return rojexEhUsuarioPlataforma()
+                && in_array($modulo, rojexModulosPlataformaPorPerfil(), true);
         }
 
         if ($modulo === 'master_saas') {
@@ -139,6 +227,7 @@ $moduloPadrao = (function_exists('rojexModoPlataforma') && rojexModoPlataforma()
 $moduloInformado = isset($_GET['mod'])
     ? trim((string)$_GET['mod'])
     : $moduloPadrao;
+$acessoModuloBloqueado = false;
 
 /*
  * Compatibilidade com links e favoritos anteriores à Camada Multi-Tenant.
@@ -148,6 +237,7 @@ $moduloInformado = isset($_GET['mod'])
 if (
     function_exists('rojexModoPlataforma')
     && rojexModoPlataforma()
+    && rojexEhMasterSaas()
     && $moduloInformado === 'dashboard'
 ) {
     $moduloInformado = 'master_saas';
@@ -159,16 +249,26 @@ if (!in_array($moduloInformado, $modulos_validos, true)) {
         rojexRegistrarAcessoModuloNegado($moduloInformado);
     }
 
-    $modulo = $moduloPadrao;
+    $modulo = rojexPodeAcessarModulo($moduloPadrao)
+        ? $moduloPadrao
+        : null;
+    $acessoModuloBloqueado = $modulo === null;
 } elseif (!rojexPodeAcessarModulo($moduloInformado)) {
     rojexRegistrarAcessoModuloNegado($moduloInformado);
-    $modulo = $moduloPadrao;
+    $modulo = rojexPodeAcessarModulo($moduloPadrao)
+        ? $moduloPadrao
+        : null;
+    $acessoModuloBloqueado = $modulo === null;
 
     /*
-     * O MASTER em Modo Plataforma pode chegar por URLs antigas de módulos
-     * operacionais. Nesse caso, retorna silenciosamente ao Dashboard SaaS.
+     * O MASTER principal pode chegar por URLs antigas de módulos operacionais.
+     * Para a equipe interna, a tentativa permanece visível e registrada.
      */
-    if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
+    if (
+        function_exists('rojexModoPlataforma')
+        && rojexModoPlataforma()
+        && rojexEhMasterSaas()
+    ) {
         unset($_SESSION['rojex_aviso_autorizacao']);
     } else {
         $_SESSION['rojex_aviso_autorizacao'] =
@@ -194,7 +294,7 @@ $titulos = [
     'busca' => 'Busca Global',
     'cij' => 'Centro de Inteligência Jurídica',
 ];
-$tituloPagina = $titulos[$modulo] ?? 'SGL';
+$tituloPagina = $titulos[$modulo] ?? 'Acesso restrito';
 $modoPlataforma = function_exists('rojexModoPlataforma') && rojexModoPlataforma();
 $contextoTenantValido = function_exists('rojexContextoTenantValido')
     ? rojexContextoTenantValido()
@@ -310,10 +410,10 @@ function rojexLogoSidebar(bool $modoPlataforma, array $contextoTenant): array
 $logoSidebar = rojexLogoSidebar($modoPlataforma, $contextoTenant);
 
 
-function sgl_menu_active(string $atual, array $itens): string {
+function sgl_menu_active(?string $atual, array $itens): string {
     return in_array($atual, $itens, true) ? 'show' : '';
 }
-function sgl_link_active(string $atual, string $item): string {
+function sgl_link_active(?string $atual, string $item): string {
     return $atual === $item ? 'active' : '';
 }
 
@@ -440,15 +540,19 @@ function sgl_link_active(string $atual, string $item): string {
 
         <div class="sgl-menu">
             <?php if ($modoPlataforma): ?>
-                <div class="sgl-menu-title">Plataforma SaaS</div>
-                <a href="?mod=master_saas" class="nav-link <?= sgl_link_active($modulo, 'master_saas') ?>">
-                    <i class="bi bi-shield-check"></i> Dashboard SaaS
-                </a>
+                <?php if (rojexPodeAcessarModulo('master_saas')): ?>
+                    <div class="sgl-menu-title">Plataforma SaaS</div>
+                    <a href="?mod=master_saas" class="nav-link <?= sgl_link_active((string)$modulo, 'master_saas') ?>">
+                        <i class="bi bi-shield-check"></i> Dashboard SaaS
+                    </a>
+                <?php endif; ?>
 
-                <div class="sgl-menu-title">Administração Enterprise</div>
-                <a href="?mod=configuracoes" class="nav-link <?= sgl_link_active($modulo, 'configuracoes') ?>">
-                    <i class="bi bi-gear"></i> Configurações Enterprise
-                </a>
+                <?php if (rojexPodeAcessarModulo('configuracoes')): ?>
+                    <div class="sgl-menu-title">Administração Enterprise</div>
+                    <a href="?mod=configuracoes" class="nav-link <?= sgl_link_active((string)$modulo, 'configuracoes') ?>">
+                        <i class="bi bi-gear"></i> Configurações Enterprise
+                    </a>
+                <?php endif; ?>
             <?php else: ?>
                 <a href="?mod=dashboard" class="nav-link <?= sgl_link_active($modulo, 'dashboard') ?>"><i class="bi bi-speedometer2"></i> Dashboard</a>
                 <a href="?mod=busca" class="nav-link <?= sgl_link_active($modulo, 'busca') ?>"><i class="bi bi-search"></i> Busca Global</a>
@@ -525,7 +629,11 @@ function sgl_link_active(string $atual, string $item): string {
         </div>
 
         <?php
-        if ($modoPlataforma && !empty($_SESSION['rojex_aviso_autorizacao'])) {
+        if (
+            $modoPlataforma
+            && rojexEhMasterSaas()
+            && !empty($_SESSION['rojex_aviso_autorizacao'])
+        ) {
             unset($_SESSION['rojex_aviso_autorizacao']);
         }
         ?>
@@ -533,7 +641,13 @@ function sgl_link_active(string $atual, string $item): string {
         <?php if ($modoPlataforma): ?>
             <div class="alert alert-primary shadow-sm d-flex align-items-center gap-2">
                 <i class="bi bi-grid-1x2-fill"></i>
-                <div><strong>Modo Plataforma:</strong> nenhum escritório está carregado. Os dados operacionais dos tenants permanecem bloqueados.</div>
+                <div>
+                    <strong>Modo Plataforma:</strong> nenhum escritório está carregado.
+                    <?= rojexEhMasterSaas()
+                        ? 'A administração global permanece reservada ao MASTER principal.'
+                        : 'Seu acesso está limitado às atribuições do perfil ' . htmlspecialchars(rojexPerfilAtual(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') . '.' ?>
+                    Os dados operacionais dos tenants permanecem bloqueados.
+                </div>
             </div>
         <?php elseif (!$contextoTenantValido): ?>
             <div class="alert alert-danger shadow-sm">
@@ -553,9 +667,13 @@ function sgl_link_active(string $atual, string $item): string {
         <?php endif; ?>
 
         <?php
-        $moduloExigeTenant = !in_array($modulo, ['master_saas', 'configuracoes'], true);
+        $moduloExigeTenant = $modulo !== null
+            && !in_array($modulo, ['master_saas', 'configuracoes'], true);
 
-        if ($moduloExigeTenant && !$contextoTenantValido) {
+        if ($acessoModuloBloqueado || $modulo === null) {
+            http_response_code(403);
+            echo "<div class='alert alert-danger'><strong>Acesso bloqueado:</strong> seu perfil não possui um módulo inicial autorizado.</div>";
+        } elseif ($moduloExigeTenant && !$contextoTenantValido) {
             echo "<div class='alert alert-danger'><strong>Acesso bloqueado:</strong> nenhum contexto de escritório válido está ativo.</div>";
         } else {
             // A URL pública continua ?mod=busca, mas o arquivo oficial é busca_global.php.

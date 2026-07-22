@@ -360,6 +360,33 @@ if (!function_exists('rojexUsuarioEhMasterSaas')) {
     }
 }
 
+/**
+ * Retorna o nome canônico de um perfil interno da plataforma.
+ *
+ * Esses perfis pertencem à operação da ROJEX.AI, não a um escritório cliente,
+ * e jamais equivalem ao MASTER principal.
+ */
+if (!function_exists('rojexPerfilEquipeInterna')) {
+    function rojexPerfilEquipeInterna(?string $perfil = null): ?string
+    {
+        $perfil = trim((string)($perfil ?? ($_SESSION['perfil'] ?? '')));
+
+        if ($perfil === '') {
+            return null;
+        }
+
+        $perfis = [
+            'suporte rojex' => 'Suporte ROJEX',
+            'comercial rojex' => 'Comercial ROJEX',
+            'financeiro rojex' => 'Financeiro ROJEX',
+            'operador rojex' => 'Operador ROJEX',
+            'auditor rojex' => 'Auditor ROJEX',
+        ];
+
+        return $perfis[mb_strtolower($perfil, 'UTF-8')] ?? null;
+    }
+}
+
 if (!function_exists('rojexLimparContextoTenant')) {
     function rojexLimparContextoTenant(bool $preservarModoPlataforma = false): void
     {
@@ -415,6 +442,69 @@ if (!function_exists('rojexDefinirContextoPlataforma')) {
         $_SESSION['modo_suporte'] = false;
         $_SESSION['papel_tenant'] = 'master_saas';
         $_SESSION['permissoes_tenant'] = $contexto['permissoes'];
+        $_SESSION['modulos_tenant'] = [];
+
+        return $contexto;
+    }
+}
+
+if (!function_exists('rojexDefinirContextoEquipeInterna')) {
+    /**
+     * Cria um contexto de plataforma limitado para a equipe interna ROJEX.AI.
+     *
+     * O contexto não recebe tenant, escritório, módulos de clientes nem a
+     * permissão plataforma_total, que permanece exclusiva do MASTER.
+     */
+    function rojexDefinirContextoEquipeInterna(string $perfil): array
+    {
+        $perfilCanonico = rojexPerfilEquipeInterna($perfil);
+
+        if ($perfilCanonico === null) {
+            throw new RuntimeException('Perfil interno ROJEX.AI inválido.');
+        }
+
+        $permissoesPorPerfil = [
+            'Suporte ROJEX' => ['plataforma_suporte'],
+            'Comercial ROJEX' => ['plataforma_comercial'],
+            'Financeiro ROJEX' => ['plataforma_financeiro'],
+            'Operador ROJEX' => ['plataforma_operador'],
+            'Auditor ROJEX' => ['plataforma_auditoria'],
+        ];
+
+        $permissoes = $permissoesPorPerfil[$perfilCanonico] ?? [];
+
+        if ($permissoes === [] || in_array('plataforma_total', $permissoes, true)) {
+            throw new RuntimeException('Permissões internas ROJEX.AI inválidas.');
+        }
+
+        rojexLimparContextoTenant(true);
+
+        $contexto = [
+            'tipo_contexto' => 'plataforma',
+            'tenant_id' => null,
+            'escritorio_id' => null,
+            'escritorio_nome' => null,
+            'escritorio_status' => null,
+            'licenca_id' => null,
+            'licenca_chave' => null,
+            'licenca_status' => null,
+            'plano_id' => null,
+            'plano' => null,
+            'assinatura_status' => null,
+            'papel' => 'equipe_interna_rojex',
+            'perfil_interno' => $perfilCanonico,
+            'principal' => false,
+            'modo_suporte' => false,
+            'permissoes' => $permissoes,
+            'modulos' => [],
+            'carregado_em' => date('c'),
+        ];
+
+        $_SESSION['tenant'] = $contexto;
+        $_SESSION['modo_plataforma'] = true;
+        $_SESSION['modo_suporte'] = false;
+        $_SESSION['papel_tenant'] = 'equipe_interna_rojex';
+        $_SESSION['permissoes_tenant'] = $permissoes;
         $_SESSION['modulos_tenant'] = [];
 
         return $contexto;
@@ -481,8 +571,9 @@ if (!function_exists('rojexCarregarContextoTenant')) {
     /**
      * Carrega o contexto SaaS do usuário autenticado.
      *
-     * MASTER entra por padrão no modo plataforma. Um escritório específico só
-     * será carregado quando $escritorioForcadoId for informado explicitamente.
+     * MASTER entra por padrão no modo plataforma com acesso total. A equipe
+     * interna ROJEX.AI entra em contexto de plataforma limitado. Um escritório
+     * específico só pode ser carregado pelo MASTER.
      */
     function rojexCarregarContextoTenant(
         mysqli $conn,
@@ -496,9 +587,21 @@ if (!function_exists('rojexCarregarContextoTenant')) {
         }
 
         $ehMaster = rojexUsuarioEhMasterSaas($conn, $usuarioId, $perfil);
+        $perfilInterno = rojexPerfilEquipeInterna($perfil);
 
         if ($ehMaster && (!$escritorioForcadoId || $escritorioForcadoId <= 0)) {
             return rojexDefinirContextoPlataforma();
+        }
+
+        if ($perfilInterno !== null) {
+            if ($escritorioForcadoId && $escritorioForcadoId > 0) {
+                rojexLimparContextoTenant();
+                throw new RuntimeException(
+                    'A equipe interna ROJEX.AI não pode assumir o contexto de um escritório.'
+                );
+            }
+
+            return rojexDefinirContextoEquipeInterna($perfilInterno);
         }
 
         if (

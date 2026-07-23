@@ -308,13 +308,22 @@ $nomeContexto = $modoPlataforma
 
 /*
  * Downloads binários precisam ser processados antes do DOCTYPE, da barra
- * lateral e de config/tema.php. O módulo valida novamente MASTER, arquivo e
- * SHA-256 antes de enviar qualquer byte.
+ * lateral e de config/tema.php. O módulo valida novamente as permissões, o
+ * CSRF, o arquivo e a integridade antes de enviar qualquer byte.
  */
+$acoesConfiguracoesComDownload = [
+    'baixar_log_backup',
+    'gerar_backup_encerramento',
+];
+
 if (
     $modulo === 'configuracoes'
-    && $_SERVER['REQUEST_METHOD'] === 'POST'
-    && ($_POST['acao_cfg'] ?? '') === 'baixar_log_backup'
+    && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'POST'
+    && in_array(
+        (string)($_POST['acao_cfg'] ?? ''),
+        $acoesConfiguracoesComDownload,
+        true
+    )
 ) {
     require __DIR__ . '/modules/configuracoes.php';
     exit;

@@ -1539,6 +1539,650 @@ function rojex_log_backup_gerar_zip(
 }
 
 
+// -----------------------------------------------------------------------------
+// Encerramento restaurável — geração isolada do pacote probatório
+// Esta etapa somente lê e exporta. Não altera status, sessões ou registros.
+// -----------------------------------------------------------------------------
+function rojex_enc_tabelas_tenant(): array {
+    return [
+        'advogados','agenda','bancos_caixa','bancos_movimentacoes','clientes',
+        'contas_pagar','contas_pagar_parcelas','contas_receber',
+        'contas_receber_parcelas','documentos_arquivos',
+        'escritorios_configuracoes_saas','honorarios','honorarios_parcelas',
+        'ia_consultas','logs_backups','logs_sistema','modelos_documentos',
+        'modelos_documentos_gerados','modelos_documentos_versoes',
+        'portal_agenda_publicacoes','portal_clientes_contas',
+        'portal_clientes_permissoes','portal_clientes_sessoes',
+        'portal_clientes_tokens','portal_documentos_envios',
+        'portal_documentos_publicacoes','portal_notificacoes',
+        'portal_processos_publicacoes','portal_tentativas_login','processos',
+        'processos_movimentacoes','recibos','usuarios_escritorios_saas',
+    ];
+}
+
+function rojex_enc_tabelas_escritorio(): array {
+    return ['assinaturas_saas','escritorios_modulos_saas','licencas_saas'];
+}
+
+function rojex_enc_tabelas_globais_excluidas(): array {
+    return [
+        'atualizacoes_sistema','backups_sistema',
+        'bancos_caixa_backup_fase441','bancos_caixa_backup_fix10',
+        'bancos_movimentacoes_backup_fase441',
+        'bancos_movimentacoes_backup_fix10','configuracoes','empresa',
+        'ia_consultas_backup_sprint463','logs_sistema_backup_sprint464',
+        'manutencoes_sistema','sgl_migracoes','usuarios_sistema',
+    ];
+}
+
+function rojex_enc_diretorio(): string {
+    $diretorio = __DIR__ . '/../storage/encerramentos';
+    if (!is_dir($diretorio) && !@mkdir($diretorio, 0750, true) && !is_dir($diretorio)) {
+        throw new RuntimeException('Não foi possível criar storage/encerramentos.');
+    }
+    if (!is_writable($diretorio)) {
+        throw new RuntimeException('A pasta storage/encerramentos não possui permissão de gravação.');
+    }
+    if (!is_file($diretorio . '/.htaccess')) {
+        @file_put_contents($diretorio . '/.htaccess', "Require all denied\nDeny from all\n");
+    }
+    if (!is_file($diretorio . '/index.php')) {
+        @file_put_contents($diretorio . '/index.php', "<?php http_response_code(404); exit;\n");
+    }
+    return $diretorio;
+}
+
+function rojex_enc_limpar_temporario(string $diretorio): void {
+    $base = realpath(rojex_enc_diretorio());
+    $real = realpath($diretorio);
+    if (
+        $base === false || $real === false || $real === $base
+        || !str_starts_with($real, $base . DIRECTORY_SEPARATOR)
+    ) return;
+
+    $itens = @scandir($real);
+    if (is_array($itens)) {
+        foreach ($itens as $item) {
+            if ($item === '.' || $item === '..') continue;
+            $caminho = $real . DIRECTORY_SEPARATOR . $item;
+            if (is_dir($caminho)) rojex_enc_limpar_temporario($caminho);
+            elseif (is_file($caminho)) @unlink($caminho);
+        }
+    }
+    @rmdir($real);
+}
+
+function rojex_enc_json(mixed $valor, bool $formatado = true): string {
+    $opcoes = JSON_UNESCAPED_UNICODE
+        | JSON_UNESCAPED_SLASHES
+        | JSON_INVALID_UTF8_SUBSTITUTE;
+    if ($formatado) $opcoes |= JSON_PRETTY_PRINT;
+    $json = json_encode($valor, $opcoes);
+    if ($json === false) {
+        throw new RuntimeException('Não foi possível serializar o pacote restaurável.');
+    }
+    return $json;
+}
+
+function rojex_enc_nome_seguro(string $valor, string $padrao = 'arquivo'): string {
+    $valor = preg_replace('/[^\pL\pN._-]+/u', '_', trim($valor)) ?? '';
+    $valor = trim($valor, '._-');
+    return $valor !== '' ? mb_substr($valor, 0, 140, 'UTF-8') : $padrao;
+}
+
+function rojex_enc_consultar(
+    mysqli $conn,
+    string $tabela,
+    string $where = '',
+    string $tipos = '',
+    array $parametros = []
+): array {
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $tabela) || !sgl_tabela_existe($conn, $tabela)) {
+        return [];
+    }
+    $sql = "SELECT * FROM `$tabela`" . ($where !== '' ? ' WHERE ' . $where : '');
+    if (sgl_coluna_existe($conn, $tabela, 'id')) $sql .= ' ORDER BY id ASC';
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) throw new RuntimeException('Falha ao preparar a exportação de ' . $tabela . '.');
+    if ($tipos !== '') $stmt->bind_param($tipos, ...$parametros);
+    if (!$stmt->execute()) {
+        $erro = $stmt->error;
+        $stmt->close();
+        throw new RuntimeException($erro ?: 'Falha ao exportar ' . $tabela . '.');
+    }
+    $resultado = $stmt->get_result();
+    $linhas = [];
+    while ($linha = $resultado->fetch_assoc()) $linhas[] = $linha;
+    $stmt->close();
+    return $linhas;
+}
+
+function rojex_enc_estrutura(mysqli $conn, string $tabela): ?string {
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $tabela) || !sgl_tabela_existe($conn, $tabela)) {
+        return null;
+    }
+    $resultado = $conn->query("SHOW CREATE TABLE `$tabela`");
+    if (!$resultado) return null;
+    $linha = $resultado->fetch_assoc();
+    return isset($linha['Create Table']) ? (string)$linha['Create Table'] : null;
+}
+
+function rojex_enc_zip_arquivo(
+    ZipArchive $zip,
+    string $origem,
+    string $destino,
+    string $senha
+): array {
+    if (!is_file($origem) || !$zip->addFile($origem, $destino)) {
+        throw new RuntimeException('Não foi possível incluir ' . $destino . ' no pacote.');
+    }
+    $metodo = defined('ZipArchive::EM_AES_256')
+        ? constant('ZipArchive::EM_AES_256')
+        : null;
+    if (
+        $metodo === null
+        || !method_exists($zip, 'setEncryptionName')
+        || !$zip->setEncryptionName($destino, $metodo, $senha)
+    ) {
+        throw new RuntimeException(
+            'O PHP/ZipArchive não oferece AES-256. O pacote não foi criado sem criptografia.'
+        );
+    }
+    $hash = hash_file('sha256', $origem);
+    $tamanho = filesize($origem);
+    if (!is_string($hash) || $tamanho === false) {
+        throw new RuntimeException('Não foi possível calcular a integridade de ' . $destino . '.');
+    }
+    return [
+        'caminho_zip' => $destino,
+        'tamanho_bytes' => (int)$tamanho,
+        'sha256' => $hash,
+        'criptografia' => 'AES-256',
+    ];
+}
+
+function rojex_enc_zip_json(
+    ZipArchive $zip,
+    string $temporario,
+    string $destino,
+    mixed $conteudo,
+    string $senha,
+    bool $jsonl = false
+): array {
+    $arquivo = $temporario . DIRECTORY_SEPARATOR . hash('sha256', $destino) . '.tmp';
+    if ($jsonl) {
+        $handle = @fopen($arquivo, 'wb');
+        if (!$handle) throw new RuntimeException('Não foi possível criar ' . $destino . '.');
+        foreach ((array)$conteudo as $linha) {
+            if (fwrite($handle, rojex_enc_json($linha, false) . "\n") === false) {
+                fclose($handle);
+                throw new RuntimeException('Falha ao gravar ' . $destino . '.');
+            }
+        }
+        fclose($handle);
+    } elseif (@file_put_contents($arquivo, rojex_enc_json($conteudo)) === false) {
+        throw new RuntimeException('Falha ao gravar ' . $destino . '.');
+    }
+    return rojex_enc_zip_arquivo($zip, $arquivo, $destino, $senha);
+}
+
+function rojex_enc_resolver_arquivo(string $valor, array $raizes): ?string {
+    $valor = trim(str_replace("\0", '', $valor));
+    if ($valor === '') return null;
+    $projeto = realpath(__DIR__ . '/..');
+    $candidatos = [$valor];
+    if (
+        $projeto !== false
+        && !preg_match('/^(?:[A-Za-z]:[\\\\\/]|\/)/', $valor)
+    ) {
+        $relativo = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $valor);
+        $candidatos[] = $projeto . DIRECTORY_SEPARATOR . ltrim($relativo, DIRECTORY_SEPARATOR);
+        foreach ($raizes as $raiz) {
+            $candidatos[] = rtrim($raiz, '/\\')
+                . DIRECTORY_SEPARATOR
+                . ltrim($relativo, DIRECTORY_SEPARATOR);
+        }
+    }
+    $raizesReais = [];
+    foreach ($raizes as $raiz) {
+        $realRaiz = realpath($raiz);
+        if ($realRaiz !== false) $raizesReais[] = $realRaiz;
+    }
+    foreach ($candidatos as $candidato) {
+        $real = realpath($candidato);
+        if ($real === false || !is_file($real)) continue;
+        foreach ($raizesReais as $raiz) {
+            if ($real === $raiz || str_starts_with($real, $raiz . DIRECTORY_SEPARATOR)) {
+                return $real;
+            }
+        }
+    }
+    return null;
+}
+
+function rojex_enc_gerar(mysqli $conn, int $escritorioId, string $senha): array {
+    if ($escritorioId <= 0) throw new RuntimeException('Selecione um escritório válido.');
+    if (mb_strlen($senha, 'UTF-8') < 12) {
+        throw new RuntimeException('A senha do ZIP deve possuir pelo menos 12 caracteres.');
+    }
+    if (!class_exists('ZipArchive')) {
+        throw new RuntimeException('A extensão PHP ZipArchive não está disponível.');
+    }
+
+    $escritorioRows = rojex_enc_consultar(
+        $conn, 'escritorios_saas', 'id = ?', 'i', [$escritorioId]
+    );
+    if (count($escritorioRows) !== 1) {
+        throw new RuntimeException('Escritório não encontrado.');
+    }
+    $escritorio = $escritorioRows[0];
+    $tenantId = trim((string)($escritorio['tenant_id'] ?? ''));
+    if ($tenantId === '') throw new RuntimeException('O escritório não possui tenant válido.');
+
+    $base = rojex_enc_diretorio();
+    $token = bin2hex(random_bytes(12));
+    $temporario = $base . DIRECTORY_SEPARATOR . '.tmp_' . $token;
+    if (!@mkdir($temporario, 0750, true) && !is_dir($temporario)) {
+        throw new RuntimeException('Não foi possível criar a área temporária protegida.');
+    }
+    $tenantSeguro = rojex_enc_nome_seguro($tenantId, 'tenant');
+    $nomeZip = 'rojex_encerramento_' . $tenantSeguro . '_escritorio_'
+        . $escritorioId . '_' . date('Ymd_His') . '.zip';
+    $arquivoZip = $base . DIRECTORY_SEPARATOR . $nomeZip;
+    $zip = new ZipArchive();
+    $zipAberto = false;
+
+    try {
+        if ($zip->open($arquivoZip, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            throw new RuntimeException('Não foi possível criar o ZIP restaurável.');
+        }
+        $zipAberto = true;
+        $zip->setPassword($senha);
+
+        $tabelas = [];
+        $idsOriginais = [];
+        $estrutura = [];
+        $integridade = [];
+        $dados = [];
+
+        $exportar = function (
+            string $tabela,
+            array $linhas,
+            string $filtro
+        ) use (
+            $conn, $zip, $temporario, $senha,
+            &$tabelas, &$idsOriginais, &$estrutura, &$integridade, &$dados
+        ): void {
+            $destino = 'banco/' . $tabela . '.jsonl';
+            $integridade[$destino] = rojex_enc_zip_json(
+                $zip, $temporario, $destino, $linhas, $senha, true
+            );
+            $ids = [];
+            foreach ($linhas as $linha) {
+                if (array_key_exists('id', $linha)) $ids[] = $linha['id'];
+            }
+            $tabelas[$tabela] = [
+                'status' => 'exportada',
+                'filtro' => $filtro,
+                'quantidade' => count($linhas),
+                'sha256' => $integridade[$destino]['sha256'],
+            ];
+            $idsOriginais[$tabela] = $ids;
+            $estrutura[$tabela] = rojex_enc_estrutura($conn, $tabela);
+            if (in_array($tabela, [
+                'documentos_arquivos',
+                'escritorios_configuracoes_saas',
+                'escritorios_modulos_saas',
+                'logs_backups',
+                'modelos_documentos_gerados',
+                'portal_documentos_envios',
+                'usuarios_escritorios_saas',
+            ], true)) {
+                $dados[$tabela] = $linhas;
+            }
+        };
+
+        foreach (rojex_enc_tabelas_tenant() as $tabela) {
+            if (
+                !sgl_tabela_existe($conn, $tabela)
+                || !sgl_coluna_existe($conn, $tabela, 'tenant_id')
+                || !sgl_coluna_existe($conn, $tabela, 'escritorio_id')
+            ) {
+                $tabelas[$tabela] = ['status' => 'ausente_ou_incompativel', 'quantidade' => 0];
+                continue;
+            }
+            $exportar(
+                $tabela,
+                rojex_enc_consultar(
+                    $conn, $tabela, 'tenant_id = ? AND escritorio_id = ?',
+                    'si', [$tenantId, $escritorioId]
+                ),
+                'tenant_id + escritorio_id'
+            );
+        }
+        foreach (rojex_enc_tabelas_escritorio() as $tabela) {
+            if (
+                !sgl_tabela_existe($conn, $tabela)
+                || !sgl_coluna_existe($conn, $tabela, 'escritorio_id')
+            ) {
+                $tabelas[$tabela] = ['status' => 'ausente_ou_incompativel', 'quantidade' => 0];
+                continue;
+            }
+            $exportar(
+                $tabela,
+                rojex_enc_consultar($conn, $tabela, 'escritorio_id = ?', 'i', [$escritorioId]),
+                'escritorio_id'
+            );
+        }
+        $exportar('escritorios_saas', $escritorioRows, 'id exato');
+
+        $usuariosIds = [];
+        foreach (($dados['usuarios_escritorios_saas'] ?? []) as $vinculo) {
+            $usuarioId = (int)($vinculo['usuario_id'] ?? 0);
+            if ($usuarioId > 0) $usuariosIds[$usuarioId] = $usuarioId;
+        }
+        $usuariosIds = array_values($usuariosIds);
+        foreach (['usuarios','usuarios_historico','usuarios_preferencias'] as $tabela) {
+            $linhas = [];
+            if ($usuariosIds && sgl_tabela_existe($conn, $tabela)) {
+                $chave = $tabela === 'usuarios' ? 'id' : 'usuario_id';
+                $marcadores = implode(',', array_fill(0, count($usuariosIds), '?'));
+                $linhas = rojex_enc_consultar(
+                    $conn, $tabela, "`$chave` IN ($marcadores)",
+                    str_repeat('i', count($usuariosIds)), $usuariosIds
+                );
+            }
+            $exportar($tabela, $linhas, 'usuários vinculados ao escritório');
+        }
+
+        // Catálogos SaaS são fotografia de referência e não importação automática.
+        $planoCodigo = trim((string)($escritorio['plano'] ?? ''));
+        $planoRows = $planoCodigo !== '' && sgl_tabela_existe($conn, 'planos_saas')
+            ? rojex_enc_consultar($conn, 'planos_saas', 'codigo = ?', 's', [$planoCodigo])
+            : [];
+        $planoIds = array_values(array_filter(array_map(
+            static fn(array $linha): int => (int)($linha['id'] ?? 0), $planoRows
+        )));
+        $moduloIds = array_values(array_unique(array_filter(array_map(
+            static fn(array $linha): int => (int)($linha['modulo_id'] ?? 0),
+            $dados['escritorios_modulos_saas'] ?? []
+        ))));
+        $referencias = [
+            'planos_saas' => $planoRows,
+            'modulos_saas' => $moduloIds
+                ? rojex_enc_consultar(
+                    $conn, 'modulos_saas',
+                    'id IN (' . implode(',', array_fill(0, count($moduloIds), '?')) . ')',
+                    str_repeat('i', count($moduloIds)), $moduloIds
+                ) : [],
+            'planos_modulos_saas' => $planoIds
+                ? rojex_enc_consultar(
+                    $conn, 'planos_modulos_saas',
+                    'plano_id IN (' . implode(',', array_fill(0, count($planoIds), '?')) . ')',
+                    str_repeat('i', count($planoIds)), $planoIds
+                ) : [],
+            'planos_precos_historico' => $planoIds
+                ? rojex_enc_consultar(
+                    $conn, 'planos_precos_historico',
+                    'plano_id IN (' . implode(',', array_fill(0, count($planoIds), '?')) . ')',
+                    str_repeat('i', count($planoIds)), $planoIds
+                ) : [],
+        ];
+        foreach ($referencias as $tabela => $linhas) {
+            $destino = 'referencias/' . $tabela . '.jsonl';
+            $integridade[$destino] = rojex_enc_zip_json(
+                $zip, $temporario, $destino, $linhas, $senha, true
+            );
+        }
+
+        $projeto = realpath(__DIR__ . '/..') ?: (__DIR__ . '/..');
+        $raizDocumentos = $projeto . '/uploads/documentos';
+        $raizUploads = $projeto . '/uploads';
+        $raizImagens = $projeto . '/assets/img';
+        $raizLogs = rojex_log_backup_diretorio();
+        $arquivos = [];
+        $ausentes = [];
+        $referenciados = [];
+        $fontes = [
+            ['documento',$dados['documentos_arquivos'] ?? [],'caminho','nome_original',[$raizDocumentos],'arquivos/documentos'],
+            ['portal_documento',$dados['portal_documentos_envios'] ?? [],'caminho','nome_original',[$raizUploads],'arquivos/portal_documentos'],
+            ['modelo_legado',$dados['modelos_documentos_gerados'] ?? [],'arquivo','titulo',[$raizUploads],'arquivos/modelos_legados'],
+        ];
+        foreach ($fontes as [$tipo,$linhas,$campo,$campoNome,$raizes,$pasta]) {
+            foreach ($linhas as $linha) {
+                $valor = trim((string)($linha[$campo] ?? ''));
+                if ($valor === '') continue;
+                $id = (string)($linha['id'] ?? 'sem_id');
+                $real = rojex_enc_resolver_arquivo($valor, $raizes);
+                if ($real === null) {
+                    $ausentes[] = [
+                        'tipo' => $tipo, 'registro_id' => $id,
+                        'caminho_original' => $valor,
+                        'motivo' => 'ausente_ou_fora_da_raiz_permitida',
+                    ];
+                    continue;
+                }
+                $nome = rojex_enc_nome_seguro(
+                    (string)($linha[$campoNome] ?? basename($real)), basename($real)
+                );
+                $destino = $pasta . '/' . $id . '_' . $nome;
+                $meta = rojex_enc_zip_arquivo($zip, $real, $destino, $senha);
+                $meta += [
+                    'tipo' => $tipo, 'registro_id' => $id,
+                    'caminho_original' => $valor,
+                    'extensao' => strtolower(pathinfo($real, PATHINFO_EXTENSION)),
+                    'mime_type' => class_exists('finfo')
+                        ? ((new finfo(FILEINFO_MIME_TYPE))->file($real) ?: 'application/octet-stream')
+                        : 'application/octet-stream',
+                ];
+                $arquivos[] = $meta;
+                $integridade[$destino] = $meta;
+                $referenciados[$real] = true;
+            }
+        }
+
+        foreach (($dados['escritorios_configuracoes_saas'] ?? []) as $linha) {
+            if ((string)($linha['chave'] ?? '') !== 'logo_arquivo') continue;
+            $valor = trim((string)($linha['valor'] ?? ''));
+            if ($valor === '') continue;
+            $real = rojex_enc_resolver_arquivo($valor, [$raizImagens]);
+            if ($real === null) {
+                $ausentes[] = [
+                    'tipo' => 'branding','registro_id' => (string)($linha['id'] ?? 'logo'),
+                    'caminho_original' => $valor,'motivo' => 'logo_ausente',
+                ];
+                continue;
+            }
+            $destino = 'arquivos/branding/logo_atual.'
+                . strtolower(pathinfo($real, PATHINFO_EXTENSION));
+            $meta = rojex_enc_zip_arquivo($zip, $real, $destino, $senha);
+            $dimensoes = @getimagesize($real);
+            $meta += [
+                'tipo' => 'branding','registro_id' => (string)($linha['id'] ?? 'logo'),
+                'caminho_original' => $valor,
+                'extensao' => strtolower(pathinfo($real, PATHINFO_EXTENSION)),
+                'mime_type' => is_array($dimensoes)
+                    ? (string)($dimensoes['mime'] ?? 'application/octet-stream')
+                    : 'application/octet-stream',
+                'largura_px' => is_array($dimensoes) ? (int)($dimensoes[0] ?? 0) : null,
+                'altura_px' => is_array($dimensoes) ? (int)($dimensoes[1] ?? 0) : null,
+            ];
+            $arquivos[] = $meta;
+            $integridade[$destino] = $meta;
+            $referenciados[$real] = true;
+        }
+
+        $logsExternos = [];
+        foreach (($dados['logs_backups'] ?? []) as $linha) {
+            $valor = trim((string)($linha['arquivo'] ?? ''));
+            $hashEsperado = trim((string)($linha['sha256'] ?? $linha['hash_sha256'] ?? ''));
+            if ($valor === '') {
+                $logsExternos[] = [
+                    'backup_id' => (int)($linha['id'] ?? 0),
+                    'nome_arquivo' => (string)($linha['nome_arquivo'] ?? ''),
+                    'status' => (string)($linha['status'] ?? ''),
+                    'sha256_esperado' => $hashEsperado,
+                    'tamanho_bytes_esperado' => (int)($linha['tamanho_bytes'] ?? 0),
+                    'situacao' => 'copia_externa_necessaria',
+                ];
+                continue;
+            }
+            $real = rojex_enc_resolver_arquivo($valor, [$raizLogs]);
+            if ($real === null) {
+                $ausentes[] = [
+                    'tipo' => 'logs_backup','registro_id' => (string)($linha['id'] ?? 0),
+                    'caminho_original' => $valor,'motivo' => 'zip_de_log_ausente',
+                ];
+                continue;
+            }
+            $hashAtual = hash_file('sha256', $real);
+            if ($hashEsperado !== '' && (!is_string($hashAtual) || !hash_equals($hashEsperado, $hashAtual))) {
+                $ausentes[] = [
+                    'tipo' => 'logs_backup','registro_id' => (string)($linha['id'] ?? 0),
+                    'caminho_original' => $valor,'motivo' => 'sha256_divergente',
+                ];
+                continue;
+            }
+            $destino = 'arquivos/logs_backups/' . rojex_enc_nome_seguro(
+                (string)($linha['nome_arquivo'] ?? basename($real)), basename($real)
+            );
+            $meta = rojex_enc_zip_arquivo($zip, $real, $destino, $senha);
+            $meta += [
+                'tipo' => 'logs_backup','registro_id' => (string)($linha['id'] ?? 0),
+                'caminho_original' => $valor,
+                'extensao' => 'zip',
+                'mime_type' => 'application/zip',
+            ];
+            $arquivos[] = $meta;
+            $integridade[$destino] = $meta;
+            $referenciados[$real] = true;
+        }
+
+        $orfaos = [];
+        $tenantPasta = substr(hash('sha256', $tenantId . '|' . $escritorioId), 0, 24);
+        $pastaTenant = $raizDocumentos . '/' . $tenantPasta;
+        if (is_dir($pastaTenant)) {
+            $iterador = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($pastaTenant, FilesystemIterator::SKIP_DOTS)
+            );
+            foreach ($iterador as $item) {
+                if (!$item->isFile()) continue;
+                $real = $item->getRealPath();
+                if ($real !== false && empty($referenciados[$real])) {
+                    $orfaos[] = [
+                        'nome' => $item->getFilename(),
+                        'caminho_relativo' => str_replace(
+                            DIRECTORY_SEPARATOR,
+                            '/',
+                            ltrim(substr($real, strlen($pastaTenant)), DIRECTORY_SEPARATOR)
+                        ),
+                        'tamanho_bytes' => $item->getSize(),
+                        'sha256' => hash_file('sha256', $real),
+                        'situacao' => 'nao_associado_automaticamente',
+                    ];
+                }
+            }
+        }
+
+        $manifestos = [
+            'manifestos/tabelas.json' => $tabelas,
+            'manifestos/arquivos.json' => $arquivos,
+            'manifestos/relacionamentos.json' => [
+                'regra' => 'Preservar IDs originais e remapear na restauração.',
+                'usuarios' => 'Reconciliar usuários globais antes dos vínculos.',
+                'clientes_processos' => 'Clientes antecedem processos, documentos, honorários e Portal.',
+                'financeiro' => 'Honorários e contas antecedem parcelas, movimentações e recibos.',
+                'portal' => 'Contas antecedem permissões, sessões, tokens, publicações e envios.',
+                'sessoes_tokens' => 'Preservar como prova e manter inválidos após restaurar.',
+            ],
+            'manifestos/ids_originais.json' => $idsOriginais,
+            'manifestos/arquivos_ausentes.json' => $ausentes,
+            'manifestos/arquivos_orfaos.json' => $orfaos,
+            'manifestos/logs_externos_necessarios.json' => $logsExternos,
+            'manifestos/exclusoes_globais.json' => [
+                'tabelas_verificadas_e_nao_exportadas' => rojex_enc_tabelas_globais_excluidas(),
+                'regra' => 'Registros globais, legados ou sem tenant não pertencem automaticamente ao escritório.',
+            ],
+            'manifestos/autorizacao_encerramento.json' => [
+                'tipo' => 'GERACAO_DE_PACOTE_RESTAURAVEL',
+                'autoriza_exclusao' => false,
+                'tenant_id' => $tenantId,
+                'escritorio_id' => $escritorioId,
+                'responsavel_usuario_id' => (int)($_SESSION['user_id'] ?? 0),
+                'responsavel_nome' => (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'MASTER'),
+                'gerado_em' => date(DATE_ATOM),
+                'observacao' => 'Este pacote não encerra o escritório e não autoriza exclusão definitiva.',
+            ],
+            'referencias/estrutura_banco.json' => $estrutura,
+        ];
+        foreach ($manifestos as $destino => $conteudo) {
+            $integridade[$destino] = rojex_enc_zip_json(
+                $zip, $temporario, $destino, $conteudo, $senha
+            );
+        }
+
+        $manifesto = [
+            'formato' => 'ROJEX-ENCERRAMENTO-RESTAURAVEL',
+            'versao_formato' => 1,
+            'gerado_em' => date(DATE_ATOM),
+            'origem' => [
+                'tenant_id' => $tenantId,'escritorio_id' => $escritorioId,
+                'nome' => (string)($escritorio['nome'] ?? ''),
+                'status' => (string)($escritorio['status'] ?? ''),
+                'plano' => (string)($escritorio['plano'] ?? ''),
+            ],
+            'escopo' => 'Ativos, lixeira, vínculos SaaS, usuários vinculados e arquivos localizados.',
+            'consistencia_banco' => 'Snapshot transacional REPEATABLE READ no instante de geração.',
+            'criptografia' => 'AES-256 por entrada; a senha não é armazenada.',
+            'quantidade_tabelas_exportadas' => count(array_filter(
+                $tabelas, static fn(array $meta): bool => ($meta['status'] ?? '') === 'exportada'
+            )),
+            'quantidade_arquivos_fisicos' => count($arquivos),
+            'quantidade_arquivos_ausentes' => count($ausentes),
+            'quantidade_arquivos_orfaos' => count($orfaos),
+            'quantidade_logs_externos_necessarios' => count($logsExternos),
+            'restricao' => 'Pacote probatório; não autoriza encerramento ou exclusão.',
+        ];
+        $integridade['manifesto.json'] = rojex_enc_zip_json(
+            $zip, $temporario, 'manifesto.json', $manifesto, $senha
+        );
+        rojex_enc_zip_json(
+            $zip, $temporario, 'manifestos/integridade.json',
+            [
+                'algoritmo' => 'SHA-256',
+                'observacao' => 'Hashes do conteúdo original antes da criptografia.',
+                'entradas' => $integridade,
+            ],
+            $senha
+        );
+
+        if (!$zip->close()) {
+            throw new RuntimeException('Não foi possível finalizar o ZIP restaurável.');
+        }
+        $zipAberto = false;
+        $hashZip = hash_file('sha256', $arquivoZip);
+        $tamanhoZip = filesize($arquivoZip);
+        if (!is_string($hashZip) || $tamanhoZip === false || $tamanhoZip <= 0) {
+            throw new RuntimeException('O ZIP final não passou pela validação de integridade.');
+        }
+        rojex_enc_limpar_temporario($temporario);
+        return [
+            'arquivo' => $arquivoZip,'nome_arquivo' => $nomeZip,
+            'sha256' => $hashZip,'tamanho_bytes' => (int)$tamanhoZip,
+            'tenant_id' => $tenantId,'escritorio_id' => $escritorioId,
+            'escritorio_nome' => (string)($escritorio['nome'] ?? ''),
+            'arquivos_ausentes' => count($ausentes),
+            'logs_externos' => count($logsExternos),
+        ];
+    } catch (Throwable $e) {
+        if ($zipAberto) $zip->close();
+        if (is_file($arquivoZip)) @unlink($arquivoZip);
+        rojex_enc_limpar_temporario($temporario);
+        throw $e;
+    }
+}
+
+
 function rojex_atualizacao_versao_atual(mysqli $conn): string {
     $versao = trim(sgl_cfg_get($conn, 'versao_sistema', ''));
     if ($versao === '') {
@@ -2001,6 +2645,7 @@ $acoesExclusivasMaster = [
     'verificar_log_backup',
     'baixar_log_backup',
     'arquivar_log_backup',
+    'gerar_backup_encerramento',
     'salvar_atualizacao',
     'alterar_status_atualizacao',
     'simular_atualizacao',
@@ -2055,6 +2700,89 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !validarTokenCsrf($_POST['csrf_toke
     $msg = 'Token de segurança inválido. Atualize a página e tente novamente.';
     $msg_tipo = 'danger';
     $acao_cfg = '';
+}
+
+// Gera e entrega o pacote restaurável sem alterar ou excluir o escritório.
+if (
+    $ehUsuarioMaster
+    && $acao_cfg === 'gerar_backup_encerramento'
+    && $_SERVER['REQUEST_METHOD'] === 'POST'
+) {
+    $escritorioIdEncerramento = max(0, (int)($_POST['encerramento_escritorio_id'] ?? 0));
+    $senhaEncerramento = (string)($_POST['encerramento_senha'] ?? '');
+    $senhaConfirmacaoEncerramento = (string)($_POST['encerramento_senha_confirmacao'] ?? '');
+    $fraseEncerramento = strtoupper(trim((string)($_POST['encerramento_confirmacao'] ?? '')));
+    $pacoteEncerramento = null;
+
+    try {
+        if ($fraseEncerramento !== 'GERAR BACKUP') {
+            throw new RuntimeException('Confirmação inválida. Digite GERAR BACKUP.');
+        }
+        if (!hash_equals($senhaEncerramento, $senhaConfirmacaoEncerramento)) {
+            throw new RuntimeException('A senha e a confirmação da senha não coincidem.');
+        }
+
+        @set_time_limit(0);
+        $conn->query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+        $conn->begin_transaction(MYSQLI_TRANS_START_WITH_CONSISTENT_SNAPSHOT);
+        $pacoteEncerramento = rojex_enc_gerar(
+            $conn,
+            $escritorioIdEncerramento,
+            $senhaEncerramento
+        );
+        $conn->commit();
+
+        sgl_log(
+            $conn,
+            'Gerou pacote restaurável de escritório',
+            'escritorios_saas',
+            (string)$pacoteEncerramento['escritorio_id'],
+            'Tenant: ' . $pacoteEncerramento['tenant_id']
+            . '; ZIP SHA-256: ' . $pacoteEncerramento['sha256']
+            . '; bytes: ' . $pacoteEncerramento['tamanho_bytes']
+            . '; arquivos ausentes: ' . $pacoteEncerramento['arquivos_ausentes']
+            . '; LOGs externos necessários: ' . $pacoteEncerramento['logs_externos']
+        );
+
+        $arquivoEncerramento = (string)$pacoteEncerramento['arquivo'];
+        $nomeEncerramento = basename((string)$pacoteEncerramento['nome_arquivo']);
+        $tamanhoEncerramento = (int)$pacoteEncerramento['tamanho_bytes'];
+        $handleEncerramento = @fopen($arquivoEncerramento, 'rb');
+        if (!$handleEncerramento) {
+            throw new RuntimeException('O pacote foi criado, mas não pôde ser aberto para download.');
+        }
+
+        while (ob_get_level() > 0) ob_end_clean();
+        header('Content-Type: application/zip');
+        header('Content-Disposition: attachment; filename="' . str_replace('"', '', $nomeEncerramento) . '"');
+        header('Content-Length: ' . $tamanhoEncerramento);
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('Pragma: no-cache');
+        header('X-Content-Type-Options: nosniff');
+        header('X-ROJEX-SHA256: ' . (string)$pacoteEncerramento['sha256']);
+
+        session_write_close();
+        $ignorarAbortAnterior = ignore_user_abort(true);
+        while (!feof($handleEncerramento)) {
+            $bloco = fread($handleEncerramento, 1024 * 1024);
+            if ($bloco === false) break;
+            if ($bloco === '') continue;
+            echo $bloco;
+            flush();
+            if (connection_aborted()) break;
+        }
+        fclose($handleEncerramento);
+        ignore_user_abort($ignorarAbortAnterior);
+        @unlink($arquivoEncerramento);
+        exit;
+    } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        if (is_array($pacoteEncerramento) && !empty($pacoteEncerramento['arquivo'])) {
+            @unlink((string)$pacoteEncerramento['arquivo']);
+        }
+        error_log('[ROJEX ENCERRAMENTO][BACKUP] ' . $e->getMessage());
+        sgl_redirect_cfg('administracao', 'erro', 'Não foi possível gerar o pacote restaurável: ' . $e->getMessage());
+    }
 }
 
 // Download autenticado. O buffer iniciado pelo index.php impede qualquer saída
@@ -8569,6 +9297,18 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                                 <?php endforeach; ?>
                             </ul>
                         </div>
+                        <?php if ($ehUsuarioMaster): ?>
+                        <button
+                            type="button"
+                            class="btn btn-sm btn-outline-dark"
+                            title="Gerar ZIP restaurável"
+                            data-bs-toggle="modal"
+                            data-bs-target="#modalBackupEncerramento"
+                            data-escritorio-id="<?=(int)$eItem['id']?>"
+                            data-escritorio-nome="<?=htmlspecialchars((string)$eItem['nome'], ENT_QUOTES, 'UTF-8')?>"
+                            data-tenant-id="<?=htmlspecialchars((string)$eItem['tenant_id'], ENT_QUOTES, 'UTF-8')?>"
+                        ><i class="bi bi-file-earmark-zip"></i></button>
+                        <?php endif; ?>
                         <?php else: ?><span class="badge bg-secondary">Consulta</span><?php endif; ?>
                     </td>
                 </tr>
@@ -8578,6 +9318,77 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
         </div>
     </div>
 </div>
+
+<?php if ($ehUsuarioMaster): ?>
+<div class="modal fade" id="modalBackupEncerramento" tabindex="-1" aria-labelledby="modalBackupEncerramentoTitulo" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <form method="post" autocomplete="off">
+                <div class="modal-header bg-dark text-white">
+                    <h5 class="modal-title" id="modalBackupEncerramentoTitulo">
+                        <i class="bi bi-file-earmark-zip me-2"></i>Gerar ZIP restaurável
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                    <input type="hidden" name="acao_cfg" value="gerar_backup_encerramento">
+                    <input type="hidden" name="encerramento_escritorio_id" id="encerramentoEscritorioId" value="">
+
+                    <div class="alert alert-info border-0">
+                        <strong>Esta ação somente gera e baixa o backup.</strong>
+                        Ela não encerra o escritório, não altera o status, não encerra sessões e não exclui registros.
+                    </div>
+                    <div class="border rounded bg-light p-3 mb-3">
+                        <div><strong>Escritório:</strong> <span id="encerramentoEscritorioNome">-</span></div>
+                        <div><strong>Tenant:</strong> <code id="encerramentoTenantId">-</code></div>
+                    </div>
+                    <div class="alert alert-warning small">
+                        O ZIP será protegido com AES-256. Guarde a senha em local seguro:
+                        ela não será armazenada no sistema e será indispensável para a futura restauração.
+                        Backups de LOG já arquivados externamente serão relacionados no manifesto, mas
+                        somente entrarão no pacote quando sua cópia estiver disponível no servidor.
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label">Senha do ZIP *</label>
+                            <input type="password" name="encerramento_senha" class="form-control"
+                                   minlength="12" maxlength="200" required autocomplete="new-password">
+                            <div class="form-text">Use no mínimo 12 caracteres.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Confirmar senha *</label>
+                            <input type="password" name="encerramento_senha_confirmacao" class="form-control"
+                                   minlength="12" maxlength="200" required autocomplete="new-password">
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label">Confirmação *</label>
+                            <input name="encerramento_confirmacao" class="form-control"
+                                   maxlength="20" required autocomplete="off"
+                                   placeholder="Digite GERAR BACKUP">
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button class="btn btn-dark">
+                        <i class="bi bi-download me-1"></i>Gerar e baixar ZIP
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+<script>
+document.getElementById('modalBackupEncerramento')?.addEventListener('show.bs.modal', function (evento) {
+    const botao = evento.relatedTarget;
+    if (!botao) return;
+    document.getElementById('encerramentoEscritorioId').value = botao.getAttribute('data-escritorio-id') || '';
+    document.getElementById('encerramentoEscritorioNome').textContent = botao.getAttribute('data-escritorio-nome') || '-';
+    document.getElementById('encerramentoTenantId').textContent = botao.getAttribute('data-tenant-id') || '-';
+});
+</script>
+<?php endif; ?>
 
 <?php endif; ?>
 

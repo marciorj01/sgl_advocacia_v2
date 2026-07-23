@@ -577,14 +577,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         );
 
                         rojexEncerrarSessaoLocal();
-                        $mensagem_erro =
-                            'Seu acesso não possui um escritório ativo ou válido. Contate o administrador da plataforma.';
+
+                        $mensagemTenant = trim($eTenant->getMessage());
+                        $mensagem_erro = str_contains(
+                            mb_strtolower($mensagemTenant, 'UTF-8'),
+                            'escritório está encerrado'
+                        )
+                            ? 'Acesso bloqueado: este escritório está encerrado. Entre em contato com o administrador do sistema.'
+                            : 'Seu acesso não possui um escritório ativo ou válido. Contate o administrador da plataforma.';
 
                         $conn->close();
                         $conn = null;
 
                         throw new RuntimeException(
-                            'Falha ao carregar o contexto Multi-Tenant do usuário.',
+                            $mensagem_erro,
                             0,
                             $eTenant
                         );
@@ -693,8 +699,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 error_log('ROJEX LOGIN ERRO LOG: ' . $eLog->getMessage());
             }
 
-            $mensagem_erro =
-                'Não foi possível concluir o acesso. Tente novamente em instantes.';
+            $mensagemExcecao = trim($e->getMessage());
+
+            $mensagem_erro = str_starts_with(
+                $mensagemExcecao,
+                'Acesso bloqueado: este escritório está encerrado.'
+            )
+                ? $mensagemExcecao
+                : 'Não foi possível concluir o acesso. Tente novamente em instantes.';
         }
     }
 }

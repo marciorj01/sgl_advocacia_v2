@@ -1,0 +1,34 @@
+{
+    "tipo": "AUTORIZACAO_ESPECIAL_BACKUP_EXTERNO_PERDIDO",
+    "situacao": "backup_externo_perdido",
+    "autorizacao_especial_master": true,
+    "autoriza_exclusao_automaticamente": false,
+    "tenant_id": "ESCRIT-ORIO-HOMOLOGAC-AO-C-74FCB98F",
+    "escritorio_id": 673,
+    "escritorio_nome": "Escritório Homologação C",
+    "perda_verificada_no_computador": true,
+    "locais_verificados": [
+        "pesquisa_geral_windows",
+        "downloads",
+        "onedrive",
+        "lixeira_windows"
+    ],
+    "escritorio_ficticio_exclusivo_homologacao": true,
+    "justificativa": "Escritório fictício utilizado exclusivamente em ambiente de homologação.",
+    "declaracao": "O ZIP histórico não foi recuperado. Nome, tamanho e SHA-256 esperados foram preservados sem alteração.",
+    "backups_perdidos": [
+        {
+            "backup_id": 3,
+            "nome_arquivo": "logs_ESCRIT-ORIO-HOMOLOGAC-AO-C-74FCB98F_escritorio_673_20260721_172049_53918f32706711f7.zip",
+            "tamanho_bytes_esperado": 2961,
+            "sha256_esperado": "4ce5cdeed7879b2ad38eb39c52214b5adbb493a6f7b8cc7e435ce4b8cf5d8a76",
+            "status_historico": "ARQUIVADO",
+            "caminho_historico": "",
+            "situacao_fisica": "arquivo_nao_localizado_no_servidor"
+        }
+    ],
+    "impressao_backups_perdidos": "d4944f4e09f4fe20346a37097477a49b635c4341fa62cc676b71edf848fd6ab9",
+    "responsavel_usuario_id": 1,
+    "responsavel_nome": "Administrador",
+    "autorizado_em": "2026-07-23T13:47:47-03:00"
+}

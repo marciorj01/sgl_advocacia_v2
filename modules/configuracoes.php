@@ -1760,6 +1760,218 @@ function rojex_enc_resolver_arquivo(string $valor, array $raizes): ?string {
     return null;
 }
 
+/**
+ * Retorna os backups históricos de LOG cujo ZIP não está mais disponível no
+ * servidor. Nome, tamanho e SHA-256 vêm exclusivamente do registro histórico:
+ * nunca são recalculados ou substituídos.
+ *
+ * @return list<array<string,mixed>>
+ */
+function rojex_enc_logs_ausentes(mysqli $conn, int $escritorioId, string $tenantId): array {
+    if (
+        $escritorioId <= 0 || $tenantId === ''
+        || !sgl_tabela_existe($conn, 'logs_backups')
+        || !sgl_coluna_existe($conn, 'logs_backups', 'tenant_id')
+        || !sgl_coluna_existe($conn, 'logs_backups', 'escritorio_id')
+    ) {
+        return [];
+    }
+
+    $stmt = $conn->prepare(
+        "SELECT *
+           FROM logs_backups
+          WHERE tenant_id=? AND escritorio_id=?
+          ORDER BY id ASC"
+    );
+    if (!$stmt) throw new RuntimeException('Falha ao consultar os backups históricos de LOG.');
+    $stmt->bind_param('si', $tenantId, $escritorioId);
+    $stmt->execute();
+    $resultado = $stmt->get_result();
+    $ausentes = [];
+    $raizLogs = rojex_log_backup_diretorio();
+
+    while ($linha = $resultado->fetch_assoc()) {
+        $caminho = trim((string)($linha['arquivo'] ?? ''));
+        $real = $caminho !== ''
+            ? rojex_enc_resolver_arquivo($caminho, [$raizLogs])
+            : null;
+        if ($real !== null) continue;
+
+        $ausentes[] = [
+            'backup_id' => (int)($linha['id'] ?? 0),
+            'nome_arquivo' => (string)($linha['nome_arquivo'] ?? basename($caminho)),
+            'tamanho_bytes_esperado' => (int)($linha['tamanho_bytes'] ?? 0),
+            'sha256_esperado' => trim((string)($linha['sha256'] ?? $linha['hash_sha256'] ?? '')),
+            'status_historico' => (string)($linha['status'] ?? ''),
+            'caminho_historico' => $caminho,
+            'situacao_fisica' => 'arquivo_nao_localizado_no_servidor',
+        ];
+    }
+    $stmt->close();
+    return $ausentes;
+}
+
+function rojex_enc_perda_impressao(array $backups): string {
+    $normalizados = [];
+    foreach ($backups as $backup) {
+        $normalizados[] = [
+            'backup_id' => (int)($backup['backup_id'] ?? 0),
+            'nome_arquivo' => (string)($backup['nome_arquivo'] ?? ''),
+            'tamanho_bytes_esperado' => (int)($backup['tamanho_bytes_esperado'] ?? 0),
+            'sha256_esperado' => strtolower(trim((string)($backup['sha256_esperado'] ?? ''))),
+        ];
+    }
+    usort(
+        $normalizados,
+        static fn(array $a, array $b): int => $a['backup_id'] <=> $b['backup_id']
+    );
+    return hash('sha256', rojex_enc_json($normalizados, false));
+}
+
+function rojex_enc_autorizacao_perda_caminho(string $tenantId, int $escritorioId): string {
+    $pasta = rojex_enc_diretorio() . DIRECTORY_SEPARATOR . 'autorizacoes_perda';
+    if (!is_dir($pasta) && !@mkdir($pasta, 0750, true) && !is_dir($pasta)) {
+        throw new RuntimeException('Não foi possível criar a pasta protegida de autorizações.');
+    }
+    $nome = rojex_enc_nome_seguro($tenantId, 'tenant') . '_escritorio_' . $escritorioId . '.json';
+    return $pasta . DIRECTORY_SEPARATOR . $nome;
+}
+
+/** @return array<string,mixed>|null */
+function rojex_enc_autorizacao_perda_ler(string $tenantId, int $escritorioId): ?array {
+    $arquivo = rojex_enc_autorizacao_perda_caminho($tenantId, $escritorioId);
+    if (!is_file($arquivo)) return null;
+    $conteudo = @file_get_contents($arquivo);
+    if (!is_string($conteudo) || $conteudo === '') return null;
+    $dados = json_decode($conteudo, true);
+    return is_array($dados) ? $dados : null;
+}
+
+/**
+ * A autorização somente é válida enquanto estiver vinculada ao mesmo tenant,
+ * escritório e conjunto imutável de metadados históricos dos ZIPs ausentes.
+ */
+function rojex_enc_autorizacao_perda_valida(
+    array $autorizacao,
+    string $tenantId,
+    int $escritorioId,
+    array $backupsAusentes
+): bool {
+    return ($autorizacao['tipo'] ?? '') === 'AUTORIZACAO_ESPECIAL_BACKUP_EXTERNO_PERDIDO'
+        && ($autorizacao['situacao'] ?? '') === 'backup_externo_perdido'
+        && ($autorizacao['autorizacao_especial_master'] ?? false) === true
+        && ($autorizacao['perda_verificada_no_computador'] ?? false) === true
+        && ($autorizacao['escritorio_ficticio_exclusivo_homologacao'] ?? false) === true
+        && (string)($autorizacao['tenant_id'] ?? '') === $tenantId
+        && (int)($autorizacao['escritorio_id'] ?? 0) === $escritorioId
+        && hash_equals(
+            rojex_enc_perda_impressao($backupsAusentes),
+            (string)($autorizacao['impressao_backups_perdidos'] ?? '')
+        );
+}
+
+/** @return array{permitido:bool,motivo:string,backups_ausentes:array,autorizacao:?array} */
+function rojex_enc_prontidao_perda(
+    mysqli $conn,
+    int $escritorioId,
+    ?string $tenantIdInformado = null
+): array {
+    $rows = rojex_enc_consultar($conn, 'escritorios_saas', 'id = ?', 'i', [$escritorioId]);
+    if (count($rows) !== 1) {
+        return [
+            'permitido' => false,
+            'motivo' => 'Escritório não encontrado.',
+            'backups_ausentes' => [],
+            'autorizacao' => null,
+        ];
+    }
+    $tenantId = trim((string)($rows[0]['tenant_id'] ?? ''));
+    if ($tenantId === '' || ($tenantIdInformado !== null && !hash_equals($tenantId, $tenantIdInformado))) {
+        return [
+            'permitido' => false,
+            'motivo' => 'Contexto Multi-Tenant inválido.',
+            'backups_ausentes' => [],
+            'autorizacao' => null,
+        ];
+    }
+
+    $ausentes = rojex_enc_logs_ausentes($conn, $escritorioId, $tenantId);
+    if (!$ausentes) {
+        return [
+            'permitido' => true,
+            'motivo' => 'Nenhum backup externo de LOG está ausente.',
+            'backups_ausentes' => [],
+            'autorizacao' => null,
+        ];
+    }
+
+    $autorizacao = rojex_enc_autorizacao_perda_ler($tenantId, $escritorioId);
+    $valida = is_array($autorizacao)
+        && rojex_enc_autorizacao_perda_valida($autorizacao, $tenantId, $escritorioId, $ausentes);
+    return [
+        'permitido' => $valida,
+        'motivo' => $valida
+            ? 'Perda externa declarada e autorizada separadamente pelo MASTER.'
+            : 'Bloqueado: existe backup externo de LOG ausente sem autorização especial válida do MASTER.',
+        'backups_ausentes' => $ausentes,
+        'autorizacao' => $valida ? $autorizacao : null,
+    ];
+}
+
+function rojex_enc_registrar_autorizacao_perda(
+    mysqli $conn,
+    int $escritorioId,
+    int $usuarioId,
+    string $responsavelNome
+): array {
+    $rows = rojex_enc_consultar($conn, 'escritorios_saas', 'id = ?', 'i', [$escritorioId]);
+    if (count($rows) !== 1) throw new RuntimeException('Escritório não encontrado.');
+    $escritorio = $rows[0];
+    $tenantId = trim((string)($escritorio['tenant_id'] ?? ''));
+    if ($tenantId === '') throw new RuntimeException('O escritório não possui tenant válido.');
+
+    $ausentes = rojex_enc_logs_ausentes($conn, $escritorioId, $tenantId);
+    if (!$ausentes) {
+        throw new RuntimeException('Não existe backup externo ausente para esta autorização especial.');
+    }
+
+    $autorizacao = [
+        'tipo' => 'AUTORIZACAO_ESPECIAL_BACKUP_EXTERNO_PERDIDO',
+        'situacao' => 'backup_externo_perdido',
+        'autorizacao_especial_master' => true,
+        'autoriza_exclusao_automaticamente' => false,
+        'tenant_id' => $tenantId,
+        'escritorio_id' => $escritorioId,
+        'escritorio_nome' => (string)($escritorio['nome'] ?? ''),
+        'perda_verificada_no_computador' => true,
+        'locais_verificados' => [
+            'pesquisa_geral_windows',
+            'downloads',
+            'onedrive',
+            'lixeira_windows',
+        ],
+        'escritorio_ficticio_exclusivo_homologacao' => true,
+        'justificativa' => 'Escritório fictício utilizado exclusivamente em ambiente de homologação.',
+        'declaracao' => 'O ZIP histórico não foi recuperado. Nome, tamanho e SHA-256 esperados foram preservados sem alteração.',
+        'backups_perdidos' => $ausentes,
+        'impressao_backups_perdidos' => rojex_enc_perda_impressao($ausentes),
+        'responsavel_usuario_id' => $usuarioId,
+        'responsavel_nome' => $responsavelNome,
+        'autorizado_em' => date(DATE_ATOM),
+    ];
+    $arquivo = rojex_enc_autorizacao_perda_caminho($tenantId, $escritorioId);
+    $temporario = $arquivo . '.tmp_' . bin2hex(random_bytes(8));
+    if (@file_put_contents($temporario, rojex_enc_json($autorizacao), LOCK_EX) === false) {
+        throw new RuntimeException('Não foi possível gravar a autorização especial.');
+    }
+    if (!@rename($temporario, $arquivo)) {
+        @unlink($temporario);
+        throw new RuntimeException('Não foi possível concluir a autorização especial.');
+    }
+    @chmod($arquivo, 0640);
+    return $autorizacao;
+}
+
 function rojex_enc_gerar(mysqli $conn, int $escritorioId, string $senha): array {
     if ($escritorioId <= 0) throw new RuntimeException('Selecione um escritório válido.');
     if (mb_strlen($senha, 'UTF-8') < 12) {
@@ -2013,25 +2225,49 @@ function rojex_enc_gerar(mysqli $conn, int $escritorioId, string $senha): array 
         }
 
         $logsExternos = [];
+        $perdasDeclaradas = [];
+        $prontidaoPerda = rojex_enc_prontidao_perda($conn, $escritorioId, $tenantId);
+        $autorizacaoPerda = $prontidaoPerda['autorizacao'];
+        $backupsPerdidosAutorizados = [];
+        if (is_array($autorizacaoPerda)) {
+            foreach (($autorizacaoPerda['backups_perdidos'] ?? []) as $backupPerdido) {
+                $backupsPerdidosAutorizados[(int)($backupPerdido['backup_id'] ?? 0)] = $backupPerdido;
+            }
+        }
         foreach (($dados['logs_backups'] ?? []) as $linha) {
             $valor = trim((string)($linha['arquivo'] ?? ''));
             $hashEsperado = trim((string)($linha['sha256'] ?? $linha['hash_sha256'] ?? ''));
-            if ($valor === '') {
-                $logsExternos[] = [
+            $backupId = (int)($linha['id'] ?? 0);
+            $real = $valor !== ''
+                ? rojex_enc_resolver_arquivo($valor, [$raizLogs])
+                : null;
+            if ($real === null) {
+                $declaradoPerdido = isset($backupsPerdidosAutorizados[$backupId]);
+                $registroExterno = [
                     'backup_id' => (int)($linha['id'] ?? 0),
-                    'nome_arquivo' => (string)($linha['nome_arquivo'] ?? ''),
-                    'status' => (string)($linha['status'] ?? ''),
+                    'nome_arquivo' => (string)($linha['nome_arquivo'] ?? basename($valor)),
+                    'status_historico' => (string)($linha['status'] ?? ''),
                     'sha256_esperado' => $hashEsperado,
                     'tamanho_bytes_esperado' => (int)($linha['tamanho_bytes'] ?? 0),
-                    'situacao' => 'copia_externa_necessaria',
+                    'caminho_historico' => $valor,
+                    'situacao' => $declaradoPerdido
+                        ? 'backup_externo_perdido'
+                        : ($valor === '' ? 'copia_externa_necessaria' : 'zip_de_log_ausente'),
+                    'perda_verificada_no_computador' => $declaradoPerdido,
+                    'autorizacao_especial_master_registrada' => $declaradoPerdido,
+                    'zip_recuperado' => false,
                 ];
-                continue;
-            }
-            $real = rojex_enc_resolver_arquivo($valor, [$raizLogs]);
-            if ($real === null) {
+                $logsExternos[] = $registroExterno;
+                if ($declaradoPerdido) $perdasDeclaradas[] = $registroExterno;
                 $ausentes[] = [
-                    'tipo' => 'logs_backup','registro_id' => (string)($linha['id'] ?? 0),
-                    'caminho_original' => $valor,'motivo' => 'zip_de_log_ausente',
+                    'tipo' => 'logs_backup',
+                    'registro_id' => (string)$backupId,
+                    'caminho_original' => $valor,
+                    'motivo' => $declaradoPerdido
+                        ? 'backup_externo_perdido'
+                        : ($valor === '' ? 'copia_externa_necessaria' : 'zip_de_log_ausente'),
+                    'sha256_esperado_preservado' => $hashEsperado,
+                    'tamanho_bytes_esperado' => (int)($linha['tamanho_bytes'] ?? 0),
                 ];
                 continue;
             }
@@ -2099,6 +2335,19 @@ function rojex_enc_gerar(mysqli $conn, int $escritorioId, string $senha): array 
             'manifestos/arquivos_ausentes.json' => $ausentes,
             'manifestos/arquivos_orfaos.json' => $orfaos,
             'manifestos/logs_externos_necessarios.json' => $logsExternos,
+            'manifestos/backups_externos_perdidos.json' => [
+                'situacao' => $perdasDeclaradas ? 'backup_externo_perdido' : 'nenhuma_perda_autorizada',
+                'quantidade' => count($perdasDeclaradas),
+                'perda_verificada_no_computador' => $perdasDeclaradas !== [],
+                'escritorio_ficticio_exclusivo_homologacao' => $perdasDeclaradas !== [],
+                'justificativa' => $perdasDeclaradas
+                    ? 'Escritório fictício utilizado exclusivamente em ambiente de homologação.'
+                    : null,
+                'autorizacao_especial_master_registrada' => is_array($autorizacaoPerda),
+                'autoriza_exclusao_automaticamente' => false,
+                'zip_recuperado' => false,
+                'backups' => $perdasDeclaradas,
+            ],
             'manifestos/exclusoes_globais.json' => [
                 'tabelas_verificadas_e_nao_exportadas' => rojex_enc_tabelas_globais_excluidas(),
                 'regra' => 'Registros globais, legados ou sem tenant não pertencem automaticamente ao escritório.',
@@ -2111,6 +2360,8 @@ function rojex_enc_gerar(mysqli $conn, int $escritorioId, string $senha): array 
                 'responsavel_usuario_id' => (int)($_SESSION['user_id'] ?? 0),
                 'responsavel_nome' => (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'MASTER'),
                 'gerado_em' => date(DATE_ATOM),
+                'backup_externo_perdido' => $perdasDeclaradas !== [],
+                'autorizacao_especial_master_registrada' => is_array($autorizacaoPerda),
                 'observacao' => 'Este pacote não encerra o escritório e não autoriza exclusão definitiva.',
             ],
             'referencias/estrutura_banco.json' => $estrutura,
@@ -2141,6 +2392,8 @@ function rojex_enc_gerar(mysqli $conn, int $escritorioId, string $senha): array 
             'quantidade_arquivos_ausentes' => count($ausentes),
             'quantidade_arquivos_orfaos' => count($orfaos),
             'quantidade_logs_externos_necessarios' => count($logsExternos),
+            'quantidade_backups_externos_perdidos' => count($perdasDeclaradas),
+            'autorizacao_especial_perda_registrada' => is_array($autorizacaoPerda),
             'restricao' => 'Pacote probatório; não autoriza encerramento ou exclusão.',
         ];
         $integridade['manifesto.json'] = rojex_enc_zip_json(
@@ -2646,6 +2899,7 @@ $acoesExclusivasMaster = [
     'baixar_log_backup',
     'arquivar_log_backup',
     'gerar_backup_encerramento',
+    'autorizar_perda_backup_encerramento',
     'salvar_atualizacao',
     'alterar_status_atualizacao',
     'simular_atualizacao',
@@ -2700,6 +2954,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !validarTokenCsrf($_POST['csrf_toke
     $msg = 'Token de segurança inválido. Atualize a página e tente novamente.';
     $msg_tipo = 'danger';
     $acao_cfg = '';
+}
+
+// Declaração consciente e separada do MASTER para um ZIP histórico perdido.
+// Não encerra, não exclui e não transforma a geração do pacote em autorização.
+if (
+    $ehUsuarioMaster
+    && $acao_cfg === 'autorizar_perda_backup_encerramento'
+    && $_SERVER['REQUEST_METHOD'] === 'POST'
+) {
+    $escritorioIdPerda = max(0, (int)($_POST['perda_escritorio_id'] ?? 0));
+    $frasePerda = strtoupper(trim((string)($_POST['perda_confirmacao'] ?? '')));
+    $verificouComputador = isset($_POST['perda_verificada_computador'])
+        && (string)$_POST['perda_verificada_computador'] === '1';
+    $homologacaoFicticia = isset($_POST['perda_homologacao_ficticia'])
+        && (string)$_POST['perda_homologacao_ficticia'] === '1';
+
+    try {
+        if ($escritorioIdPerda <= 0) {
+            throw new RuntimeException('Selecione um escritório válido.');
+        }
+        if ($frasePerda !== 'AUTORIZAR PERDA') {
+            throw new RuntimeException('Confirmação inválida. Digite AUTORIZAR PERDA.');
+        }
+        if (!$verificouComputador) {
+            throw new RuntimeException('Confirme que a perda foi verificada no computador.');
+        }
+        if (!$homologacaoFicticia) {
+            throw new RuntimeException('Esta exceção somente pode ser registrada para escritório fictício de homologação.');
+        }
+
+        $autorizacaoPerda = rojex_enc_registrar_autorizacao_perda(
+            $conn,
+            $escritorioIdPerda,
+            (int)($_SESSION['user_id'] ?? 0),
+            (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'MASTER')
+        );
+        sgl_log(
+            $conn,
+            'Registrou autorização especial para backup externo perdido',
+            'escritorios_saas',
+            (string)$escritorioIdPerda,
+            'Tenant: ' . (string)$autorizacaoPerda['tenant_id']
+            . '; situação: backup_externo_perdido'
+            . '; impressão probatória: ' . (string)$autorizacaoPerda['impressao_backups_perdidos']
+            . '; não autoriza exclusão automática.'
+        );
+        sgl_redirect_cfg(
+            'administracao',
+            'aviso',
+            'Autorização especial registrada. Nenhuma exclusão ou alteração de status foi executada.'
+        );
+    } catch (Throwable $e) {
+        sgl_redirect_cfg('administracao', 'erro', $e->getMessage());
+    }
 }
 
 // Gera e entrega o pacote restaurável sem alterar ou excluir o escritório.
@@ -5087,6 +5395,19 @@ if ($acao_cfg === 'alterar_status_escritorio_saas') {
         sgl_redirect_cfg('administracao', 'erro', 'Escritório ou status inválido.');
     }
     try {
+        if ($novoStatusEscritorio === 'encerrado') {
+            $prontidaoPerda = rojex_enc_prontidao_perda($conn, $escritorioIdSaas);
+            if (!$prontidaoPerda['permitido']) {
+                sgl_log(
+                    $conn,
+                    'Bloqueou encerramento de escritório por backup externo ausente',
+                    'escritorios_saas',
+                    (string)$escritorioIdSaas,
+                    (string)$prontidaoPerda['motivo']
+                );
+                sgl_redirect_cfg('administracao', 'erro', (string)$prontidaoPerda['motivo']);
+            }
+        }
         if ($novoStatusEscritorio === 'ativo') {
             // Falha segura: um tenant só pode entrar em operação quando o
             // provisionamento automático estiver completo e vigente.
@@ -6309,6 +6630,28 @@ if ($acao_cfg === 'salvar_sistema') {
 
 $lixeira_permitidas = ['advogados','clientes','processos','agenda','honorarios','contas_pagar','contas_receber','documentos_arquivos','modelos_documentos','recibos','ia_consultas'];
 
+$validarExclusaoPermanenteLixeira = static function () use ($conn): void {
+    $contexto = sgl_lixeira_contexto_atual();
+    if (!$contexto) {
+        sgl_redirect_cfg('lixeira', 'erro', 'Exclusão permanente bloqueada: contexto Multi-Tenant inválido.');
+    }
+    $prontidao = rojex_enc_prontidao_perda(
+        $conn,
+        (int)$contexto['escritorio_id'],
+        (string)$contexto['tenant_id']
+    );
+    if (!$prontidao['permitido']) {
+        sgl_log(
+            $conn,
+            'Bloqueou exclusão permanente da lixeira por backup externo ausente',
+            'lixeira',
+            null,
+            (string)$prontidao['motivo']
+        );
+        sgl_redirect_cfg('lixeira', 'erro', (string)$prontidao['motivo']);
+    }
+};
+
 if ($acao_cfg === 'restaurar_item_lixeira' && !empty($_POST['tabela']) && !empty($_POST['item_id'])) {
     $item = sgl_lixeira_item_valido((string)$_POST['tabela'] . '|' . (string)$_POST['item_id'], $lixeira_permitidas);
     if (!$item) sgl_redirect_cfg('lixeira', 'erro', 'Registro inválido para restauração.');
@@ -6322,6 +6665,7 @@ if ($acao_cfg === 'restaurar_item_lixeira' && !empty($_POST['tabela']) && !empty
 }
 
 if ($acao_cfg === 'excluir_item_lixeira' && !empty($_POST['tabela']) && !empty($_POST['item_id'])) {
+    $validarExclusaoPermanenteLixeira();
     $item = sgl_lixeira_item_valido((string)$_POST['tabela'] . '|' . (string)$_POST['item_id'], $lixeira_permitidas);
     if (!$item) sgl_redirect_cfg('lixeira', 'erro', 'Registro inválido para exclusão.');
 
@@ -6342,6 +6686,9 @@ if ($acao_cfg === 'acao_lixeira_lote') {
     }
     if (!in_array($acaoLote, ['restaurar', 'excluir'], true)) {
         sgl_redirect_cfg('lixeira', 'erro', 'Ação em lote inválida.');
+    }
+    if ($acaoLote === 'excluir') {
+        $validarExclusaoPermanenteLixeira();
     }
 
     $sucesso = 0;
@@ -6376,6 +6723,7 @@ if ($acao_cfg === 'acao_lixeira_lote') {
 }
 
 if ($acao_cfg === 'esvaziar_lixeira') {
+    $validarExclusaoPermanenteLixeira();
     if (strtoupper(trim((string)($_POST['confirmacao'] ?? ''))) !== 'ESVAZIAR') {
         sgl_redirect_cfg('lixeira', 'erro', 'Confirmação inválida. Digite ESVAZIAR.');
     }
@@ -9308,6 +9656,16 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
                             data-escritorio-nome="<?=htmlspecialchars((string)$eItem['nome'], ENT_QUOTES, 'UTF-8')?>"
                             data-tenant-id="<?=htmlspecialchars((string)$eItem['tenant_id'], ENT_QUOTES, 'UTF-8')?>"
                         ><i class="bi bi-file-earmark-zip"></i></button>
+                        <button
+                            type="button"
+                            class="btn btn-sm btn-outline-danger"
+                            title="Registrar perda de backup externo"
+                            data-bs-toggle="modal"
+                            data-bs-target="#modalAutorizarPerdaBackup"
+                            data-escritorio-id="<?=(int)$eItem['id']?>"
+                            data-escritorio-nome="<?=htmlspecialchars((string)$eItem['nome'], ENT_QUOTES, 'UTF-8')?>"
+                            data-tenant-id="<?=htmlspecialchars((string)$eItem['tenant_id'], ENT_QUOTES, 'UTF-8')?>"
+                        ><i class="bi bi-exclamation-octagon"></i></button>
                         <?php endif; ?>
                         <?php else: ?><span class="badge bg-secondary">Consulta</span><?php endif; ?>
                     </td>
@@ -9379,6 +9737,62 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
         </div>
     </div>
 </div>
+
+<div class="modal fade" id="modalAutorizarPerdaBackup" tabindex="-1" aria-labelledby="modalAutorizarPerdaBackupTitulo" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <form method="post" autocomplete="off">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title" id="modalAutorizarPerdaBackupTitulo">
+                        <i class="bi bi-exclamation-octagon me-2"></i>Autorizar perda de backup externo
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+                </div>
+                <div class="modal-body">
+                    <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                    <input type="hidden" name="acao_cfg" value="autorizar_perda_backup_encerramento">
+                    <input type="hidden" name="perda_escritorio_id" id="perdaEscritorioId" value="">
+
+                    <div class="alert alert-danger">
+                        <strong>Autorização excepcional e separada.</strong>
+                        Use somente quando o ZIP histórico estiver definitivamente perdido e o escritório
+                        for fictício, exclusivo de homologação. Esta declaração não recupera o arquivo,
+                        não altera o hash histórico, não encerra o escritório e não exclui registros.
+                    </div>
+                    <div class="border rounded bg-light p-3 mb-3">
+                        <div><strong>Escritório:</strong> <span id="perdaEscritorioNome">-</span></div>
+                        <div><strong>Tenant:</strong> <code id="perdaTenantId">-</code></div>
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" value="1"
+                               name="perda_verificada_computador" id="perdaVerificadaComputador" required>
+                        <label class="form-check-label" for="perdaVerificadaComputador">
+                            Confirmo que procurei o ZIP na pesquisa geral do Windows, Downloads,
+                            OneDrive e Lixeira, sem localizá-lo.
+                        </label>
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" value="1"
+                               name="perda_homologacao_ficticia" id="perdaHomologacaoFicticia" required>
+                        <label class="form-check-label" for="perdaHomologacaoFicticia">
+                            Confirmo que este escritório é fictício e utilizado exclusivamente em homologação.
+                        </label>
+                    </div>
+                    <label class="form-label">Digite <code>AUTORIZAR PERDA</code> para registrar a declaração</label>
+                    <input name="perda_confirmacao" class="form-control"
+                           maxlength="30" required autocomplete="off"
+                           pattern="AUTORIZAR PERDA" placeholder="AUTORIZAR PERDA">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button class="btn btn-danger">
+                        <i class="bi bi-shield-exclamation me-1"></i>Registrar autorização especial
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
 <script>
 document.getElementById('modalBackupEncerramento')?.addEventListener('show.bs.modal', function (evento) {
     const botao = evento.relatedTarget;
@@ -9386,6 +9800,15 @@ document.getElementById('modalBackupEncerramento')?.addEventListener('show.bs.mo
     document.getElementById('encerramentoEscritorioId').value = botao.getAttribute('data-escritorio-id') || '';
     document.getElementById('encerramentoEscritorioNome').textContent = botao.getAttribute('data-escritorio-nome') || '-';
     document.getElementById('encerramentoTenantId').textContent = botao.getAttribute('data-tenant-id') || '-';
+});
+document.getElementById('modalAutorizarPerdaBackup')?.addEventListener('show.bs.modal', function (evento) {
+    const botao = evento.relatedTarget;
+    if (!botao) return;
+    document.getElementById('perdaEscritorioId').value = botao.getAttribute('data-escritorio-id') || '';
+    document.getElementById('perdaEscritorioNome').textContent = botao.getAttribute('data-escritorio-nome') || '-';
+    document.getElementById('perdaTenantId').textContent = botao.getAttribute('data-tenant-id') || '-';
+    document.getElementById('perdaVerificadaComputador').checked = false;
+    document.getElementById('perdaHomologacaoFicticia').checked = false;
 });
 </script>
 <?php endif; ?>

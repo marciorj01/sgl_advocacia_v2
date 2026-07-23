@@ -186,6 +186,44 @@ if (!function_exists('exigirLogin')) {
     function exigirLogin(string $redirect = 'auth/login.php'): void
     {
         if (usuarioLogado()) {
+            /*
+             * Revalida o escritório no banco em toda entrada protegida.
+             * Assim, uma sessão criada antes do encerramento também perde o
+             * acesso na requisição seguinte. O MASTER permanece isento.
+             */
+            global $conn;
+
+            if (
+                $conn instanceof mysqli
+                && !rojexRevalidarAcessoEscritorioSessao($conn)
+            ) {
+                $mensagem = 'Acesso bloqueado: este escritório está encerrado.';
+
+                rojexEncerrarSessaoLocal();
+                iniciarSessaoSegura();
+                $_SESSION['erro_login'] = $mensagem;
+                $_SESSION['mensagem_login'] = $mensagem;
+
+                $redirect = trim($redirect);
+                if (
+                    $redirect === ''
+                    || str_contains($redirect, "\r")
+                    || str_contains($redirect, "\n")
+                    || preg_match('#^(?:https?:)?//#i', $redirect)
+                ) {
+                    $redirect = 'auth/login.php';
+                }
+
+                $separador = str_contains($redirect, '?') ? '&' : '?';
+                header(
+                    'Location: ' . $redirect . $separador
+                    . 'erro=' . rawurlencode($mensagem),
+                    true,
+                    302
+                );
+                exit();
+            }
+
             return;
         }
 
@@ -310,6 +348,241 @@ if (!function_exists('rojexAuthTabelaExiste')) {
         } catch (Throwable $e) {
             error_log('[ROJEX TENANT][TABELA] ' . $e->getMessage());
             return $cache[$chave] = false;
+        }
+    }
+}
+
+if (!function_exists('rojexAuthColunaExiste')) {
+    function rojexAuthColunaExiste(mysqli $conn, string $tabela, string $coluna): bool
+    {
+        static $cache = [];
+
+        if (
+            !preg_match('/^[A-Za-z0-9_]+$/', $tabela)
+            || !preg_match('/^[A-Za-z0-9_]+$/', $coluna)
+        ) {
+            return false;
+        }
+
+        $chave = spl_object_id($conn) . ':' . $tabela . ':' . $coluna;
+
+        if (array_key_exists($chave, $cache)) {
+            return $cache[$chave];
+        }
+
+        try {
+            $stmt = $conn->prepare(
+                "SELECT COUNT(*) AS total
+                   FROM information_schema.COLUMNS
+                  WHERE TABLE_SCHEMA = DATABASE()
+                    AND TABLE_NAME = ?
+                    AND COLUMN_NAME = ?"
+            );
+
+            if (!$stmt) {
+                return $cache[$chave] = false;
+            }
+
+            $stmt->bind_param('ss', $tabela, $coluna);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            return $cache[$chave] = ((int)($row['total'] ?? 0) > 0);
+        } catch (Throwable $e) {
+            error_log('[ROJEX AUTH][COLUNA] ' . $e->getMessage());
+            return $cache[$chave] = false;
+        }
+    }
+}
+
+if (!function_exists('rojexEscritorioEncerrado')) {
+    function rojexEscritorioEncerrado(?string $status): bool
+    {
+        return mb_strtolower(trim((string)$status), 'UTF-8') === 'encerrado';
+    }
+}
+
+if (!function_exists('rojexRegistrarBloqueioEscritorioEncerrado')) {
+    /**
+     * Registra a tentativa negada sem permitir que uma falha de LOG libere
+     * acesso ou quebre a autenticação.
+     */
+    function rojexRegistrarBloqueioEscritorioEncerrado(
+        mysqli $conn,
+        int $escritorioId,
+        string $tenantId,
+        string $origem
+    ): void {
+        try {
+            if (!rojexAuthTabelaExiste($conn, 'logs_sistema')) {
+                return;
+            }
+
+            $usuarioId = (int)($_SESSION['user_id'] ?? 0);
+            $usuarioIdLog = $usuarioId > 0 ? $usuarioId : null;
+            $usuarioNome = (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Usuário');
+            $usuarioLogin = (string)($_SESSION['username'] ?? '');
+            $usuarioPerfil = (string)($_SESSION['perfil'] ?? 'Perfil não informado');
+            $acao = 'Acesso bloqueado: escritório encerrado';
+            $tabela = 'escritorios_saas';
+            $registroId = (string)$escritorioId;
+            $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+            $detalhes = sprintf(
+                'Tentativa negada no %s. Tenant: %s; escritório_id: %d.',
+                $origem,
+                $tenantId,
+                $escritorioId
+            );
+
+            $possuiTenant = rojexAuthColunaExiste($conn, 'logs_sistema', 'tenant_id');
+            $possuiEscritorio = rojexAuthColunaExiste($conn, 'logs_sistema', 'escritorio_id');
+
+            if ($possuiTenant && $possuiEscritorio) {
+                $stmt = $conn->prepare(
+                    "INSERT INTO logs_sistema
+                        (usuario_id, usuario_nome, usuario_login, usuario_perfil,
+                         acao, tabela, registro_id, detalhes, ip, tenant_id, escritorio_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                );
+
+                if ($stmt) {
+                    $stmt->bind_param(
+                        'isssssssssi',
+                        $usuarioIdLog,
+                        $usuarioNome,
+                        $usuarioLogin,
+                        $usuarioPerfil,
+                        $acao,
+                        $tabela,
+                        $registroId,
+                        $detalhes,
+                        $ip,
+                        $tenantId,
+                        $escritorioId
+                    );
+                }
+            } else {
+                $stmt = $conn->prepare(
+                    "INSERT INTO logs_sistema
+                        (usuario_id, usuario_nome, usuario_login, usuario_perfil,
+                         acao, tabela, registro_id, detalhes, ip)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                );
+
+                if ($stmt) {
+                    $stmt->bind_param(
+                        'issssssss',
+                        $usuarioIdLog,
+                        $usuarioNome,
+                        $usuarioLogin,
+                        $usuarioPerfil,
+                        $acao,
+                        $tabela,
+                        $registroId,
+                        $detalhes,
+                        $ip
+                    );
+                }
+            }
+
+            if (isset($stmt) && $stmt instanceof mysqli_stmt) {
+                $stmt->execute();
+                $stmt->close();
+            }
+        } catch (Throwable $e) {
+            error_log('[ROJEX AUTH][LOG BLOQUEIO] ' . $e->getMessage());
+        }
+    }
+}
+
+if (!function_exists('rojexRevalidarAcessoEscritorioSessao')) {
+    /**
+     * Confere no banco o estado atual do escritório da sessão.
+     *
+     * Retorna false somente quando um usuário de tenant aponta para escritório
+     * encerrado ou para um vínculo que deixou de existir. O MASTER principal
+     * conserva o acesso à plataforma e ao suporte para fins de administração.
+     */
+    function rojexRevalidarAcessoEscritorioSessao(mysqli $conn): bool
+    {
+        if (!usuarioLogado()) {
+            return true;
+        }
+
+        $usuarioId = (int)($_SESSION['user_id'] ?? 0);
+        $perfil = (string)($_SESSION['perfil'] ?? '');
+
+        if (rojexUsuarioEhMasterSaas($conn, $usuarioId, $perfil)) {
+            return true;
+        }
+
+        $contexto = isset($_SESSION['tenant']) && is_array($_SESSION['tenant'])
+            ? $_SESSION['tenant']
+            : [];
+
+        if (($contexto['tipo_contexto'] ?? null) !== 'tenant') {
+            return true;
+        }
+
+        $escritorioId = (int)($_SESSION['escritorio_id'] ?? 0);
+        $tenantId = trim((string)($_SESSION['tenant_id'] ?? ''));
+
+        if (
+            $escritorioId <= 0
+            || $tenantId === ''
+            || !rojexAuthTabelaExiste($conn, 'escritorios_saas')
+        ) {
+            return false;
+        }
+
+        try {
+            $stmt = $conn->prepare(
+                "SELECT status
+                   FROM escritorios_saas
+                  WHERE id = ?
+                    AND tenant_id = ?
+                  LIMIT 1"
+            );
+
+            if (!$stmt) {
+                return false;
+            }
+
+            $stmt->bind_param('is', $escritorioId, $tenantId);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            if (!$row) {
+                rojexRegistrarBloqueioEscritorioEncerrado(
+                    $conn,
+                    $escritorioId,
+                    $tenantId,
+                    'revalidação de sessão com vínculo inexistente'
+                );
+                return false;
+            }
+
+            $statusAtual = (string)($row['status'] ?? '');
+            $_SESSION['tenant']['escritorio_status'] = $statusAtual;
+
+            if (!rojexEscritorioEncerrado($statusAtual)) {
+                return true;
+            }
+
+            rojexRegistrarBloqueioEscritorioEncerrado(
+                $conn,
+                $escritorioId,
+                $tenantId,
+                'revalidação de sessão'
+            );
+            return false;
+        } catch (Throwable $e) {
+            error_log('[ROJEX AUTH][REVALIDACAO] ' . $e->getMessage());
+
+            // Falha segura para uma sessão tenant que não pôde ser revalidada.
+            return false;
         }
     }
 }
@@ -723,6 +996,22 @@ if (!function_exists('rojexCarregarContextoTenant')) {
         if ($escritorioId <= 0 || $tenantId === '') {
             rojexLimparContextoTenant();
             throw new RuntimeException('O vínculo do usuário não possui tenant válido.');
+        }
+
+        /*
+         * Bloqueio no próprio carregamento do contexto impede um novo login.
+         * O MASTER continua autorizado a entrar em suporte para administrar e
+         * auditar escritórios encerrados.
+         */
+        if (!$ehMaster && rojexEscritorioEncerrado((string)($row['escritorio_status'] ?? ''))) {
+            rojexRegistrarBloqueioEscritorioEncerrado(
+                $conn,
+                $escritorioId,
+                $tenantId,
+                'carregamento do contexto após autenticação'
+            );
+            rojexLimparContextoTenant();
+            throw new RuntimeException('Acesso bloqueado: este escritório está encerrado.');
         }
 
         $modulos = rojexCarregarModulosTenant($conn, $escritorioId);

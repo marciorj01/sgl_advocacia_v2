@@ -214,6 +214,8 @@ echo "\xEF\xBB\xBF";
 table { border-collapse: collapse; }
 th { background:#17324d; color:#fff; font-weight:bold; border:1px solid #9ca3af; }
 td { border:1px solid #d1d5db; }
+
+/* Propriedades proprietárias do Microsoft Excel */
 .money { mso-number-format:"\0022R$\0022\ #,##0.00"; }
 .date { mso-number-format:"dd/mm/yyyy"; }
 </style>

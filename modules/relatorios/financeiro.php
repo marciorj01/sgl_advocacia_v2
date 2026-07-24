@@ -7,57 +7,187 @@ require_once __DIR__ . '/../../config/integracoes.php';
 require_once __DIR__ . '/../../core/Empresa.php';
 
 iniciarSessaoSegura();
-exigirLogin('../../auth/login.php');
 
 $conn = conectar();
+exigirLogin('../../auth/login.php');
+
 $empresa = new Empresa($conn);
 date_default_timezone_set($empresa->timezone());
 
 $aba = ($_GET['aba'] ?? 'cp') === 'cr' ? 'cr' : 'cp';
-$titulo = $aba === 'cp' ? 'Relatório de Contas a Pagar' : 'Relatório de Contas a Receber';
+$titulo = $aba === 'cp'
+    ? 'Relatório de Contas a Pagar'
+    : 'Relatório de Contas a Receber';
 
-function hFinRel(mixed $v): string {
-    return htmlspecialchars((string)($v ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+function hFinRel(mixed $valor): string
+{
+    return htmlspecialchars(
+        (string)($valor ?? ''),
+        ENT_QUOTES | ENT_SUBSTITUTE,
+        'UTF-8'
+    );
 }
-function brlFinRel(mixed $v): string {
-    return 'R$ ' . number_format((float)($v ?? 0), 2, ',', '.');
+
+function brlFinRel(mixed $valor): string
+{
+    return 'R$ ' . number_format((float)($valor ?? 0), 2, ',', '.');
 }
-function dataFinRel(mixed $v): string {
-    $v = trim((string)($v ?? ''));
-    return $v === '' || $v === '0000-00-00' ? '-' : date('d/m/Y', strtotime($v));
+
+function dataFinRel(mixed $valor): string
+{
+    $valor = trim((string)($valor ?? ''));
+
+    if ($valor === '' || $valor === '0000-00-00') {
+        return '-';
+    }
+
+    $timestamp = strtotime($valor);
+    return $timestamp === false ? '-' : date('d/m/Y', $timestamp);
+}
+
+function falharFinRel(mysqli $conn, string $detalhe, int $status = 500): never
+{
+    error_log('[ROJEX RELATÓRIO FINANCEIRO] ' . $detalhe);
+
+    if (!headers_sent()) {
+        http_response_code($status);
+        header('Content-Type: text/plain; charset=UTF-8');
+        header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+        header('X-Content-Type-Options: nosniff');
+    }
+
+    $conn->close();
+    exit($status === 403
+        ? 'Acesso negado.'
+        : 'Não foi possível gerar o relatório financeiro.');
+}
+
+$usuarioId = (int)($_SESSION['user_id'] ?? 0);
+$perfil = (string)($_SESSION['perfil'] ?? '');
+$modoPlataforma = function_exists('rojexModoPlataforma')
+    && rojexModoPlataforma();
+
+$ehMaster = function_exists('rojexUsuarioEhMasterSaas')
+    && rojexUsuarioEhMasterSaas($conn, $usuarioId, $perfil);
+
+if ($modoPlataforma) {
+    if (!$ehMaster) {
+        falharFinRel(
+            $conn,
+            'Usuário de plataforma sem perfil MASTER tentou emitir relatório financeiro.',
+            403
+        );
+    }
+
+    $tenantId = null;
+    $escritorioId = null;
+} else {
+    if (
+        !function_exists('rojexContextoTenantValido')
+        || !rojexContextoTenantValido()
+    ) {
+        falharFinRel($conn, 'Contexto Multi-Tenant inválido.', 403);
+    }
+
+    $tenantId = function_exists('rojexTenantId')
+        ? rojexTenantId()
+        : null;
+
+    $escritorioId = function_exists('rojexEscritorioId')
+        ? rojexEscritorioId()
+        : null;
+
+    if (
+        $tenantId === null
+        || trim((string)$tenantId) === ''
+        || $escritorioId === null
+        || $escritorioId <= 0
+    ) {
+        falharFinRel(
+            $conn,
+            'Tenant ou escritório não identificado.',
+            403
+        );
+    }
 }
 
 if ($aba === 'cp') {
     $sql = "SELECT cp.*, b.nome AS banco_nome
               FROM contas_pagar cp
-              LEFT JOIN bancos_caixa b ON b.id = cp.banco_id
-             WHERE COALESCE(cp.deletado,0)=0
-             ORDER BY cp.data_vencimento DESC, cp.id DESC";
+              LEFT JOIN bancos_caixa b
+                     ON b.id = cp.banco_id
+                    AND b.tenant_id = cp.tenant_id
+                    AND b.escritorio_id = cp.escritorio_id
+             WHERE COALESCE(cp.deletado, 0) = 0";
+
+    if (!$modoPlataforma) {
+        $sql .= " AND cp.tenant_id = ? AND cp.escritorio_id = ?";
+    }
+
+    $sql .= " ORDER BY cp.data_vencimento DESC, cp.id DESC";
 } else {
     $sql = "SELECT cr.*, c.nome AS cliente_nome, b.nome AS banco_nome
               FROM contas_receber cr
-              LEFT JOIN clientes c ON c.id = cr.cliente_id
-              LEFT JOIN bancos_caixa b ON b.id = cr.banco_id
-             WHERE COALESCE(cr.deletado,0)=0
-             ORDER BY cr.data_vencimento DESC, cr.id DESC";
+              LEFT JOIN clientes c
+                     ON c.id = cr.cliente_id
+                    AND c.tenant_id = cr.tenant_id
+                    AND c.escritorio_id = cr.escritorio_id
+              LEFT JOIN bancos_caixa b
+                     ON b.id = cr.banco_id
+                    AND b.tenant_id = cr.tenant_id
+                    AND b.escritorio_id = cr.escritorio_id
+             WHERE COALESCE(cr.deletado, 0) = 0";
+
+    if (!$modoPlataforma) {
+        $sql .= " AND cr.tenant_id = ? AND cr.escritorio_id = ?";
+    }
+
+    $sql .= " ORDER BY cr.data_vencimento DESC, cr.id DESC";
 }
 
-$lista = [];
-$res = $conn->query($sql);
-if ($res) {
-    while ($row = $res->fetch_assoc()) {
-        $lista[] = $row;
-    }
+$stmt = $conn->prepare($sql);
+
+if (!$stmt) {
+    falharFinRel(
+        $conn,
+        'Falha ao preparar a consulta: ' . $conn->error
+    );
 }
+
+if (!$modoPlataforma) {
+    $tenantParam = (string)$tenantId;
+    $escritorioParam = (int)$escritorioId;
+    $stmt->bind_param('si', $tenantParam, $escritorioParam);
+}
+
+if (!$stmt->execute()) {
+    $erro = $stmt->error;
+    $stmt->close();
+    falharFinRel($conn, 'Falha ao executar a consulta: ' . $erro);
+}
+
+$resultado = $stmt->get_result();
+$lista = [];
+
+while ($row = $resultado->fetch_assoc()) {
+    $lista[] = $row;
+}
+
+$stmt->close();
 
 $totalValor = 0.0;
 $totalPago = 0.0;
 $totalPendente = 0.0;
+
 foreach ($lista as $row) {
     $totalValor += (float)($row['valor'] ?? 0);
     $totalPago += (float)($row['valor_pago'] ?? 0);
     $totalPendente += (float)($row['valor_pendente'] ?? 0);
 }
+
+$escopoRelatorio = $modoPlataforma
+    ? 'MASTER global'
+    : 'Escritório ' . (int)$escritorioId;
 
 if (function_exists('sgl_registrar_log')) {
     sgl_registrar_log(
@@ -65,20 +195,43 @@ if (function_exists('sgl_registrar_log')) {
         'Emitiu relatório financeiro',
         $aba === 'cp' ? 'contas_pagar' : 'contas_receber',
         null,
-        $titulo . ' com ' . count($lista) . ' registro(s).',
+        sprintf(
+            '%s com %d registro(s). Escopo: %s.',
+            $titulo,
+            count($lista),
+            $escopoRelatorio
+        ),
         [
             'tipo_acao' => 'RELATORIO',
             'modulo' => 'Financeiro',
             'origem' => 'Relatório Enterprise',
             'resultado' => 'SUCESSO',
             'nivel' => 'INFO',
+            'dados_novos' => [
+                'aba' => $aba,
+                'quantidade' => count($lista),
+                'escopo' => $modoPlataforma ? 'master_global' : 'tenant',
+                'tenant_id' => $tenantId,
+                'escritorio_id' => $escritorioId,
+            ],
         ]
     );
 }
 
-$usuario = (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'Usuário');
-$perfil = (string)($_SESSION['perfil'] ?? 'Usuário');
+$usuario = (string)(
+    $_SESSION['nome']
+    ?? $_SESSION['username']
+    ?? 'Usuário'
+);
+
 $logo = '../../' . ltrim($empresa->logoPrincipal(), '/');
+
+if (!headers_sent()) {
+    header('Content-Type: text/html; charset=UTF-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('X-Content-Type-Options: nosniff');
+}
 ?>
 <!doctype html>
 <html lang="pt-BR">
@@ -118,9 +271,10 @@ tbody tr:nth-child(even) { background:#f8fafc; }
 </head>
 <body>
 <div class="toolbar">
-  <a href="../../index.php?mod=financeiro&aba=<?= hFinRel($aba) ?>">← Voltar ao Financeiro</a>
-  <button onclick="window.print()">Imprimir / Salvar PDF</button>
+  <a href="../../index.php?mod=financeiro&amp;aba=<?= hFinRel($aba) ?>">← Voltar ao Financeiro</a>
+  <button type="button" onclick="window.print()">Imprimir / Salvar PDF</button>
 </div>
+
 <div class="page">
   <div class="header">
     <div><img class="logo" src="<?= hFinRel($logo) ?>" alt="Logo"></div>
@@ -133,6 +287,7 @@ tbody tr:nth-child(even) { background:#f8fafc; }
       Emitido em: <strong><?= date('d/m/Y H:i') ?></strong><br>
       Usuário: <strong><?= hFinRel($usuario) ?></strong><br>
       Perfil: <?= hFinRel($perfil) ?><br>
+      Escopo: <?= hFinRel($escopoRelatorio) ?><br>
       Registros: <?= count($lista) ?>
     </div>
   </div>
@@ -163,7 +318,8 @@ tbody tr:nth-child(even) { background:#f8fafc; }
     <tbody>
     <?php if (!$lista): ?>
       <tr><td colspan="11" class="center">Nenhum registro encontrado.</td></tr>
-    <?php elseif ($aba === 'cp'): foreach ($lista as $row): ?>
+    <?php elseif ($aba === 'cp'): ?>
+      <?php foreach ($lista as $row): ?>
       <tr>
         <td><?= hFinRel($row['id']) ?></td>
         <td><?= hFinRel($row['descricao'] ?? '-') ?></td>
@@ -177,7 +333,9 @@ tbody tr:nth-child(even) { background:#f8fafc; }
         <td><?= dataFinRel($row['data_pagamento'] ?? '') ?></td>
         <td><?= hFinRel($row['status'] ?? '-') ?></td>
       </tr>
-    <?php endforeach; else: foreach ($lista as $row): ?>
+      <?php endforeach; ?>
+    <?php else: ?>
+      <?php foreach ($lista as $row): ?>
       <tr>
         <td><?= hFinRel($row['id']) ?></td>
         <td><?= hFinRel($row['descricao'] ?? '-') ?></td>
@@ -191,7 +349,8 @@ tbody tr:nth-child(even) { background:#f8fafc; }
         <td><?= hFinRel($row['forma_recebimento'] ?? '-') ?></td>
         <td><?= hFinRel($row['status'] ?? '-') ?></td>
       </tr>
-    <?php endforeach; endif; ?>
+      <?php endforeach; ?>
+    <?php endif; ?>
     </tbody>
   </table>
 
@@ -203,4 +362,5 @@ tbody tr:nth-child(even) { background:#f8fafc; }
 </div>
 </body>
 </html>
-<?php $conn->close(); ?>
+<?php
+$conn->close();

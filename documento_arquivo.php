@@ -203,7 +203,7 @@ try {
     readfile($arquivo);
     exit;
 } catch (Throwable $e) {
-    error_log('[SGL DOCUMENTO ARQUIVO] ' . $e->getMessage());
+    error_log('[ROJEX DOCUMENTO ARQUIVO] ' . $e->getMessage());
 
     try {
         sgl_doc_endpoint_log(
@@ -222,7 +222,7 @@ try {
             ]
         );
     } catch (Throwable $eLog) {
-        error_log('[SGL DOCUMENTO ARQUIVO LOG] ' . $eLog->getMessage());
+        error_log('[ROJEX DOCUMENTO ARQUIVO LOG] ' . $eLog->getMessage());
     }
 
     http_response_code(500);

@@ -1695,7 +1695,23 @@ function rojex_enc_zip_arquivo(
     string $destino,
     string $senha
 ): array {
-    if (!is_file($origem) || !$zip->addFile($origem, $destino)) {
+    $destino = str_replace('\\', '/', trim($destino));
+    if ($destino === ''
+        || strpos($destino, "\0") !== false
+        || preg_match('#(^|/)\.{2}(?:/|$)#', $destino)
+        || preg_match('#^(?:[A-Za-z]:/|/)#', $destino)
+    ) {
+        throw new RuntimeException('Destino inválido para o arquivo ZIP: ' . $destino);
+    }
+    if (!is_file($origem) || is_link($origem) || !is_readable($origem)) {
+        throw new RuntimeException('Não foi possível incluir ' . $destino . ' no pacote.');
+    }
+    $hash = hash_file('sha256', $origem);
+    $tamanho = filesize($origem);
+    if (!is_string($hash) || $tamanho === false || $tamanho < 0) {
+        throw new RuntimeException('Não foi possível calcular a integridade de ' . $destino . '.');
+    }
+    if (!$zip->addFile($origem, $destino)) {
         throw new RuntimeException('Não foi possível incluir ' . $destino . ' no pacote.');
     }
     $metodo = defined('ZipArchive::EM_AES_256')
@@ -1707,13 +1723,8 @@ function rojex_enc_zip_arquivo(
         || !$zip->setEncryptionName($destino, $metodo, $senha)
     ) {
         throw new RuntimeException(
-            'O PHP/ZipArchive não oferece AES-256. O pacote não foi criado sem criptografia.'
+            'Não foi possível aplicar AES-256 à entrada: ' . $destino
         );
-    }
-    $hash = hash_file('sha256', $origem);
-    $tamanho = filesize($origem);
-    if (!is_string($hash) || $tamanho === false) {
-        throw new RuntimeException('Não foi possível calcular a integridade de ' . $destino . '.');
     }
     return [
         'caminho_zip' => $destino,
@@ -1731,6 +1742,14 @@ function rojex_enc_zip_json(
     string $senha,
     bool $jsonl = false
 ): array {
+    $destino = str_replace('\\', '/', trim($destino));
+    if ($destino === ''
+        || strpos($destino, "\0") !== false
+        || preg_match('#(^|/)\.{2}(?:/|$)#', $destino)
+        || preg_match('#^(?:[A-Za-z]:/|/)#', $destino)
+    ) {
+        throw new RuntimeException('Destino inválido para o arquivo ZIP: ' . $destino);
+    }
     $arquivo = $temporario . DIRECTORY_SEPARATOR . hash('sha256', $destino) . '.tmp';
     if ($jsonl) {
         $handle = @fopen($arquivo, 'wb');
@@ -2031,7 +2050,11 @@ function rojex_enc_gerar(mysqli $conn, int $escritorioId, string $senha): array 
             throw new RuntimeException('Não foi possível criar o ZIP restaurável.');
         }
         $zipAberto = true;
-        $zip->setPassword($senha);
+        if (!$zip->setPassword($senha)) {
+            throw new RuntimeException(
+                'Não foi possível configurar a senha do ZIP restaurável.'
+            );
+        }
 
         $tabelas = [];
         $idsOriginais = [];
@@ -3054,14 +3077,21 @@ if (
         }
 
         @set_time_limit(0);
+        $transacaoAberta = false;
         $conn->query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
         $conn->begin_transaction(MYSQLI_TRANS_START_WITH_CONSISTENT_SNAPSHOT);
+        $transacaoAberta = true;
         $pacoteEncerramento = rojex_enc_gerar(
             $conn,
             $escritorioIdEncerramento,
             $senhaEncerramento
         );
-        $conn->commit();
+        if (!$conn->commit()) {
+            throw new RuntimeException(
+                'Não foi possível confirmar o snapshot do pacote restaurável.'
+            );
+        }
+        $transacaoAberta = false;
 
         sgl_log(
             $conn,
@@ -3107,7 +3137,9 @@ if (
         @unlink($arquivoEncerramento);
         exit;
     } catch (Throwable $e) {
-        try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        if (!empty($transacaoAberta)) {
+            try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        }
         if (is_array($pacoteEncerramento) && !empty($pacoteEncerramento['arquivo'])) {
             @unlink((string)$pacoteEncerramento['arquivo']);
         }
@@ -3220,17 +3252,44 @@ if ($acao_cfg === 'gerar_log_backup') {
     $escritorioIdBackup = max(0, (int)($_POST['log_backup_escritorio_id'] ?? 0));
     $dataInicioBackup = trim((string)($_POST['log_backup_data_inicio'] ?? ''));
     $dataFimBackup = trim((string)($_POST['log_backup_data_fim'] ?? ''));
+
     $inicioObj = DateTime::createFromFormat('!Y-m-d', $dataInicioBackup);
+    $errosInicio = DateTime::getLastErrors();
+
     $fimObj = DateTime::createFromFormat('!Y-m-d', $dataFimBackup);
+    $errosFim = DateTime::getLastErrors();
 
-    if ($escritorioIdBackup <= 0 || !$inicioObj || !$fimObj) {
-        sgl_redirect_cfg('logs', 'erro', 'Selecione um único escritório e informe o período inicial e final.');
-    }
-    if ($inicioObj > $fimObj) {
-        sgl_redirect_cfg('logs', 'erro', 'A data inicial não pode ser posterior à data final.');
-    }
+$inicioValido = $inicioObj instanceof DateTime
+    && (
+        $errosInicio === false
+        || (
+            (int)($errosInicio['warning_count'] ?? 0) === 0
+            && (int)($errosInicio['error_count'] ?? 0) === 0
+        )
+    );
 
-    $zipGerado = null;
+$fimValido = $fimObj instanceof DateTime
+    && (
+        $errosFim === false
+        || (
+            (int)($errosFim['warning_count'] ?? 0) === 0
+            && (int)($errosFim['error_count'] ?? 0) === 0
+        )
+    );
+
+if ($escritorioIdBackup <= 0 || !$inicioValido || !$fimValido) {
+    sgl_redirect_cfg(
+        'logs',
+        'erro',
+        'Selecione um único escritório e informe datas válidas.'
+    );
+}
+
+if ($inicioObj > $fimObj) {
+    sgl_redirect_cfg('logs', 'erro', 'A data inicial não pode ser posterior à data final.');
+}
+
+$zipGerado = null;
     try {
         $stmt = $conn->prepare(
             "SELECT id, tenant_id, nome FROM escritorios_saas WHERE id = ? LIMIT 1"
@@ -3337,6 +3396,26 @@ if ($acao_cfg === 'verificar_log_backup') {
         sgl_log($conn, 'Verificou backup isolado do LOG', 'logs_backups', (string)$backupId, 'SHA-256 confirmado.');
         sgl_redirect_cfg('logs', 'sucesso', 'Integridade confirmada. Faça o download do ZIP.');
     } catch (Throwable $e) {
+        if ($backupId > 0) {
+            try {
+                $statusFalha = 'FALHA_INTEGRIDADE';
+
+                $stmt = $conn->prepare(
+                    "UPDATE logs_backups
+                        SET status = ?
+                      WHERE id = ?"
+                );
+
+                if ($stmt) {
+                    $stmt->bind_param('si', $statusFalha, $backupId);
+                    $stmt->execute();
+                    $stmt->close();
+                }
+            } catch (Throwable $ignorado) {
+                // A atualização auxiliar não deve ocultar o erro principal.
+            }
+        }
+
         sgl_redirect_cfg('logs', 'erro', $e->getMessage());
     }
 }
@@ -3359,8 +3438,10 @@ if ($acao_cfg === 'arquivar_log_backup') {
         if (empty($backup['verificado_em']) || empty($backup['download_em'])) {
             throw new RuntimeException('É obrigatório verificar e baixar o ZIP antes de arquivar.');
         }
-        if (in_array((string)$backup['status'], ['ARQUIVADO', 'FALHA_INTEGRIDADE'], true)) {
-            throw new RuntimeException('Este backup não está disponível para arquivamento.');
+        if ((string)$backup['status'] !== 'BAIXADO') {
+            throw new RuntimeException(
+                'Somente um backup verificado e baixado pode ser arquivado.'
+            );
         }
         if (!rojex_log_backup_caminho_valido((string)$backup['arquivo'])) {
             throw new RuntimeException('O ZIP temporário não está disponível.');
@@ -3401,8 +3482,25 @@ if ($acao_cfg === 'arquivar_log_backup') {
               WHERE id = ?"
         );
         $stmt->bind_param('ssi', $statusArquivado, $agora, $backupId);
-        $stmt->execute();
-        $stmt->close();
+
+if (!$stmt->execute()) {
+    $erroAtualizacao = $stmt->error;
+    $stmt->close();
+
+    throw new RuntimeException(
+        $erroAtualizacao ?: 'Não foi possível registrar o arquivamento do backup.'
+    );
+}
+
+if ($stmt->affected_rows !== 1) {
+    $stmt->close();
+
+    throw new RuntimeException(
+        'O registro do backup não foi atualizado para ARQUIVADO.'
+    );
+}
+
+$stmt->close();
 
         $arquivoParaRemover = (string)$backup['arquivo'];
         $arquivoRenomeado = $arquivoParaRemover . '.arquivando';
@@ -3410,8 +3508,13 @@ if ($acao_cfg === 'arquivar_log_backup') {
             throw new RuntimeException('Não foi possível preparar a remoção segura do ZIP temporário.');
         }
 
-        $conn->commit();
-        $transacaoAberta = false;
+        if (!$conn->commit()) {
+    throw new RuntimeException(
+        'Não foi possível confirmar a transação de arquivamento.'
+    );
+}
+
+$transacaoAberta = false;
         if (!@unlink($arquivoRenomeado)) {
             error_log('[ROJEX LOG BACKUP] ZIP arquivado pendente de remoção: ' . basename($arquivoRenomeado));
         }

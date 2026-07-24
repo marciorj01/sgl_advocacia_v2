@@ -524,20 +524,132 @@ function sgl_link_active(?string $atual, string $item): string {
             max-width:520px;
             width:100%;
         }
-        @media (max-width: 991px) {
-            .sgl-topbar { display:block; }
-            .sgl-global-search { max-width:100%; margin-top:10px; }
+        .sgl-mobile-header {
+            display: none;
         }
-        @media (max-width: 991px) {
-            .sgl-layout { display:block!important; }
-            .sgl-sidebar { position:relative; width:100%; min-width:100%; height:auto; min-height:auto; }
-            .sgl-main { padding: 1rem!important; }
+
+        @media (max-width: 991.98px) {
+            .sgl-layout {
+                display: block !important;
+            }
+
+            .sgl-mobile-header {
+                display: flex;
+                position: sticky;
+                top: 0;
+                z-index: 1045;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                min-height: 58px;
+                padding: 10px 14px;
+                background: linear-gradient(90deg, #123a5a 0%, #153f63 100%);
+                box-shadow: 0 3px 12px rgba(0,0,0,.18);
+            }
+
+            .sgl-mobile-header .sgl-mobile-brand {
+                color: #fff;
+                font-weight: 800;
+                font-size: .95rem;
+                line-height: 1.2;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .sgl-mobile-header .btn {
+                flex: 0 0 auto;
+            }
+
+            .sgl-sidebar {
+                position: fixed;
+                inset: 0 auto 0 0;
+                z-index: 1050;
+                width: min(86vw, var(--sgl-sidebar-width));
+                min-width: min(86vw, var(--sgl-sidebar-width));
+                height: 100vh;
+                min-height: 100vh;
+                transform: translateX(-105%);
+                transition: transform .22s ease;
+                box-shadow: 12px 0 28px rgba(0,0,0,.25);
+            }
+
+            body.sgl-menu-open {
+                overflow: hidden;
+            }
+
+            body.sgl-menu-open .sgl-sidebar {
+                transform: translateX(0);
+            }
+
+            .sgl-mobile-backdrop {
+                display: none;
+                position: fixed;
+                inset: 0;
+                z-index: 1049;
+                background: rgba(0,0,0,.48);
+            }
+
+            body.sgl-menu-open .sgl-mobile-backdrop {
+                display: block;
+            }
+
+            .sgl-main {
+                width: 100%;
+                padding: 1rem !important;
+            }
+
+            .sgl-topbar {
+                display: block;
+                margin-bottom: 14px;
+            }
+
+            .sgl-global-search {
+                max-width: 100%;
+                margin-top: 0;
+            }
+        }
+
+        @media (max-width: 575.98px) {
+            .sgl-main {
+                padding: .75rem !important;
+            }
+
+            .sgl-global-search .input-group {
+                flex-wrap: nowrap;
+            }
+
+            .sgl-global-search .input-group-text {
+                display: none;
+            }
+
+            .sgl-global-search .btn {
+                padding-left: .8rem;
+                padding-right: .8rem;
+            }
         }
     </style>
 </head>
 <body>
+<div class="sgl-mobile-header">
+    <button
+        type="button"
+        class="btn btn-outline-light btn-sm"
+        id="sglMenuToggle"
+        aria-controls="sglSidebar"
+        aria-expanded="false"
+        aria-label="Abrir menu principal"
+    >
+        <i class="bi bi-list" aria-hidden="true"></i>
+        <span class="ms-1">Menu</span>
+    </button>
+    <div class="sgl-mobile-brand"><?= htmlspecialchars($nomeContexto, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+</div>
+<div class="sgl-mobile-backdrop" id="sglMobileBackdrop" aria-hidden="true"></div>
+
 <div class="d-flex sgl-layout">
-    <nav class="sgl-sidebar text-white">
+    <nav class="sgl-sidebar text-white" id="sglSidebar" aria-label="Menu principal">
         <div class="sgl-logo-wrap">
             <img src="<?= htmlspecialchars((string)$logoSidebar['src'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>?v=<?= htmlspecialchars((string)$logoSidebar['versao'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>" alt="<?= htmlspecialchars($nomeContexto, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?>">
         </div>
@@ -701,5 +813,52 @@ function sgl_link_active(?string $atual, string $item): string {
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="assets/js/main.js"></script>
+<script>
+(() => {
+    const body = document.body;
+    const toggle = document.getElementById('sglMenuToggle');
+    const sidebar = document.getElementById('sglSidebar');
+    const backdrop = document.getElementById('sglMobileBackdrop');
+    const mobileBreakpoint = window.matchMedia('(max-width: 991.98px)');
+
+    if (!toggle || !sidebar || !backdrop) {
+        return;
+    }
+
+    const setMenuState = (open) => {
+        body.classList.toggle('sgl-menu-open', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        toggle.setAttribute('aria-label', open ? 'Fechar menu principal' : 'Abrir menu principal');
+        backdrop.setAttribute('aria-hidden', open ? 'false' : 'true');
+    };
+
+    toggle.addEventListener('click', () => {
+        setMenuState(!body.classList.contains('sgl-menu-open'));
+    });
+
+    backdrop.addEventListener('click', () => setMenuState(false));
+
+    sidebar.querySelectorAll('a.nav-link').forEach((link) => {
+        link.addEventListener('click', () => {
+            if (mobileBreakpoint.matches) {
+                setMenuState(false);
+            }
+        });
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && body.classList.contains('sgl-menu-open')) {
+            setMenuState(false);
+            toggle.focus();
+        }
+    });
+
+    mobileBreakpoint.addEventListener('change', (event) => {
+        if (!event.matches) {
+            setMenuState(false);
+        }
+    });
+})();
+</script>
 </body>
 </html>

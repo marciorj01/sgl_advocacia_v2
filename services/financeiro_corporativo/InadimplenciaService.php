@@ -1,0 +1,9 @@
+<?php
+declare(strict_types=1);
+require_once __DIR__ . '/FinanceiroCorporativoBaseService.php';
+final class InadimplenciaService extends FinanceiroCorporativoBaseService
+{
+ public static function criarComConexaoOficial():self{return new self(conectar());}
+ public function analisar(?int $escritorioId=null):array{return $this->executarSeguro('Falha na análise de inadimplência','inadimplencia',null,function()use($escritorioId){$cfg=[];foreach($this->listarSql("SELECT chave,valor FROM saas_financeiro_configuracoes WHERE grupo='inadimplencia'") as $r)$cfg[$r['chave']]=$r['valor'];$susp=(int)($cfg['inadimplencia_dias_suspensao']??30);$sql="SELECT c.*,DATEDIFF(CURDATE(),c.vencimento_em) dias_atraso FROM saas_financeiro_cobrancas c WHERE c.status IN ('emitida','aberta','parcial','vencida') AND c.saldo_aberto>0 AND c.vencimento_em<CURDATE()";$t='';$p=[];if($escritorioId){$sql.=' AND c.escritorio_id=?';$t='i';$p=[$escritorioId];}$rows=$this->listarSql($sql.' ORDER BY dias_atraso DESC',$t,$p);foreach($rows as &$r){$r['acao_recomendada']=(int)$r['dias_atraso']>=$susp?'avaliar_suspensao':'cobrar';$r['elegivel_suspensao']=(int)$r['dias_atraso']>=$susp;}$this->log->registrarEvento('Executou análise de inadimplência','inadimplencia',null,'Análise sem suspensão automática.');return $this->sucesso('Análise concluída.','INADIMPLENCIA_ANALISADA',['configuracoes'=>$cfg,'cobrancas'=>$rows]);});}
+ public function atualizarVencidas():array{return $this->executarSeguro('Falha ao atualizar vencidas','inadimplencia',null,function(){$this->conn->query("UPDATE saas_financeiro_cobrancas SET status='vencida' WHERE status IN ('emitida','aberta','parcial') AND saldo_aberto>0 AND vencimento_em<CURDATE()");return $this->sucesso('Cobranças vencidas atualizadas.','COBRANCAS_VENCIDAS_ATUALIZADAS',['afetadas'=>$this->conn->affected_rows]);});}
+}

@@ -1238,20 +1238,28 @@ function rojex_backup_zip_arquivos(string $arquivoZip, array $arquivos, ?string 
     $zip = new ZipArchive();
     $abertura = $zip->open($arquivoZip, ZipArchive::CREATE | ZipArchive::OVERWRITE);
     if ($abertura !== true) {
+        @unlink($arquivoZip);
         return ['ok'=>false, 'erro'=>'Não foi possível criar o arquivo ZIP.', 'quantidade'=>0];
     }
 
     $quantidade = 0;
+    $incluiuBanco = false;
 
-    if ($sqlArquivo && is_file($sqlArquivo)) {
-        if ($zip->addFile($sqlArquivo, 'banco/backup.sql')) {
-            $quantidade++;
+    if ($sqlArquivo !== null) {
+        if (!is_file($sqlArquivo) || !$zip->addFile($sqlArquivo, 'banco/backup.sql')) {
+            $zip->close();
+            @unlink($arquivoZip);
+            return ['ok'=>false, 'erro'=>'Não foi possível incluir o backup SQL no arquivo ZIP.', 'quantidade'=>0];
         }
+        $incluiuBanco = true;
+        $quantidade++;
     }
 
     foreach ($arquivos as $arquivo) {
-        if (!is_file($arquivo['origem'])) continue;
-        if ($zip->addFile($arquivo['origem'], $arquivo['destino'])) {
+        $origem = (string)($arquivo['origem'] ?? '');
+        $destino = (string)($arquivo['destino'] ?? '');
+        if ($origem === '' || $destino === '' || !is_file($origem)) continue;
+        if ($zip->addFile($origem, $destino)) {
             $quantidade++;
         }
     }
@@ -1260,19 +1268,33 @@ function rojex_backup_zip_arquivos(string $arquivoZip, array $arquivos, ?string 
         'produto' => 'ROJEX.AI ERP Jurídico Enterprise',
         'gerado_em' => date(DATE_ATOM),
         'quantidade_arquivos' => $quantidade,
-        'inclui_banco' => $sqlArquivo !== null,
+        'inclui_banco' => $incluiuBanco,
     ];
-    $zip->addFromString(
-        'manifesto_backup.json',
-        json_encode($manifesto, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+    $manifestoJson = json_encode(
+        $manifesto,
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE
     );
 
-    $zip->close();
+    if ($manifestoJson === false || !$zip->addFromString('manifesto_backup.json', $manifestoJson)) {
+        $zip->close();
+        @unlink($arquivoZip);
+        return ['ok'=>false, 'erro'=>'Não foi possível incluir o manifesto no arquivo ZIP.', 'quantidade'=>0];
+    }
+
+    if (!$zip->close()) {
+        @unlink($arquivoZip);
+        return ['ok'=>false, 'erro'=>'Não foi possível finalizar o arquivo ZIP.', 'quantidade'=>0];
+    }
+
+    $ok = is_file($arquivoZip) && filesize($arquivoZip) > 0;
+    if (!$ok) {
+        @unlink($arquivoZip);
+    }
 
     return [
-        'ok'=>is_file($arquivoZip) && filesize($arquivoZip) > 0,
-        'erro'=>'',
-        'quantidade'=>$quantidade,
+        'ok'=>$ok,
+        'erro'=>$ok ? '' : 'O arquivo ZIP final não foi criado corretamente.',
+        'quantidade'=>$ok ? $quantidade : 0,
     ];
 }
 
@@ -2893,6 +2915,7 @@ $acoesExclusivasMaster = [
     'executar_manutencao',
     'simular_backup',
     'executar_backup',
+    'baixar_backup',
     'verificar_backup',
     'gerar_log_backup',
     'verificar_log_backup',
@@ -3853,7 +3876,123 @@ if ($acao_cfg === 'executar_backup') {
     }
 }
 
-if ($acao_cfg === 'verificar_backup') {
+if ($acao_cfg === 'baixar_backup') {
+    $backupId = max(0, (int)($_POST['backup_id'] ?? 0));
+
+    try {
+        if ($backupId <= 0) {
+            throw new RuntimeException('Identificação do backup inválida.');
+        }
+
+        $stmt = $conn->prepare(
+            "SELECT id, arquivo, nome_original, status
+               FROM backups_sistema
+              WHERE id = ?
+              LIMIT 1"
+        );
+
+        if (!$stmt) {
+            throw new RuntimeException('Não foi possível consultar o backup.');
+        }
+
+        $stmt->bind_param('i', $backupId);
+        $stmt->execute();
+        $backupRegistro = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (
+            !$backupRegistro
+            || empty($backupRegistro['arquivo'])
+            || (string)($backupRegistro['status'] ?? '') !== 'concluido'
+        ) {
+            throw new RuntimeException('Backup concluído não localizado.');
+        }
+
+        $diretorioPermitido = realpath(rojex_backup_diretorio());
+        $arquivoReal = realpath((string)$backupRegistro['arquivo']);
+
+        if (
+            $diretorioPermitido === false
+            || $arquivoReal === false
+            || !is_file($arquivoReal)
+            || !is_readable($arquivoReal)
+        ) {
+            throw new RuntimeException('O arquivo do backup não está disponível.');
+        }
+
+        $prefixoPermitido = rtrim(
+            $diretorioPermitido,
+            DIRECTORY_SEPARATOR
+        ) . DIRECTORY_SEPARATOR;
+
+        if (!str_starts_with($arquivoReal, $prefixoPermitido)) {
+            throw new RuntimeException('Caminho do backup não autorizado.');
+        }
+
+        $nomeDownload = basename(
+            (string)($backupRegistro['nome_original'] ?: $arquivoReal)
+        );
+
+        if (!preg_match('/^[a-zA-Z0-9._-]+$/', $nomeDownload)) {
+            $nomeDownload = 'rojex_backup_' . $backupId . '.zip';
+        }
+
+        $tamanho = filesize($arquivoReal);
+
+        if ($tamanho === false || $tamanho <= 0) {
+            throw new RuntimeException('O arquivo do backup está vazio.');
+        }
+
+        sgl_log(
+            $conn,
+            'Baixou backup Enterprise',
+            'backups_sistema',
+            (string)$backupId,
+            'Arquivo: ' . $nomeDownload
+        );
+
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+
+        header('Content-Type: application/zip');
+        header(
+            'Content-Disposition: attachment; filename="' .
+            addcslashes($nomeDownload, "\"\\") .
+            '"'
+        );
+        header('Content-Length: ' . $tamanho);
+        header('Content-Transfer-Encoding: binary');
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: private, no-store, no-cache, must-revalidate');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+
+        $handle = fopen($arquivoReal, 'rb');
+
+        if ($handle === false) {
+            throw new RuntimeException('Não foi possível abrir o backup.');
+        }
+
+        fpassthru($handle);
+        fclose($handle);
+        exit;
+    } catch (Throwable $e) {
+        sgl_log(
+            $conn,
+            'Falha ao baixar backup Enterprise',
+            'backups_sistema',
+            (string)$backupId,
+            $e->getMessage()
+        );
+
+        sgl_redirect_cfg(
+            'backup',
+            'erro',
+            'Não foi possível baixar o backup: ' . $e->getMessage()
+        );
+    }
+}if ($acao_cfg === 'verificar_backup') {
     $backupId = max(0, (int)($_POST['backup_id'] ?? 0));
 
     try {
@@ -3874,6 +4013,11 @@ if ($acao_cfg === 'verificar_backup') {
         $statusVerificacao = $validacao['status'];
         $agora = date('Y-m-d H:i:s');
 
+        $hashOriginal = (string)($backupRegistro['hash_arquivo'] ?? '');
+        $hashPersistido = $hashOriginal !== ''
+            ? $hashOriginal
+            : ($validacao['ok'] ? (string)($validacao['hash'] ?? '') : '');
+
         $stmt = $conn->prepare(
             "UPDATE backups_sistema
                 SET verificado_em=?, verificacao_status=?, tamanho_bytes=?, hash_arquivo=?
@@ -3884,7 +4028,7 @@ if ($acao_cfg === 'verificar_backup') {
             $agora,
             $statusVerificacao,
             $validacao['tamanho'],
-            $validacao['hash'],
+            $hashPersistido,
             $backupId
         );
         $stmt->execute();
@@ -10436,6 +10580,26 @@ function rojexEditarAtualizacao(dados) {
                                 </td>
                                 <td>
                                     <?php if (!empty($backupItem['arquivo'])): ?>
+                                    <form method="post" class="d-inline me-1">
+                                        <input
+                                            type="hidden"
+                                            name="csrf_token"
+                                            value="<?=htmlspecialchars($csrf, ENT_QUOTES, 'UTF-8')?>"
+                                        >
+                                        <input type="hidden" name="acao_cfg" value="baixar_backup">
+                                        <input
+                                            type="hidden"
+                                            name="backup_id"
+                                            value="<?=(int)$backupItem['id']?>"
+                                        >
+                                        <button
+                                            type="submit"
+                                            class="btn btn-sm btn-outline-success"
+                                            title="Baixar arquivo de backup"
+                                        >
+                                            <i class="bi bi-download"></i> Download
+                                        </button>
+                                    </form>
                                     <form method="post" class="d-inline">
                                         <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
                                         <input type="hidden" name="acao_cfg" value="verificar_backup">

@@ -313,6 +313,7 @@ $nomeContexto = $modoPlataforma
  */
 $acoesConfiguracoesComDownload = [
     'baixar_log_backup',
+    'baixar_backup',
     'gerar_backup_encerramento',
 ];
 

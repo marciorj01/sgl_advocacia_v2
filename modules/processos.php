@@ -511,9 +511,9 @@ $cards = $stmtCards->get_result()->fetch_assoc() ?: [
 $stmtCards->close();
 ?>
 
-<div class="d-flex justify-content-between align-items-start mb-4">
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
     <div><h2 class="mb-1"><i class="bi bi-folder2-open"></i> Processos</h2><p class="text-muted mb-0">Gestão, prazos e acompanhamento dos processos do escritório.</p></div>
-    <a href="?mod=processos&acao=novo" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo Processo</a>
+    <a href="?mod=processos&acao=novo" class="btn btn-primary mt-2 mt-md-0"><i class="bi bi-plus-circle"></i> Novo Processo</a>
 </div>
 <?= $msg ?>
 

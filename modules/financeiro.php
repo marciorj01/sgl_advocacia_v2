@@ -1375,7 +1375,7 @@ if ($acao === 'movimentacao_bancos') {
     $resMov = $conn->query("SELECT m.*, COALESCE(bo.nome, m.origem_outros, 'OUTROS') AS origem_nome, COALESCE(bd.nome, m.destino_outros, 'OUTROS') AS destino_nome FROM bancos_movimentacoes m LEFT JOIN bancos_caixa bo ON bo.id=m.banco_origem_id AND bo.tenant_id=m.tenant_id AND bo.escritorio_id=m.escritorio_id LEFT JOIN bancos_caixa bd ON bd.id=m.banco_destino_id AND bd.tenant_id=m.tenant_id AND bd.escritorio_id=m.escritorio_id WHERE m.tenant_id='" . $conn->real_escape_string($tenantId) . "' AND m.escritorio_id=" . (int)$escritorioId . " ORDER BY m.data_movimento DESC, m.id DESC LIMIT 80");
     if ($resMov) while($r=$resMov->fetch_assoc()) $movs[]=$r;
     ?>
-    <div class="container-fluid">
+    <div class="container-fluid financeiro-responsive">
         <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
             <div><h2 class="fw-bold text-primary"><i class="bi bi-arrow-left-right"></i> Movimentação Bancária e Caixa</h2><p class="text-muted mb-0">Controle o que ficou em caixa físico, PIX e bancos da empresa.</p></div>
             <div class="d-flex gap-2"><a href="?mod=financeiro&acao=bancos" class="btn btn-outline-dark"><i class="bi bi-bank"></i> Cadastrar bancos</a><a href="?mod=financeiro" class="btn btn-outline-secondary">Voltar</a></div>
@@ -1395,7 +1395,7 @@ if ($acao === 'movimentacao_bancos') {
 if ($acao === 'bancos') {
     $bancos = financeiroListaBancos($conn, false);
     ?>
-    <div class="container-fluid">
+    <div class="container-fluid financeiro-responsive">
         <div class="d-flex justify-content-between align-items-start mb-3"><div><h2 class="fw-bold text-primary"><i class="bi bi-bank"></i> Bancos / Caixa</h2><p class="text-muted mb-0">Cadastre onde o dinheiro entra ou sai: caixa, PIX, banco, conta corrente ou poupança.</p></div><div class="d-flex gap-2"><a href="?mod=financeiro&acao=movimentacao_bancos" class="btn btn-outline-success"><i class="bi bi-arrow-left-right"></i> Movimentação</a><a href="?mod=financeiro" class="btn btn-outline-secondary">Voltar</a></div></div>
         <?= $msg ?>
         <div class="card shadow-sm border-0 mb-3"><div class="card-header bg-dark text-white fw-bold">Novo Banco/Caixa</div><div class="card-body"><form method="post" class="row g-3"><input type="hidden" name="salvar_banco" value="1"><div class="col-md-4"><label class="form-label">Nome *</label><input name="nome" class="form-control" placeholder="Ex.: Caixa Escritório, PIX Itaú, Banco do Brasil" required></div><div class="col-md-2"><label class="form-label">Tipo</label><select name="tipo" class="form-select"><option>Caixa</option><option>PIX</option><option>Conta Corrente</option><option>Poupança</option><option>Cartão</option></select></div><div class="col-md-2"><label class="form-label">Banco</label><input name="banco" class="form-control"></div><div class="col-md-1"><label class="form-label">Agência</label><input name="agencia" class="form-control"></div><div class="col-md-2"><label class="form-label">Conta</label><input name="conta" class="form-control"></div><div class="col-md-1"><label class="form-label">Ativo</label><div class="form-check mt-2"><input type="checkbox" class="form-check-input" name="ativo" checked></div></div><div class="col-md-3"><label class="form-label">Saldo inicial</label><input name="saldo_inicial" class="form-control" placeholder="0,00"></div><div class="col-md-3 d-flex align-items-end"><button class="btn btn-primary w-100"><i class="bi bi-save"></i> Salvar</button></div></form></div></div>
@@ -1404,7 +1404,7 @@ if ($acao === 'bancos') {
     <?php return; }
 
 ?>
-<div class="container-fluid">
+<div class="container-fluid financeiro-responsive">
     <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
         <div>
             <h2 class="mb-1"><i class="bi bi-cash-coin"></i> Financeiro</h2>
@@ -2289,6 +2289,96 @@ function imprimirRelatorio(aba) {
     };
 }
 </script>
+
+
+<style>
+/* RC1 — ajustes exclusivamente responsivos do módulo Financeiro. */
+.financeiro-responsive {
+    min-width: 0;
+}
+
+.financeiro-responsive .table-responsive {
+    -webkit-overflow-scrolling: touch;
+}
+
+.financeiro-responsive .card-header.d-flex,
+.financeiro-responsive > .d-flex,
+.financeiro-responsive .tab-pane > .d-flex {
+    flex-wrap: wrap;
+    gap: .5rem;
+}
+
+.financeiro-responsive .d-flex.gap-2 {
+    flex-wrap: wrap;
+}
+
+.financeiro-responsive .btn {
+    white-space: normal;
+}
+
+@media (max-width: 575.98px) {
+    .financeiro-responsive {
+        padding-right: 0;
+        padding-left: 0;
+    }
+
+    .financeiro-responsive h2 {
+        font-size: 1.45rem;
+    }
+
+    .financeiro-responsive > .d-flex.justify-content-between,
+    .financeiro-responsive .tab-pane > .d-flex.justify-content-between {
+        align-items: stretch !important;
+    }
+
+    .financeiro-responsive > .d-flex.justify-content-between > div,
+    .financeiro-responsive .tab-pane > .d-flex.justify-content-between > div {
+        width: 100%;
+    }
+
+    .financeiro-responsive > .d-flex.justify-content-between .btn,
+    .financeiro-responsive .tab-pane > .d-flex.justify-content-between .btn,
+    .financeiro-responsive .card-header.d-flex .btn {
+        flex: 1 1 100%;
+        width: 100%;
+    }
+
+    .financeiro-responsive .card-header.d-flex {
+        align-items: stretch !important;
+    }
+
+    .financeiro-responsive .nav-tabs {
+        display: flex;
+    }
+
+    .financeiro-responsive .nav-tabs .nav-item {
+        flex: 1 1 100%;
+        text-align: center;
+    }
+
+    .financeiro-responsive .nav-tabs .nav-link {
+        width: 100%;
+    }
+
+    .financeiro-responsive .card-body {
+        padding: 1rem;
+    }
+
+    .financeiro-responsive .table {
+        font-size: .875rem;
+    }
+
+    .financeiro-responsive td.text-nowrap .btn {
+        margin-bottom: .25rem;
+    }
+}
+
+@media print {
+    .financeiro-responsive {
+        padding: 0 !important;
+    }
+}
+</style>
 
 <style>
 @media print {

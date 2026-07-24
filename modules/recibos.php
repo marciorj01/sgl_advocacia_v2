@@ -364,9 +364,9 @@ if (in_array($acao, ['novo','editar'], true)) {
         'id'=>'','cliente_id'=>'','nome_cliente'=>'','cpf_cnpj'=>'','processo_numero'=>'','honorario_id'=>'','parcela_id'=>'','data_emissao'=>date('Y-m-d'),'data_pagamento'=>date('Y-m-d'),'referente'=>'','forma_pagamento'=>'PIX','valor'=>'','observacoes'=>''
     ];
 ?>
-<div class="d-flex justify-content-between align-items-start mb-4">
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
     <div><h2 class="fw-bold text-primary"><i class="bi bi-receipt"></i> <?= $acao==='editar'?'Editar Recibo':'Novo Recibo' ?></h2><p class="text-muted mb-0">Emissão profissional de recibos vinculados a clientes, processos e honorários.</p></div>
-    <a href="?mod=recibos" class="btn btn-outline-secondary"><i class="bi bi-arrow-left"></i> Voltar</a>
+    <a href="?mod=recibos" class="btn btn-outline-secondary mt-2 mt-md-0"><i class="bi bi-arrow-left"></i> Voltar</a>
 </div>
 <?= $msg ?>
 <div class="card shadow-sm border-0"><div class="card-body">
@@ -401,9 +401,9 @@ $totEmitidos = $conn->query("SELECT COUNT(*) c FROM recibos WHERE tenant_id='{$t
 $valorMes = $conn->query("SELECT COALESCE(SUM(valor),0) v FROM recibos WHERE tenant_id='{$tenantSqlRec}' AND escritorio_id={$escritorioId} AND deletado=0 AND status='Emitido' AND MONTH(data_emissao)=MONTH(CURDATE()) AND YEAR(data_emissao)=YEAR(CURDATE())")->fetch_assoc()['v'] ?? 0;
 $cancelados = $conn->query("SELECT COUNT(*) c FROM recibos WHERE tenant_id='{$tenantSqlRec}' AND escritorio_id={$escritorioId} AND deletado=0 AND status='Cancelado'")->fetch_assoc()['c'] ?? 0;
 ?>
-<div class="d-flex justify-content-between align-items-start mb-4">
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
     <div><h2 class="fw-bold text-primary"><i class="bi bi-receipt"></i> Recibos</h2><p class="text-muted mb-0">Geração, controle, impressão e histórico de recibos do escritório.</p></div>
-    <div class="d-flex flex-wrap gap-2">
+    <div class="d-flex flex-wrap gap-2 mt-2 mt-md-0">
         <?php
         $paramsRelatorioRecibos = [];
         if ($q !== '') { $paramsRelatorioRecibos['q'] = $q; }

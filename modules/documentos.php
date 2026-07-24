@@ -521,12 +521,12 @@ $totalProvas = (int)($rowStats['total_provas'] ?? 0);
 $armazenamento = (int)($rowStats['armazenamento'] ?? 0);
 ?>
 
-<div class="d-flex justify-content-between align-items-start mb-4">
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
     <div>
         <h2 class="fw-bold text-primary mb-1"><i class="bi bi-file-earmark-arrow-up"></i> Documentos e Arquivos</h2>
         <p class="text-muted mb-0">Guarde documentos pessoais, provas, contratos, procurações e arquivos vinculados a clientes/processos.</p>
     </div>
-    <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#modalUpload"><i class="bi bi-cloud-arrow-up"></i> Novo arquivo</button>
+    <button class="btn btn-primary mt-2 mt-md-0" data-bs-toggle="modal" data-bs-target="#modalUpload"><i class="bi bi-cloud-arrow-up"></i> Novo arquivo</button>
 </div>
 
 <?php if ($mensagem): ?><div class="alert alert-success"><i class="bi bi-check-circle"></i> <?= htmlspecialchars($mensagem) ?></div><?php endif; ?>

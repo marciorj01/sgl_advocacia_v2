@@ -989,9 +989,9 @@ if ($visualizar) {
 }
 </style>
 
-<div class="d-flex justify-content-between align-items-start mb-4">
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
     <div><h2 class="fw-bold text-primary mb-1"><i class="bi bi-journal-text"></i> Modelos Jurídicos</h2><p class="text-muted mb-0">Biblioteca profissional de contratos, petições, procurações, termos e documentos reutilizáveis.</p></div>
-    <div class="d-flex gap-2"><form method="post" class="d-inline"><input type="hidden" name="csrf" value="<?= htmlspecialchars($csrf) ?>"><input type="hidden" name="acao" value="importar_padrao"><button class="btn btn-outline-primary"><i class="bi bi-cloud-download"></i> Importar biblioteca padrão</button></form><a href="?mod=modelos&novo=1" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo modelo</a></div>
+    <div class="d-flex gap-2 mt-2 mt-md-0"><form method="post" class="d-inline"><input type="hidden" name="csrf" value="<?= htmlspecialchars($csrf) ?>"><input type="hidden" name="acao" value="importar_padrao"><button class="btn btn-outline-primary"><i class="bi bi-cloud-download"></i> Importar biblioteca padrão</button></form><a href="?mod=modelos&novo=1" class="btn btn-primary"><i class="bi bi-plus-circle"></i> Novo modelo</a></div>
 </div>
 <?php if($mensagem): ?><div class="alert alert-success"><i class="bi bi-check-circle"></i> <?= htmlspecialchars($mensagem) ?></div><?php endif; ?>
 <?php if($erro): ?><div class="alert alert-danger"><i class="bi bi-exclamation-triangle"></i> <?= htmlspecialchars($erro) ?></div><?php endif; ?>

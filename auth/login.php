@@ -739,6 +739,13 @@ $logoLogin = '../' . $empresa->logoOficial();
         label { display:block; margin-bottom:7px; color:#344054; font-weight:700; }
         input[type="text"], input[type="password"] { width:100%; padding:13px 14px; border:1px solid #d0d5dd; border-radius:12px; font-size:15px; outline:none; transition:.2s; }
         input:focus { border-color:var(--secondary); box-shadow:0 0 0 4px rgba(13,110,253,.12); }
+        .password-wrapper { position:relative; }
+        .password-wrapper input { padding-right:58px; }
+        .password-toggle { position:absolute; right:10px; top:50%; transform:translateY(-50%); border:none; background:transparent; color:#667085; cursor:pointer; padding:0; display:flex; align-items:center; justify-content:center; width:34px; height:34px; }
+        .password-toggle:hover { color:var(--secondary); }
+        .password-toggle:focus { outline:none; box-shadow:none; }
+        .caps-lock-hint { display:none; color:#b54708; font-size:13px; margin-top:8px; }
+        .caps-lock-hint.show { display:block; }
         button { width:100%; padding:13px; background:linear-gradient(135deg, var(--secondary), var(--primary)); color:white; border:none; border-radius:12px; cursor:pointer; font-size:16px; font-weight:800; margin-top:8px; }
         .mensagem-erro { color:#842029; background:#f8d7da; border:1px solid #f5c2c7; padding:12px; border-radius:12px; margin-bottom:18px; text-align:center; }
         .powered { margin-top:24px; color:#667085; font-size:12px; text-align:center; }
@@ -759,20 +766,95 @@ $logoLogin = '../' . $empresa->logoOficial();
             <?php if ($mensagem_erro): ?>
                 <div class="mensagem-erro"><?= htmlspecialchars($mensagem_erro, ENT_QUOTES, 'UTF-8') ?></div>
             <?php endif; ?>
-            <form action="login.php" method="POST" autocomplete="on">
+            <form action="login.php" method="POST" autocomplete="off">
                 <input type="hidden" name="csrf_token" value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>">
                 <div class="form-group">
                     <label for="usuario">Usuário</label>
-                    <input type="text" id="usuario" name="usuario" maxlength="80" autocomplete="username" required autofocus>
+                    <input type="text" id="usuario" name="usuario" maxlength="80" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" required autofocus>
                 </div>
                 <div class="form-group">
                     <label for="senha">Senha</label>
-                    <input type="password" id="senha" name="senha" maxlength="1024" autocomplete="current-password" required>
+                    <div class="password-wrapper">
+                        <input type="password" id="senha" name="senha" maxlength="1024" value="" autocomplete="new-password" required>
+                        <button type="button" class="password-toggle" id="toggleSenha" aria-label="Mostrar senha" aria-pressed="false">
+                            <i class="bi bi-eye" id="toggleSenhaIcon"></i>
+                        </button>
+                    </div>
+                    <div class="caps-lock-hint" id="capsLockHint" role="status" aria-live="polite">Caps Lock está ativado.</div>
                 </div>
                 <button type="submit"><i class="bi bi-box-arrow-in-right"></i> Entrar</button>
             </form>
             <div class="powered"><?= htmlspecialchars($empresa->poweredBy(), ENT_QUOTES, 'UTF-8') ?></div>
         </section>
     </div>
+    <script>
+        function togglePassword() {
+            const senhaInput = document.getElementById('senha');
+            const toggleButton = document.getElementById('toggleSenha');
+            const toggleIcon = document.getElementById('toggleSenhaIcon');
+
+            if (!senhaInput || !toggleButton || !toggleIcon) {
+                return;
+            }
+
+            const isPassword = senhaInput.type === 'password';
+            senhaInput.type = isPassword ? 'text' : 'password';
+            toggleButton.setAttribute('aria-pressed', String(isPassword));
+            toggleIcon.className = isPassword ? 'bi bi-eye-slash' : 'bi bi-eye';
+        }
+
+        function clearLoginFields() {
+            const usuario = document.getElementById('usuario');
+            const senha = document.getElementById('senha');
+
+            if (usuario) {
+                usuario.value = '';
+            }
+
+            if (senha) {
+                senha.value = '';
+            }
+        }
+
+        function checkCapsLock(event) {
+            const hint = document.getElementById('capsLockHint');
+
+            if (!hint) {
+                return;
+            }
+
+            const isCapsOn = event && typeof event.getModifierState === 'function'
+                ? event.getModifierState('CapsLock')
+                : false;
+
+            hint.classList.toggle('show', Boolean(isCapsOn));
+        }
+
+        window.addEventListener('load', function () {
+            clearLoginFields();
+
+            const senhaInput = document.getElementById('senha');
+
+            if (senhaInput) {
+                senhaInput.addEventListener('keydown', checkCapsLock);
+                senhaInput.addEventListener('keyup', checkCapsLock);
+                senhaInput.addEventListener('blur', function () {
+                    const hint = document.getElementById('capsLockHint');
+
+                    if (hint) {
+                        hint.classList.remove('show');
+                    }
+                });
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', function () {
+            const toggleButton = document.getElementById('toggleSenha');
+
+            if (toggleButton) {
+                toggleButton.addEventListener('click', togglePassword);
+            }
+        });
+    </script>
 </body>
 </html>

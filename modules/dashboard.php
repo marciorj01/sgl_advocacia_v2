@@ -1,6 +1,6 @@
 <?php
 /**
- * Dashboard Executivo — SGL Advocacia
+ * Dashboard Executivo — ROJEX.AI
  * Fase 2.1
  *
  * Objetivo: apresentar indicadores reais do escritório sem expor erros técnicos

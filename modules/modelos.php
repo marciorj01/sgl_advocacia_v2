@@ -1,6 +1,6 @@
 <?php
 /**
- * SGL Advocacia - Fase 4.1
+ * ROJEX.AI ERP Jurídico Enterprise - Fase 4.1
  * Biblioteca Jurídica Profissional: modelos, variáveis, favoritos, versionamento e geração.
  */
 $conn = conectar();

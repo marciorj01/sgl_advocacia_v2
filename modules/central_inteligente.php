@@ -56,7 +56,7 @@ if (!function_exists('sgl_ci_rows')) {
     function sgl_ci_rows(mysqli $conn, string $sql): array {
         $res = $conn->query($sql);
         if (!$res) {
-            error_log('[SGL Central Inteligente] ' . $conn->error . ' | ' . $sql);
+            error_log('[ROJEX Central Inteligente] ' . $conn->error . ' | ' . $sql);
             return [];
         }
         $rows = [];
@@ -68,7 +68,7 @@ if (!function_exists('sgl_ci_scalar')) {
     function sgl_ci_scalar(mysqli $conn, string $sql): float {
         $res = $conn->query($sql);
         if (!$res) {
-            error_log('[SGL Central Inteligente scalar] ' . $conn->error . ' | ' . $sql);
+            error_log('[ROJEX Central Inteligente scalar] ' . $conn->error . ' | ' . $sql);
             return 0;
         }
         $row = $res->fetch_assoc();

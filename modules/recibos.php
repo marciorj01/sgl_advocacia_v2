@@ -34,9 +34,9 @@ function sglReciboEscritorioId(): int {
         ? (int)rojexEscritorioId()
         : (int)($_SESSION['escritorio_id'] ?? 0);
 }
-function hRec($v): string { return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8'); }
-function brlRec($v): string { return 'R$ ' . number_format((float)($v ?? 0), 2, ',', '.'); }
-function dataRec($d): string { return empty($d) ? '-' : date('d/m/Y', strtotime($d)); }
+function hRec(mixed $v): string { return htmlspecialchars((string)($v ?? ''), ENT_QUOTES, 'UTF-8'); }
+function brlRec(mixed $v): string { return 'R$ ' . number_format((float)($v ?? 0), 2, ',', '.'); }
+function dataRec(mixed $d): string { return empty($d) ? '-' : date('d/m/Y', strtotime($d)); }
 function brlParaFloatRec(string $valor): float {
     $v = trim(str_replace(['R$', ' '], '', $valor));
     if ($v === '') return 0.0;

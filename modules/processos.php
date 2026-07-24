@@ -34,7 +34,7 @@ $acao = $_GET['acao'] ?? 'listar';
 $msg  = '';
 
 if (!function_exists('h')) {
-    function h($v): string {
+    function h(mixed $v): string {
         return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
     }
 }
@@ -44,7 +44,7 @@ function gerarIdProcesso(mysqli $conn): string {
     $num = (int)substr($res->fetch_assoc()['id'], 3) + 1;
     return 'PRC' . str_pad((string)$num, 3, '0', STR_PAD_LEFT);
 }
-function brlParaFloat(string $valor): float {
+function brlParaFloat(mixed $valor): float {
     $v = trim(str_replace(['R$', ' '], '', $valor));
     if ($v === '') return 0.0;
     if (str_contains($v, ',')) $v = str_replace(',', '.', str_replace('.', '', $v));

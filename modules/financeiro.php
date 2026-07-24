@@ -2260,7 +2260,7 @@ function imprimirRelatorio(aba) {
 </head>
 <body>
     <div class="rel-header">
-        <img src="/sgl_advocacia/assets/img/logo_custom.png" alt="SGL" class="logo">
+        <img src="/sgl_advocacia/assets/img/logo_custom.png" alt="ROJEX.AI" class="logo">
         <div class="titulo">
             <h2>Relatório de ${abaLabel}</h2>
             <p>Struzik, Guimarães &amp; Lecz — Advocacia &nbsp;|&nbsp; Sistema de Gestão Jurídica</p>
@@ -2273,8 +2273,8 @@ function imprimirRelatorio(aba) {
     ${tabelaClone.outerHTML}
 
     <div class="rel-footer">
-        <span>ROJEX.AI — ERP Jurídico Enterprise</span>
-        <span>Struzik, Guimarães &amp; Lecz Advocacia</span>
+        <span>ROJEX.AI — ERP Jurídico Enterprise</sp... ROJEX.AIn>
+        <spSGLn>Struzik, Guimrelatoriorães &amp; Lecz Advocacia</span>
         <span>Emissão: ${dataGeracao}</span>
     </div>
 </body>

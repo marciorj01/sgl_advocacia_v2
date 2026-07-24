@@ -713,7 +713,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['transferir_banco'])) 
 }
 
 /* ======================================================
-   AJUSTE SGL: LIXEIRA SEGURA — CONTAS A PAGAR / RECEBER
+   AJUSTE ROJEX: LIXEIRA SEGURA — CONTAS A PAGAR / RECEBER
    (mesmo padrão usado em honorarios.php)
    ====================================================== */
 
@@ -2273,7 +2273,7 @@ function imprimirRelatorio(aba) {
     ${tabelaClone.outerHTML}
 
     <div class="rel-footer">
-        <span>SGL — Sistema de Gestão Jurídica</span>
+        <span>ROJEX.AI — ERP Jurídico Enterprise</span>
         <span>Struzik, Guimarães &amp; Lecz Advocacia</span>
         <span>Emissão: ${dataGeracao}</span>
     </div>

@@ -143,7 +143,7 @@ if (!function_exists('rojexModulosPlataformaPorPerfil')) {
             'Operador ROJEX' => ['master_saas', 'configuracoes'],
             'Auditor ROJEX' => ['master_saas', 'configuracoes'],
             default => rojexEhMasterSaas()
-                ? ['master_saas', 'configuracoes']
+                ? ['master_saas', 'financeiro_saas', 'configuracoes']
                 : [],
         };
     }
@@ -216,6 +216,7 @@ $modulos_validos = [
     'modelos',
     'configuracoes',
     'master_saas',
+    'financeiro_saas',
     'busca',
     'cij',
 ];
@@ -291,6 +292,7 @@ $titulos = [
     'modelos' => 'Modelos Jurídicos',
     'configuracoes' => 'Configurações',
     'master_saas' => 'MASTER SaaS',
+    'financeiro_saas' => 'Financeiro SaaS',
     'busca' => 'Busca Global',
     'cij' => 'Centro de Inteligência Jurídica',
 ];
@@ -669,6 +671,12 @@ function sgl_link_active(?string $atual, string $item): string {
                     </a>
                 <?php endif; ?>
 
+                <?php if (rojexPodeAcessarModulo('financeiro_saas')): ?>
+                    <a href="?mod=financeiro_saas" class="nav-link <?= sgl_link_active((string)$modulo, 'financeiro_saas') ?>">
+                        <i class="bi bi-graph-up-arrow"></i> Financeiro SaaS
+                    </a>
+                <?php endif; ?>
+
                 <?php if (rojexPodeAcessarModulo('configuracoes')): ?>
                     <div class="sgl-menu-title">Administração Enterprise</div>
                     <a href="?mod=configuracoes" class="nav-link <?= sgl_link_active((string)$modulo, 'configuracoes') ?>">
@@ -790,7 +798,7 @@ function sgl_link_active(?string $atual, string $item): string {
 
         <?php
         $moduloExigeTenant = $modulo !== null
-            && !in_array($modulo, ['master_saas', 'configuracoes'], true);
+            && !in_array($modulo, ['master_saas', 'financeiro_saas', 'configuracoes'], true);
 
         if ($acessoModuloBloqueado || $modulo === null) {
             http_response_code(403);

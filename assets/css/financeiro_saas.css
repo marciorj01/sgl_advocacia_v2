@@ -1,0 +1,103 @@
+.fs-dashboard-header {
+    background: linear-gradient(135deg, #123a5a 0%, #1f5f91 100%);
+    color: #fff;
+    border-radius: 1rem;
+    padding: 1.35rem;
+    box-shadow: 0 10px 30px rgba(18, 58, 90, .16);
+}
+
+.fs-filter-card,
+.fs-kpi-card,
+.fs-chart-card,
+.fs-table-card {
+    border: 0;
+    border-radius: .9rem;
+    box-shadow: 0 6px 22px rgba(18, 58, 90, .08);
+}
+
+.fs-kpi-card {
+    height: 100%;
+    overflow: hidden;
+    position: relative;
+}
+
+.fs-kpi-card::after {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 4px;
+    background: var(--bs-primary);
+}
+
+.fs-kpi-card.fs-success::after { background: var(--bs-success); }
+.fs-kpi-card.fs-danger::after { background: var(--bs-danger); }
+.fs-kpi-card.fs-warning::after { background: var(--bs-warning); }
+.fs-kpi-card.fs-info::after { background: var(--bs-info); }
+
+.fs-kpi-icon {
+    width: 42px;
+    height: 42px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: .75rem;
+    background: rgba(47, 124, 192, .12);
+    font-size: 1.15rem;
+}
+
+.fs-kpi-title {
+    color: var(--bs-secondary-color);
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .035em;
+    font-weight: 700;
+}
+
+.fs-kpi-value {
+    font-size: clamp(1.05rem, 2vw, 1.45rem);
+    font-weight: 800;
+    line-height: 1.15;
+    overflow-wrap: anywhere;
+}
+
+.fs-chart-wrap {
+    position: relative;
+    min-height: 320px;
+    height: 320px;
+}
+
+.fs-chart-card .card-header,
+.fs-table-card .card-header {
+    background: transparent;
+    border-bottom: 1px solid var(--bs-border-color);
+    font-weight: 700;
+}
+
+.fs-empty {
+    min-height: 260px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--bs-secondary-color);
+    text-align: center;
+    padding: 2rem;
+}
+
+@media (max-width: 575.98px) {
+    .fs-dashboard-header {
+        padding: 1rem;
+    }
+
+    .fs-chart-wrap {
+        min-height: 280px;
+        height: 280px;
+    }
+
+    .fs-filter-actions {
+        width: 100%;
+    }
+
+    .fs-filter-actions .btn {
+        width: 100%;
+    }
+}

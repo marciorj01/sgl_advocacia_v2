@@ -445,6 +445,9 @@ function sgl_link_active(?string $atual, string $item): string {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
     <link href="assets/css/style.css" rel="stylesheet">
+    <?php if ($modulo === 'financeiro_saas'): ?>
+        <link href="assets/css/financeiro_saas.css?v=<?= is_file(__DIR__ . '/assets/css/financeiro_saas.css') ? (string)filemtime(__DIR__ . '/assets/css/financeiro_saas.css') : '1' ?>" rel="stylesheet">
+    <?php endif; ?>
     <?php require_once __DIR__ . '/config/tema.php'; ?>
     <style>
         :root { --sgl-sidebar-width: 238px; }
@@ -820,6 +823,10 @@ function sgl_link_active(?string $atual, string $item): string {
     </main>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<?php if ($modulo === 'financeiro_saas'): ?>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="assets/js/financeiro_saas.js?v=<?= is_file(__DIR__ . '/assets/js/financeiro_saas.js') ? (string)filemtime(__DIR__ . '/assets/js/financeiro_saas.js') : '1' ?>"></script>
+<?php endif; ?>
 <script src="assets/js/main.js"></script>
 <script>
 (() => {

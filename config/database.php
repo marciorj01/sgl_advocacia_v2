@@ -228,7 +228,7 @@ if (!defined('DB_NAME')) {
         'DB_NAME',
         (string)rojex_env(
             ['ROJEX_DB_NAME', 'SGL_DB_NAME'],
-            $ambienteLocal ? 'sistema_sgl_novo' : 'ALTERE_BANCO_HOSTINGER'
+            $ambienteLocal ? 'rojex_ai_validacao' : 'ALTERE_BANCO_HOSTINGER'
         )
     );
 }

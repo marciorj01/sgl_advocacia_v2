@@ -516,6 +516,107 @@ function rojex_motor_comercial_calcular(
     ];
 }
 
+
+/**
+ * Aplica benefício comercial ao valor calculado do plano.
+ *
+ * Não grava no banco. Todos os valores são recalculados no backend e
+ * novamente durante o provisionamento definitivo.
+ *
+ * @return array<string,mixed>
+ */
+function rojex_aplicar_beneficio_comercial(
+    array $comercial,
+    array $beneficio
+): array {
+    $tiposPermitidos = [
+        'nenhum',
+        'cliente_piloto',
+        'cliente_fundador',
+        'parceiro_estrategico',
+        'uso_interno',
+        'demonstracao',
+        'cortesia',
+        'isencao_temporaria',
+        'isencao_permanente',
+        'desconto_percentual',
+        'desconto_fixo',
+    ];
+
+    $tipo = strtolower(trim((string)($beneficio['tipo'] ?? 'nenhum')));
+    if (!in_array($tipo, $tiposPermitidos, true)) {
+        $tipo = 'nenhum';
+    }
+
+    $valorAntesBeneficio = round(max(0, (float)($comercial['valor_final'] ?? 0)), 2);
+    $percentual = round(max(0, min(100, (float)($beneficio['percentual'] ?? 0))), 2);
+    $valorFixo = round(max(0, (float)($beneficio['valor_fixo'] ?? 0)), 2);
+    $motivo = sgl_limpar_texto((string)($beneficio['motivo'] ?? ''), 500);
+    $inicio = preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($beneficio['inicio'] ?? ''))
+        ? (string)$beneficio['inicio']
+        : date('Y-m-d');
+    $fim = preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($beneficio['fim'] ?? ''))
+        ? (string)$beneficio['fim']
+        : '';
+
+    $tiposIsencaoTotal = [
+        'cliente_piloto',
+        'uso_interno',
+        'demonstracao',
+        'cortesia',
+        'isencao_temporaria',
+        'isencao_permanente',
+    ];
+
+    $descontoBeneficio = 0.0;
+    if (in_array($tipo, $tiposIsencaoTotal, true)) {
+        $descontoBeneficio = $valorAntesBeneficio;
+        $percentual = 100.0;
+        $valorFixo = $valorAntesBeneficio;
+    } elseif ($tipo === 'desconto_percentual') {
+        $descontoBeneficio = round($valorAntesBeneficio * ($percentual / 100), 2);
+        $valorFixo = $descontoBeneficio;
+    } elseif ($tipo === 'desconto_fixo') {
+        $descontoBeneficio = min($valorAntesBeneficio, $valorFixo);
+        $percentual = $valorAntesBeneficio > 0
+            ? round(($descontoBeneficio / $valorAntesBeneficio) * 100, 2)
+            : 0.0;
+    } elseif (in_array($tipo, ['cliente_fundador', 'parceiro_estrategico'], true)) {
+        // Essas categorias podem ter desconto percentual ou fixo definido pelo MASTER.
+        if ($percentual > 0) {
+            $descontoBeneficio = round($valorAntesBeneficio * ($percentual / 100), 2);
+            $valorFixo = $descontoBeneficio;
+        } elseif ($valorFixo > 0) {
+            $descontoBeneficio = min($valorAntesBeneficio, $valorFixo);
+            $percentual = $valorAntesBeneficio > 0
+                ? round(($descontoBeneficio / $valorAntesBeneficio) * 100, 2)
+                : 0.0;
+        }
+    }
+
+    $descontoBeneficio = round(min($valorAntesBeneficio, max(0, $descontoBeneficio)), 2);
+    $valorContratado = round(max(0, $valorAntesBeneficio - $descontoBeneficio), 2);
+
+    $comercial['valor_antes_beneficio'] = $valorAntesBeneficio;
+    $comercial['beneficio_tipo'] = $tipo;
+    $comercial['beneficio_percentual'] = $percentual;
+    $comercial['beneficio_valor'] = $descontoBeneficio;
+    $comercial['beneficio_motivo'] = $motivo;
+    $comercial['beneficio_inicio'] = $inicio;
+    $comercial['beneficio_fim'] = $fim;
+    $comercial['cobra_hospedagem'] = !empty($beneficio['cobra_hospedagem']);
+    $comercial['cobra_api_ia'] = !empty($beneficio['cobra_api_ia']);
+    $comercial['valor_final'] = $valorContratado;
+    $comercial['economia'] = round(
+        max(0, (float)($comercial['valor_base'] ?? 0) - $valorContratado),
+        2
+    );
+    $comercial['mensalidade_isenta'] = $valorContratado <= 0.0;
+    $comercial['anuidade_isenta'] = $valorContratado <= 0.0;
+
+    return $comercial;
+}
+
 function sgl_select_count(mysqli $conn, string $sql): int {
     try {
         $res = $conn->query($sql);
@@ -5164,13 +5265,83 @@ if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
     $dadosAssistente = $_SESSION['rojex_novo_escritorio'] ?? [];
 
     if ($etapaAssistente === 1) {
-        $nomeFantasia = sgl_limpar_texto((string)($_POST['assistente_nome_fantasia'] ?? ''), 180);
-        $razaoSocial = sgl_limpar_texto((string)($_POST['assistente_razao_social'] ?? ''), 180);
-        $documento = preg_replace('/\D+/', '', (string)($_POST['assistente_documento'] ?? ''));
-        $responsavel = sgl_limpar_texto((string)($_POST['assistente_responsavel'] ?? ''), 140);
-        $email = strtolower(sgl_limpar_texto((string)($_POST['assistente_email'] ?? ''), 140));
-        $telefone = sgl_limpar_texto((string)($_POST['assistente_telefone'] ?? ''), 40);
-        $cidade = sgl_limpar_texto((string)($_POST['assistente_cidade'] ?? ''), 100);
+        $nomeFantasia = sgl_limpar_texto(
+            (string)($_POST['assistente_nome_fantasia'] ?? ''),
+            180
+        );
+
+        $razaoSocial = sgl_limpar_texto(
+            (string)($_POST['assistente_razao_social'] ?? ''),
+            180
+        );
+
+        $documento = preg_replace(
+            '/\D+/',
+            '',
+            (string)($_POST['assistente_documento'] ?? '')
+        );
+
+        $responsavel = sgl_limpar_texto(
+            (string)($_POST['assistente_responsavel'] ?? ''),
+            140
+        );
+
+        $email = strtolower(
+            sgl_limpar_texto(
+                (string)($_POST['assistente_email'] ?? ''),
+                140
+            )
+        );
+
+        $telefone = substr(
+            preg_replace(
+                '/\D+/',
+                '',
+                (string)($_POST['assistente_telefone'] ?? '')
+            ),
+            0,
+            11
+        );
+
+        $whatsapp = substr(
+            preg_replace(
+                '/\D+/',
+                '',
+                (string)($_POST['assistente_whatsapp'] ?? '')
+            ),
+            0,
+            11
+        );
+
+        $cep = preg_replace('/\D+/', '', (string)($_POST['assistente_cep'] ?? ''));
+        $endereco = sgl_limpar_texto((string)($_POST['assistente_endereco'] ?? ''), 180);
+        $numero = sgl_limpar_texto((string)($_POST['assistente_numero'] ?? ''), 20);
+        $bairro = sgl_limpar_texto((string)($_POST['assistente_bairro'] ?? ''), 120);
+        $complemento = sgl_limpar_texto((string)($_POST['assistente_complemento'] ?? ''), 120);
+        $cidade = sgl_limpar_texto(
+            (string)($_POST['assistente_cidade'] ?? ''),
+            100
+        );
+
+        $classificacaoCliente = strtolower((string)($_POST['assistente_classificacao_cliente'] ?? 'piloto'));
+        $classificacoesPermitidas = ['comercial', 'piloto', 'fundador', 'parceiro', 'interno', 'demonstracao', 'outro'];
+        if (!in_array($classificacaoCliente, $classificacoesPermitidas, true)) {
+            $classificacaoCliente = 'comercial';
+        }
+
+        $tipoClienteOutro = sgl_limpar_texto((string)($_POST['assistente_tipo_cliente_outro'] ?? ''), 100);
+        if ($classificacaoCliente === 'outro' && $tipoClienteOutro === '') {
+            rojex_redirect_assistente(1, 'erro', 'Descreva a classificação comercial selecionada.');
+        }
+        if ($classificacaoCliente !== 'outro') {
+            $tipoClienteOutro = '';
+        }
+
+        $condicoesEspeciais = sgl_limpar_texto((string)($_POST['assistente_condicoes_especiais'] ?? ''), 500);
+        $representante = sgl_limpar_texto((string)($_POST['assistente_representante'] ?? ''), 140);
+        $aceiteOperacional = !empty($_POST['assistente_aceite_operacional']);
+        $aceiteAssistido = !empty($_POST['assistente_aceite_assistido']);
+
         $uf = strtoupper(sgl_limpar_texto((string)($_POST['assistente_uf'] ?? ''), 2));
         $tenant = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($_POST['assistente_tenant'] ?? '')));
         $subdominio = strtolower(preg_replace('/[^a-z0-9-]/i', '', (string)($_POST['assistente_subdominio'] ?? '')));
@@ -5183,6 +5354,18 @@ if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
         }
         if (!in_array(strlen($documento), [11,14], true)) {
             rojex_redirect_assistente(1, 'erro', 'Informe um CPF ou CNPJ válido em quantidade de dígitos.');
+        }
+        if ($telefone !== '' && !in_array(strlen($telefone), [10, 11], true)) {
+            rojex_redirect_assistente(1, 'erro', 'Informe um telefone válido com DDD.');
+        }
+        if ($whatsapp !== '' && !in_array(strlen($whatsapp), [10, 11], true)) {
+            rojex_redirect_assistente(1, 'erro', 'Informe um WhatsApp válido com DDD.');
+        }
+        if ($cep !== '' && strlen($cep) !== 8) {
+            rojex_redirect_assistente(1, 'erro', 'Informe um CEP válido com 8 dígitos.');
+        }
+        if ($cep === '' || $endereco === '' || $numero === '' || $bairro === '' || $cidade === '' || $uf === '') {
+            rojex_redirect_assistente(1, 'erro', 'Preencha o endereço completo para continuar.');
         }
         if ($tenant === '') {
             $baseTenant = preg_replace('/[^A-Z0-9]+/', '-', strtoupper(iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $nomeFantasia) ?: $nomeFantasia));
@@ -5207,7 +5390,62 @@ if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
             rojex_redirect_assistente(1, 'erro', 'Não foi possível concluir a validação de duplicidade.');
         }
 
-        $dadosAssistente['escritorio'] = compact('nomeFantasia','razaoSocial','documento','responsavel','email','telefone','cidade','uf','tenant','subdominio');
+        $evidenciaAssistente = hash(
+            'sha256',
+            json_encode(
+                [
+                    'nomeFantasia' => $nomeFantasia,
+                    'razaoSocial' => $razaoSocial,
+                    'documento' => $documento,
+                    'responsavel' => $responsavel,
+                    'email' => $email,
+                    'telefone' => $telefone,
+                    'whatsapp' => $whatsapp,
+                    'cep' => $cep,
+                    'endereco' => $endereco,
+                    'numero' => $numero,
+                    'bairro' => $bairro,
+                    'complemento' => $complemento,
+                    'cidade' => $cidade,
+                    'uf' => $uf,
+                    'classificacaoCliente' => $classificacaoCliente,
+                    'tipoClienteOutro' => $tipoClienteOutro,
+                    'condicoesEspeciais' => $condicoesEspeciais,
+                    'representante' => $representante,
+                    'aceiteOperacional' => $aceiteOperacional ? 1 : 0,
+                    'aceiteAssistido' => $aceiteAssistido ? 1 : 0,
+                    'tenant' => $tenant,
+                    'subdominio' => $subdominio,
+                ],
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            )
+        );
+
+        $dadosAssistente['escritorio'] = compact(
+            'nomeFantasia',
+            'razaoSocial',
+            'documento',
+            'responsavel',
+            'email',
+            'telefone',
+            'whatsapp',
+            'cep',
+            'endereco',
+            'numero',
+            'bairro',
+            'complemento',
+            'cidade',
+            'uf',
+            'classificacaoCliente',
+            'tipoClienteOutro',
+            'condicoesEspeciais',
+            'representante',
+            'aceiteOperacional',
+            'aceiteAssistido',
+            'evidenciaAssistente',
+            'tenant',
+            'subdominio'
+        );
         $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
         rojex_redirect_assistente(2, 'sucesso', 'Dados do escritório validados.');
     }
@@ -5216,6 +5454,49 @@ if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
         $planoId = max(0, (int)($_POST['assistente_plano_id'] ?? 0));
         $periodicidade = (string)($_POST['assistente_periodicidade'] ?? 'mensal');
         if (!in_array($periodicidade, ['mensal','anual'], true)) $periodicidade = 'mensal';
+
+        $beneficioTipo = strtolower(trim((string)($_POST['assistente_beneficio_tipo'] ?? 'nenhum')));
+        $beneficiosPermitidos = [
+            'nenhum','cliente_piloto','cliente_fundador','parceiro_estrategico',
+            'uso_interno','demonstracao','cortesia','isencao_temporaria',
+            'isencao_permanente','desconto_percentual','desconto_fixo'
+        ];
+        if (!in_array($beneficioTipo, $beneficiosPermitidos, true)) {
+            $beneficioTipo = 'nenhum';
+        }
+
+        $beneficioPercentual = round(max(0, min(100, (float)str_replace(',', '.', (string)($_POST['assistente_beneficio_percentual'] ?? '0')))), 2);
+        $beneficioValorFixo = round(max(0, (float)str_replace(',', '.', (string)($_POST['assistente_beneficio_valor_fixo'] ?? '0'))), 2);
+        $beneficioMotivo = sgl_limpar_texto((string)($_POST['assistente_beneficio_motivo'] ?? ''), 500);
+        $beneficioInicio = (string)($_POST['assistente_beneficio_inicio'] ?? date('Y-m-d'));
+        $beneficioFim = (string)($_POST['assistente_beneficio_fim'] ?? '');
+        $cobraHospedagem = !empty($_POST['assistente_cobra_hospedagem']);
+        $cobraApiIa = !empty($_POST['assistente_cobra_api_ia']);
+
+        if ($beneficioTipo !== 'nenhum' && $beneficioMotivo === '') {
+            rojex_redirect_assistente(2, 'erro', 'Informe o motivo do benefício comercial.');
+        }
+        if ($beneficioTipo === 'isencao_temporaria' && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $beneficioFim)) {
+            rojex_redirect_assistente(2, 'erro', 'Informe a data final da isenção temporária.');
+        }
+        if ($beneficioTipo === 'desconto_percentual' && $beneficioPercentual <= 0) {
+            rojex_redirect_assistente(2, 'erro', 'Informe um desconto percentual maior que zero.');
+        }
+        if ($beneficioTipo === 'desconto_fixo' && $beneficioValorFixo <= 0) {
+            rojex_redirect_assistente(2, 'erro', 'Informe um desconto fixo maior que zero.');
+        }
+
+        $beneficio = [
+            'tipo' => $beneficioTipo,
+            'percentual' => $beneficioPercentual,
+            'valor_fixo' => $beneficioValorFixo,
+            'motivo' => $beneficioMotivo,
+            'inicio' => preg_match('/^\d{4}-\d{2}-\d{2}$/', $beneficioInicio) ? $beneficioInicio : date('Y-m-d'),
+            'fim' => preg_match('/^\d{4}-\d{2}-\d{2}$/', $beneficioFim) ? $beneficioFim : '',
+            'cobra_hospedagem' => $cobraHospedagem,
+            'cobra_api_ia' => $cobraApiIa,
+        ];
+
         try {
             $stmt = $conn->prepare("SELECT * FROM planos_saas WHERE id=? AND ativo=1 LIMIT 1");
             $stmt->bind_param('i', $planoId);
@@ -5223,7 +5504,12 @@ if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
             $plano = $stmt->get_result()->fetch_assoc();
             $stmt->close();
             if (!$plano) rojex_redirect_assistente(2, 'erro', 'Selecione um plano comercial ativo.');
-            $dadosAssistente['plano'] = ['id'=>$planoId,'periodicidade'=>$periodicidade,'snapshot'=>$plano];
+            $dadosAssistente['plano'] = [
+                'id'=>$planoId,
+                'periodicidade'=>$periodicidade,
+                'snapshot'=>$plano,
+                'beneficio'=>$beneficio,
+            ];
             $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
             rojex_redirect_assistente(3, 'sucesso', 'Plano comercial selecionado.');
         } catch (Throwable $e) {
@@ -5275,6 +5561,10 @@ if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
                 $modulosComerciais,
                 $selecionados,
                 0.0
+            );
+            $motorComercial = rojex_aplicar_beneficio_comercial(
+                $motorComercial,
+                (array)($dadosAssistente['plano']['beneficio'] ?? [])
             );
 
             $dadosAssistente['modulos'] = $selecionados;
@@ -5374,9 +5664,53 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
     $documento = preg_replace('/\D+/', '', (string)($escritorio['documento'] ?? ''));
     $responsavel = sgl_limpar_texto((string)($escritorio['responsavel'] ?? ''), 140);
     $emailEscritorio = strtolower(sgl_limpar_texto((string)($escritorio['email'] ?? ''), 140));
-    $telefone = sgl_limpar_texto((string)($escritorio['telefone'] ?? ''), 40);
+    $telefone = substr(
+        preg_replace(
+            '/\D+/',
+            '',
+            (string)($escritorio['telefone'] ?? '')
+        ),
+        0,
+        11
+    );
+    $whatsapp = substr(
+        preg_replace(
+            '/\D+/',
+            '',
+            (string)($escritorio['whatsapp'] ?? '')
+        ),
+        0,
+        11
+    );
+    $cep = preg_replace('/\D+/', '', (string)($escritorio['cep'] ?? ''));
+    $endereco = sgl_limpar_texto((string)($escritorio['endereco'] ?? ''), 180);
+    $numero = sgl_limpar_texto((string)($escritorio['numero'] ?? ''), 20);
+    $bairro = sgl_limpar_texto((string)($escritorio['bairro'] ?? ''), 120);
+    $complemento = sgl_limpar_texto((string)($escritorio['complemento'] ?? ''), 120);
     $cidade = sgl_limpar_texto((string)($escritorio['cidade'] ?? ''), 100);
     $uf = strtoupper(sgl_limpar_texto((string)($escritorio['uf'] ?? ''), 2));
+    $classificacaoCliente = strtolower((string)($escritorio['classificacaoCliente'] ?? 'comercial'));
+    $classificacoesPermitidas = ['comercial', 'piloto', 'fundador', 'parceiro', 'interno', 'demonstracao', 'outro'];
+    if (!in_array($classificacaoCliente, $classificacoesPermitidas, true)) {
+        $classificacaoCliente = 'comercial';
+    }
+    $tipoClienteOutro = sgl_limpar_texto((string)($escritorio['tipoClienteOutro'] ?? ''), 100);
+    if ($classificacaoCliente === 'outro' && $tipoClienteOutro === '') {
+        rojex_redirect_assistente(1, 'erro', 'Descreva a classificação comercial selecionada.');
+    }
+    if ($classificacaoCliente !== 'outro') {
+        $tipoClienteOutro = '';
+    }
+    $condicoesEspeciais = sgl_limpar_texto((string)($escritorio['condicoesEspeciais'] ?? ''), 500);
+
+    $aceiteModo = (string)($_POST['assistente_aceite_modo'] ?? '');
+    if (!in_array($aceiteModo, ['cliente_direto', 'master_assistido'], true)) {
+        rojex_redirect_assistente(6, 'erro', 'Selecione o modo de aceite operacional.');
+    }
+    $representante = sgl_limpar_texto((string)($_POST['assistente_representante'] ?? ''), 140);
+    $aceiteOperacional = !empty($_POST['assistente_aceite_operacional']);
+    $aceiteAssistido = !empty($_POST['assistente_aceite_assistido']);
+    $evidenciaAssistente = '';
     $tenant = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($escritorio['tenant'] ?? '')));
     $subdominio = strtolower(preg_replace('/[^a-z0-9-]/i', '', (string)($escritorio['subdominio'] ?? '')));
     $planoId = max(0, (int)($planoSessao['id'] ?? 0));
@@ -5388,6 +5722,52 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
     $adminSenhaHash = (string)($administrador['senha_hash'] ?? '');
     $adminIdioma = in_array((string)($administrador['idioma'] ?? 'pt-BR'), ['pt-BR','en-US','es-ES'], true) ? (string)$administrador['idioma'] : 'pt-BR';
     $adminFuso = sgl_limpar_texto((string)($administrador['fuso'] ?? 'America/Sao_Paulo'), 80);
+
+    if ($nomeFantasia === '' || $razaoSocial === '' || !in_array(strlen($documento), [11,14], true)
+        || !filter_var($emailEscritorio, FILTER_VALIDATE_EMAIL) || $tenant === '' || $subdominio === ''
+        || $planoId <= 0 || $adminNome === '' || $adminLogin === '' || !filter_var($adminEmail, FILTER_VALIDATE_EMAIL)
+        || !password_get_info($adminSenhaHash)['algo']) {
+        rojex_redirect_assistente(6, 'erro', 'Os dados finais não passaram na revalidação de segurança. Revise o assistente.');
+    }
+
+    if ($cep === '' || $endereco === '' || $numero === '' || $bairro === '' || $cidade === '' || $uf === '') {
+        rojex_redirect_assistente(6, 'erro', 'Endereço incompleto. Preencha CEP, logradouro, número, bairro, cidade e estado.');
+    }
+
+    if ($representante === '') {
+        rojex_redirect_assistente(6, 'erro', 'Informe o representante responsável pelo aceite.');
+    }
+
+    if (!$aceiteOperacional) {
+        rojex_redirect_assistente(6, 'erro', 'É necessário confirmar o aceite operacional.');
+    }
+
+    if ($aceiteModo === 'master_assistido' && !$aceiteAssistido) {
+        rojex_redirect_assistente(6, 'erro', 'A autorização expressa é obrigatória no aceite assistido pelo MASTER.');
+    }
+
+    if ($evidenciaAssistente === '') {
+        $evidenciaAssistente = hash(
+            'sha256',
+            json_encode(
+                [
+                    'nomeFantasia' => $nomeFantasia,
+                    'razaoSocial' => $razaoSocial,
+                    'documento' => $documento,
+                    'representante' => $representante,
+                    'classificacaoCliente' => $classificacaoCliente,
+                    'tipoClienteOutro' => $tipoClienteOutro,
+                    'condicoesEspeciais' => $condicoesEspeciais,
+                    'aceiteModo' => $aceiteModo,
+                    'aceiteOperacional' => $aceiteOperacional ? 1 : 0,
+                    'aceiteAssistido' => $aceiteAssistido ? 1 : 0,
+                    'tenant' => $tenant,
+                    'subdominio' => $subdominio,
+                ],
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            )
+        );
+    }
 
     if ($nomeFantasia === '' || $razaoSocial === '' || !in_array(strlen($documento), [11,14], true)
         || !filter_var($emailEscritorio, FILTER_VALIDATE_EMAIL) || $tenant === '' || $subdominio === ''
@@ -5431,7 +5811,28 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
 
         $modulosSelecionados = array_values(array_intersect($modulosSelecionados, $idsPermitidos));
         $modulosSelecionados = array_values(array_unique(array_merge($modulosSelecionados, $idsObrigatorios)));
-        $comercialFinal = rojex_motor_comercial_calcular($planoAtual, $periodicidade, $modulosPlanoAtual, $modulosSelecionados, 0.0);
+        $comercialFinal = rojex_motor_comercial_calcular(
+            $planoAtual,
+            $periodicidade,
+            $modulosPlanoAtual,
+            $modulosSelecionados,
+            0.0
+        );
+        $beneficioFinal = (array)($planoSessao['beneficio'] ?? []);
+        $comercialFinal = rojex_aplicar_beneficio_comercial($comercialFinal, $beneficioFinal);
+
+        if (
+            (string)($comercialFinal['beneficio_tipo'] ?? 'nenhum') !== 'nenhum'
+            && trim((string)($comercialFinal['beneficio_motivo'] ?? '')) === ''
+        ) {
+            rojex_redirect_assistente(2, 'erro', 'O benefício comercial precisa de justificativa.');
+        }
+        if (
+            (string)($comercialFinal['beneficio_tipo'] ?? '') === 'isencao_temporaria'
+            && empty($comercialFinal['beneficio_fim'])
+        ) {
+            rojex_redirect_assistente(2, 'erro', 'A isenção temporária precisa de data final.');
+        }
 
         $conn->begin_transaction();
 
@@ -5468,7 +5869,7 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
         $valorBase = (float)$comercialFinal['valor_base'];
         $descontoModulos = (float)$comercialFinal['desconto_modulos'];
         $valorExtras = (float)$comercialFinal['valor_extras'];
-        $ajusteComercial = (float)$comercialFinal['ajuste_manual'];
+        $ajusteComercial = -1 * (float)($comercialFinal['beneficio_valor'] ?? 0);
         $valorContratado = (float)$comercialFinal['valor_final'];
         $stmt = $conn->prepare("INSERT INTO assinaturas_saas (escritorio_id,plano_id,periodicidade,valor_base,desconto_modulos,valor_extras,ajuste_comercial,valor_contratado,status,trial_inicio,trial_fim,inicio_vigencia,proximo_vencimento) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
         $stmt->bind_param('iisdddddsssss', $escritorioId, $planoId, $periodicidade, $valorBase, $descontoModulos, $valorExtras, $ajusteComercial, $valorContratado, $statusAssinatura, $inicio, $fimTrial, $inicio, $proximoVencimento);
@@ -5489,7 +5890,16 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
         $statusLicenca = 'teste';
         $limiteUsuarios = max(1, (int)($planoAtual['limite_usuarios_padrao'] ?? 1));
         $limiteArmazenamento = max(1, (int)($planoAtual['limite_armazenamento_gb_padrao'] ?? 1));
-        $observacoesLicenca = json_encode(['assinatura_id'=>$assinaturaId,'periodicidade'=>$periodicidade,'valor_contratado'=>$valorContratado,'trial_dias'=>$trialDias], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        $observacoesLicenca = json_encode([
+            'assinatura_id'=>$assinaturaId,
+            'periodicidade'=>$periodicidade,
+            'valor_oficial'=>(float)($comercialFinal['valor_antes_beneficio'] ?? $valorBase),
+            'valor_contratado'=>$valorContratado,
+            'beneficio_tipo'=>(string)($comercialFinal['beneficio_tipo'] ?? 'nenhum'),
+            'beneficio_valor'=>(float)($comercialFinal['beneficio_valor'] ?? 0),
+            'beneficio_percentual'=>(float)($comercialFinal['beneficio_percentual'] ?? 0),
+            'trial_dias'=>$trialDias
+        ], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
         $stmt = $conn->prepare("INSERT INTO licencas_saas (escritorio_id,chave_licenca,plano,status,limite_usuarios,limite_armazenamento_gb,ativada_em,renovacao_em,observacoes) VALUES (?,?,?,?,?,?,?,?,?)");
         $stmt->bind_param('isssiisss', $escritorioId, $chaveLicenca, $codigoPlano, $statusLicenca, $limiteUsuarios, $limiteArmazenamento, $inicio, $fimTrial, $observacoesLicenca);
         if (!$stmt->execute()) throw new RuntimeException('Falha ao criar a licença.');
@@ -5545,8 +5955,26 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
             'responsavel' => $responsavel,
             'email' => $emailEscritorio,
             'telefone' => $telefone,
+            'whatsapp' => $whatsapp,
+            'cep' => $cep,
+            'endereco' => $endereco,
+            'numero' => $numero,
+            'bairro' => $bairro,
+            'complemento' => $complemento,
             'cidade' => $cidade,
             'uf' => $uf,
+            'classificacao_cliente' => $classificacaoCliente,
+            'tipo_cliente_outro' => $tipoClienteOutro,
+            'condicoes_especiais' => $condicoesEspeciais,
+            'aceite_modo' => $aceiteModo,
+            'aceite_representante' => $representante,
+            'aceite_operacional' => $aceiteOperacional ? '1' : '0',
+            'aceite_assistido_master' => $aceiteAssistido ? '1' : '0',
+            'aceite_evidencia_sha256' => $evidenciaAssistente,
+            'representante' => $representante,
+            'aceite_operacional' => $aceiteOperacional ? '1' : '0',
+            'aceite_assistido' => $aceiteAssistido ? '1' : '0',
+            'evidencia_sha256' => $evidenciaAssistente,
             'tenant_id' => $tenant,
             'subdominio' => $subdominio,
             'timezone' => $adminFuso !== '' ? $adminFuso : $empresaBase->timezone(),
@@ -5555,6 +5983,18 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
             'cor_secundaria' => $empresaBase->corSecundaria(),
             'cor_accent' => $empresaBase->corAccent(),
             'plano_codigo' => $codigoPlano,
+            'valor_oficial_plano' => number_format((float)($comercialFinal['valor_antes_beneficio'] ?? $valorBase), 2, '.', ''),
+            'valor_contratado' => number_format($valorContratado, 2, '.', ''),
+            'beneficio_comercial_tipo' => (string)($comercialFinal['beneficio_tipo'] ?? 'nenhum'),
+            'beneficio_comercial_percentual' => number_format((float)($comercialFinal['beneficio_percentual'] ?? 0), 2, '.', ''),
+            'beneficio_comercial_valor' => number_format((float)($comercialFinal['beneficio_valor'] ?? 0), 2, '.', ''),
+            'beneficio_comercial_motivo' => (string)($comercialFinal['beneficio_motivo'] ?? ''),
+            'beneficio_comercial_inicio' => (string)($comercialFinal['beneficio_inicio'] ?? ''),
+            'beneficio_comercial_fim' => (string)($comercialFinal['beneficio_fim'] ?? ''),
+            'mensalidade_isenta' => !empty($comercialFinal['mensalidade_isenta']) ? '1' : '0',
+            'anuidade_isenta' => !empty($comercialFinal['anuidade_isenta']) ? '1' : '0',
+            'cobra_hospedagem' => !empty($comercialFinal['cobra_hospedagem']) ? '1' : '0',
+            'cobra_api_ia' => !empty($comercialFinal['cobra_api_ia']) ? '1' : '0',
             'licenca_chave' => $chaveLicenca,
         ];
         $stmtCfg = $conn->prepare("INSERT INTO escritorios_configuracoes_saas (escritorio_id,tenant_id,chave,valor) VALUES (?,?,?,?)");
@@ -5568,6 +6008,9 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
         sgl_log($conn, 'Provisionou novo escritório SaaS', 'escritorios_saas', (string)$escritorioId,
             'Tenant: ' . $tenant . '; Plano: ' . $codigoPlano . '; Assinatura: ' . $assinaturaId .
             '; Licença: ' . $licencaId . '; Administrador: ' . $usuarioAdminId . '; Módulos: ' . count($modulosSelecionados) .
+            '; Benefício: ' . (string)($comercialFinal['beneficio_tipo'] ?? 'nenhum') .
+            '; Valor oficial: R$ ' . number_format((float)($comercialFinal['valor_antes_beneficio'] ?? $valorBase), 2, ',', '.') .
+            '; Desconto comercial: R$ ' . number_format((float)($comercialFinal['beneficio_valor'] ?? 0), 2, ',', '.') .
             '; Valor contratado: R$ ' . number_format($valorContratado, 2, ',', '.'));
 
         $conn->commit();
@@ -9406,6 +9849,10 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
         $assistenteModulosSelecionados,
         (float)($assistenteComercial['ajuste_manual'] ?? 0)
     );
+    $assistenteComercial = rojex_aplicar_beneficio_comercial(
+        $assistenteComercial,
+        (array)($assistentePlano['beneficio'] ?? [])
+    );
 }
 ?>
 <style>
@@ -9423,23 +9870,95 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
   </div>
 
   <?php if($assistenteEtapa===1): ?>
-  <form method="post" class="row g-3"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="1">
-   <div class="col-md-6"><label class="form-label">Nome Fantasia *</label><input name="assistente_nome_fantasia" class="form-control" required maxlength="180" value="<?=htmlspecialchars((string)($assistenteEscritorio['nomeFantasia']??''))?>"></div>
-   <div class="col-md-6"><label class="form-label">Razão Social *</label><input name="assistente_razao_social" class="form-control" required maxlength="180" value="<?=htmlspecialchars((string)($assistenteEscritorio['razaoSocial']??''))?>"></div>
-   <div class="col-md-4"><label class="form-label">CPF/CNPJ *</label><input name="assistente_documento" class="form-control" required maxlength="20" value="<?=htmlspecialchars((string)($assistenteEscritorio['documento']??''))?>"></div>
-   <div class="col-md-4"><label class="form-label">Responsável *</label><input name="assistente_responsavel" class="form-control" required value="<?=htmlspecialchars((string)($assistenteEscritorio['responsavel']??''))?>"></div>
-   <div class="col-md-4"><label class="form-label">E-mail *</label><input type="email" name="assistente_email" class="form-control" required value="<?=htmlspecialchars((string)($assistenteEscritorio['email']??''))?>"></div>
-   <div class="col-md-3"><label class="form-label">Telefone</label><input name="assistente_telefone" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['telefone']??''))?>"></div>
-   <div class="col-md-3"><label class="form-label">Cidade</label><input name="assistente_cidade" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['cidade']??''))?>"></div>
-   <div class="col-md-2"><label class="form-label">Estado</label><input name="assistente_uf" class="form-control text-uppercase" maxlength="2" value="<?=htmlspecialchars((string)($assistenteEscritorio['uf']??''))?>"></div>
-   <div class="col-md-2"><label class="form-label">Tenant ID</label><input name="assistente_tenant" class="form-control font-monospace" placeholder="Automático" value="<?=htmlspecialchars((string)($assistenteEscritorio['tenant']??''))?>"></div>
-   <div class="col-md-2"><label class="form-label">Subdomínio</label><div class="input-group"><input name="assistente_subdominio" class="form-control" placeholder="automático" value="<?=htmlspecialchars((string)($assistenteEscritorio['subdominio']??''))?>"><span class="input-group-text">.rojex.ai</span></div></div>
+  <form method="post" class="row g-3" data-rojex-assistente-step="1"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="1">
+   <div class="col-md-6"><label class="form-label">Nome Fantasia *</label><input name="assistente_nome_fantasia" class="form-control" required maxlength="180" value="<?=htmlspecialchars((string)($assistenteEscritorio['nomeFantasia']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-6"><label class="form-label">Razão Social *</label><input name="assistente_razao_social" class="form-control" required maxlength="180" value="<?=htmlspecialchars((string)($assistenteEscritorio['razaoSocial']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-4"><label class="form-label">CPF/CNPJ *</label><input type="text" name="assistente_documento" id="assistenteDocumento" class="form-control" required maxlength="18" inputmode="numeric" autocomplete="off" placeholder="000.000.000-00 ou 00.000.000/0000-00" value="<?=htmlspecialchars((string)($assistenteEscritorio['documento']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-4"><label class="form-label">Responsável *</label><input name="assistente_responsavel" class="form-control" required value="<?=htmlspecialchars((string)($assistenteEscritorio['responsavel']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-4"><label class="form-label">E-mail *</label><input type="email" name="assistente_email" class="form-control" required value="<?=htmlspecialchars((string)($assistenteEscritorio['email']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-3"><label class="form-label">Telefone</label><input type="text" name="assistente_telefone" id="assistenteTelefone" class="form-control" maxlength="15" inputmode="numeric" autocomplete="tel" placeholder="(00) 0000-0000" value="<?=htmlspecialchars((string)($assistenteEscritorio['telefone']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-3"><label class="form-label">WhatsApp</label><div class="input-group"><input type="text" name="assistente_whatsapp" id="assistenteWhatsapp" class="form-control" maxlength="15" inputmode="numeric" autocomplete="tel" placeholder="(00) 00000-0000" value="<?=htmlspecialchars((string)($assistenteEscritorio['whatsapp']??''), ENT_QUOTES, 'UTF-8')?>"><a id="assistenteAbrirWhatsapp" class="btn btn-outline-success disabled" href="#" target="_blank" rel="noopener noreferrer" aria-disabled="true" title="Abrir WhatsApp"><i class="bi bi-whatsapp"></i></a></div></div>
+   <div class="col-md-2"><label class="form-label">CEP</label><div class="input-group"><input type="text" name="assistente_cep" id="assistenteCep" class="form-control" maxlength="9" inputmode="numeric" autocomplete="postal-code" placeholder="00000-000" value="<?=htmlspecialchars((string)($assistenteEscritorio['cep']??''), ENT_QUOTES, 'UTF-8')?>"><button class="btn btn-outline-secondary" type="button" id="buscarCepAssistente">Buscar</button></div></div>
+   <div class="col-md-4"><label class="form-label">Endereço</label><input type="text" name="assistente_endereco" id="assistenteEndereco" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['endereco']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-1"><label class="form-label">Número</label><input type="text" name="assistente_numero" id="assistenteNumero" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['numero']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-2"><label class="form-label">Bairro</label><input type="text" name="assistente_bairro" id="assistenteBairro" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['bairro']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-2"><label class="form-label">Complemento</label><input type="text" name="assistente_complemento" id="assistenteComplemento" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['complemento']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-2"><label class="form-label">Cidade</label><input name="assistente_cidade" id="assistenteCidade" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['cidade']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-2"><label class="form-label">Estado</label><input name="assistente_uf" id="assistenteUf" class="form-control text-uppercase" maxlength="2" value="<?=htmlspecialchars((string)($assistenteEscritorio['uf']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-4"><label class="form-label">Classificação comercial</label><?php $classificacaoAtual=(string)($assistenteEscritorio['classificacaoCliente']??'piloto'); ?><select name="assistente_classificacao_cliente" id="assistenteClassificacaoCliente" class="form-select"><option value="comercial" <?=$classificacaoAtual==='comercial'?'selected':''?>>Comercial</option><option value="piloto" <?=$classificacaoAtual==='piloto'?'selected':''?>>Cliente Piloto</option><option value="fundador" <?=$classificacaoAtual==='fundador'?'selected':''?>>Cliente Fundador</option><option value="parceiro" <?=$classificacaoAtual==='parceiro'?'selected':''?>>Parceiro Estratégico</option><option value="interno" <?=$classificacaoAtual==='interno'?'selected':''?>>Uso Interno ROJEX.AI</option><option value="demonstracao" <?=$classificacaoAtual==='demonstracao'?'selected':''?>>Demonstração</option><option value="outro" <?=$classificacaoAtual==='outro'?'selected':''?>>Outro</option></select></div>
+   <div class="col-md-8"><label class="form-label">Condições especiais</label><textarea name="assistente_condicoes_especiais" class="form-control" rows="3" maxlength="500" placeholder="Ex.: Isento de mensalidade e anuidade, cobrança somente de APIs e hospedagem durante teste piloto."><?=htmlspecialchars((string)($assistenteEscritorio['condicoesEspeciais']??''), ENT_QUOTES, 'UTF-8')?></textarea></div>
+   <div class="col-md-4" id="assistenteGrupoTipoOutro" style="display:none;"><label class="form-label">Descreva a classificação *</label><input type="text" name="assistente_tipo_cliente_outro" id="assistenteTipoClienteOutro" class="form-control" maxlength="100" value="<?=htmlspecialchars((string)($assistenteEscritorio['tipoClienteOutro']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-3"><label class="form-label">Tenant ID</label><input name="assistente_tenant" class="form-control font-monospace" placeholder="Automático" value="<?=htmlspecialchars((string)($assistenteEscritorio['tenant']??''), ENT_QUOTES, 'UTF-8')?>"></div>
+   <div class="col-md-3"><label class="form-label">Subdomínio</label><div class="input-group"><input name="assistente_subdominio" class="form-control" placeholder="automático" value="<?=htmlspecialchars((string)($assistenteEscritorio['subdominio']??''), ENT_QUOTES, 'UTF-8')?>"><span class="input-group-text">.rojex.ai</span></div></div>
    <div class="col-12 text-end"><button class="btn btn-primary">Validar e continuar <i class="bi bi-arrow-right ms-1"></i></button></div>
   </form>
   <?php elseif($assistenteEtapa===2): ?>
   <form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="2">
    <div class="row g-3"><?php foreach($planosSaas as $p): if(empty($p['ativo'])) continue; ?><div class="col-lg-4"><label class="card h-100 shadow-sm border-2 p-3" style="cursor:pointer"><div class="form-check"><input class="form-check-input" type="radio" name="assistente_plano_id" value="<?=(int)$p['id']?>" <?=$planoSelecionadoId===(int)$p['id']?'checked':''?> required><span class="fw-bold ms-1"><?=htmlspecialchars($p['nome'])?></span></div><hr><h4>R$ <?=number_format((float)$p['valor_mensal'],2,',','.')?><small class="fs-6 text-muted">/mês</small></h4><div>R$ <?=number_format((float)$p['valor_anual'],2,',','.')?>/ano</div><small class="text-success"><?=number_format((float)$p['desconto_anual_percentual'],2,',','.')?>% anual</small><ul class="small mt-3 mb-0"><li>Trial: <?=(int)$p['trial_dias_padrao']?> dias</li><li><?=(int)$p['limite_usuarios_padrao']?> usuários</li><li><?=(int)$p['limite_armazenamento_gb_padrao']?> GB</li><li>Suporte <?=!empty($p['suporte_incluso'])?'incluído':'não incluído'?></li></ul></label></div><?php endforeach; ?></div>
-   <div class="mt-4"><label class="form-label">Periodicidade</label><select name="assistente_periodicidade" class="form-select" style="max-width:300px"><option value="mensal" <?=($assistentePlano['periodicidade']??'mensal')==='mensal'?'selected':''?>>Mensal</option><option value="anual" <?=($assistentePlano['periodicidade']??'')==='anual'?'selected':''?>>Anual com desconto</option></select></div>
+   <?php $beneficioAtual=(array)($assistentePlano['beneficio']??[]); ?>
+   <div class="row g-3 mt-3">
+    <div class="col-md-4">
+     <label class="form-label">Periodicidade</label>
+     <select name="assistente_periodicidade" id="assistentePeriodicidade" class="form-select">
+      <option value="mensal" <?=($assistentePlano['periodicidade']??'mensal')==='mensal'?'selected':''?>>Mensal</option>
+      <option value="anual" <?=($assistentePlano['periodicidade']??'')==='anual'?'selected':''?>>Anual com desconto</option>
+     </select>
+    </div>
+    <div class="col-md-8">
+     <label class="form-label">Benefício comercial</label>
+     <select name="assistente_beneficio_tipo" id="assistenteBeneficioTipo" class="form-select">
+      <?php $beneficioTipoAtual=(string)($beneficioAtual['tipo']??'nenhum'); ?>
+      <option value="nenhum" <?=$beneficioTipoAtual==='nenhum'?'selected':''?>>Nenhum</option>
+      <option value="cliente_piloto" <?=$beneficioTipoAtual==='cliente_piloto'?'selected':''?>>Cliente Piloto — isenção total</option>
+      <option value="cliente_fundador" <?=$beneficioTipoAtual==='cliente_fundador'?'selected':''?>>Cliente Fundador</option>
+      <option value="parceiro_estrategico" <?=$beneficioTipoAtual==='parceiro_estrategico'?'selected':''?>>Parceiro Estratégico</option>
+      <option value="uso_interno" <?=$beneficioTipoAtual==='uso_interno'?'selected':''?>>Uso Interno ROJEX.AI — isenção total</option>
+      <option value="demonstracao" <?=$beneficioTipoAtual==='demonstracao'?'selected':''?>>Demonstração — isenção total</option>
+      <option value="cortesia" <?=$beneficioTipoAtual==='cortesia'?'selected':''?>>Cortesia — isenção total</option>
+      <option value="isencao_temporaria" <?=$beneficioTipoAtual==='isencao_temporaria'?'selected':''?>>Isenção temporária</option>
+      <option value="isencao_permanente" <?=$beneficioTipoAtual==='isencao_permanente'?'selected':''?>>Isenção permanente</option>
+      <option value="desconto_percentual" <?=$beneficioTipoAtual==='desconto_percentual'?'selected':''?>>Desconto percentual</option>
+      <option value="desconto_fixo" <?=$beneficioTipoAtual==='desconto_fixo'?'selected':''?>>Desconto fixo</option>
+     </select>
+    </div>
+    <div class="col-md-3" id="grupoBeneficioPercentual">
+     <label class="form-label">Desconto (%)</label>
+     <input type="number" name="assistente_beneficio_percentual" class="form-control" min="0" max="100" step="0.01" value="<?=htmlspecialchars((string)($beneficioAtual['percentual']??'0'))?>">
+    </div>
+    <div class="col-md-3" id="grupoBeneficioValorFixo">
+     <label class="form-label">Desconto fixo (R$)</label>
+     <input type="number" name="assistente_beneficio_valor_fixo" class="form-control" min="0" step="0.01" value="<?=htmlspecialchars((string)($beneficioAtual['valor_fixo']??'0'))?>">
+    </div>
+    <div class="col-md-3">
+     <label class="form-label">Início</label>
+     <input type="date" name="assistente_beneficio_inicio" class="form-control" value="<?=htmlspecialchars((string)($beneficioAtual['inicio']??date('Y-m-d')))?>">
+    </div>
+    <div class="col-md-3" id="grupoBeneficioFim">
+     <label class="form-label">Fim da isenção</label>
+     <input type="date" name="assistente_beneficio_fim" id="assistenteBeneficioFim" class="form-control" value="<?=htmlspecialchars((string)($beneficioAtual['fim']??''))?>">
+    </div>
+    <div class="col-12">
+     <label class="form-label">Motivo e condições do benefício</label>
+     <textarea name="assistente_beneficio_motivo" id="assistenteBeneficioMotivo" class="form-control" rows="3" maxlength="500" placeholder="Obrigatório quando houver benefício."><?=htmlspecialchars((string)($beneficioAtual['motivo']??''),ENT_QUOTES,'UTF-8')?></textarea>
+    </div>
+    <div class="col-md-4">
+     <div class="form-check">
+      <input class="form-check-input" type="checkbox" name="assistente_cobra_hospedagem" id="assistenteCobraHospedagem" value="1" <?=!empty($beneficioAtual['cobra_hospedagem'])?'checked':''?>>
+      <label class="form-check-label" for="assistenteCobraHospedagem">Cobrar hospedagem separadamente</label>
+     </div>
+    </div>
+    <div class="col-md-4">
+     <div class="form-check">
+      <input class="form-check-input" type="checkbox" name="assistente_cobra_api_ia" id="assistenteCobraApiIa" value="1" <?=!empty($beneficioAtual['cobra_api_ia'])?'checked':''?>>
+      <label class="form-check-label" for="assistenteCobraApiIa">Cobrar consumo das APIs de IA</label>
+     </div>
+    </div>
+    <div class="col-12">
+     <div class="alert alert-info mb-0">
+      O preço oficial do plano será preservado. O benefício altera somente o valor contratado deste escritório.
+     </div>
+    </div>
+   </div>
    <div class="d-flex justify-content-between mt-4"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=1"><i class="bi bi-arrow-left"></i> Voltar</a><button class="btn btn-primary">Continuar <i class="bi bi-arrow-right"></i></button></div>
   </form>
   <?php elseif($assistenteEtapa===3): ?>
@@ -9459,15 +9978,24 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
    <div class="col-md-4"><label class="form-label">E-mail *</label><input type="email" name="assistente_admin_email" class="form-control" required value="<?=htmlspecialchars((string)($assistenteAdmin['email']??$assistenteEscritorio['email']??''))?>"></div><div class="col-md-4"><label class="form-label">Idioma</label><select name="assistente_admin_idioma" class="form-select"><option value="pt-BR">Português (Brasil)</option><option value="en-US">English</option><option value="es-ES">Español</option></select></div><div class="col-md-4"><label class="form-label">Fuso horário</label><input name="assistente_admin_fuso" class="form-control" value="<?=htmlspecialchars((string)($assistenteAdmin['fuso']??'America/Sao_Paulo'))?>"></div>
    <div class="col-12 d-flex justify-content-between"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=4"><i class="bi bi-arrow-left"></i> Voltar</a><button class="btn btn-primary">Revisar cadastro <i class="bi bi-arrow-right"></i></button></div>
   </form>
-  <?php else: $pSnap=$assistentePlano['snapshot']??[]; $valorBase=(float)($assistenteComercial['valor_base']??0); $valorFinal=(float)($assistenteComercial['valor_final']??$valorBase); $descontoModulos=(float)($assistenteComercial['desconto_modulos']??0); $economia=(float)($assistenteComercial['economia']??0); $modulosRemovidos=(array)($assistenteComercial['modulos_removidos']??[]); ?>
+  <?php else: $pSnap=$assistentePlano['snapshot']??[]; $valorBase=(float)($assistenteComercial['valor_base']??0); $valorFinal=(float)($assistenteComercial['valor_final']??$valorBase); $descontoModulos=(float)($assistenteComercial['desconto_modulos']??0); $economia=(float)($assistenteComercial['economia']??0); $modulosRemovidos=(array)($assistenteComercial['modulos_removidos']??[]); $rotulosClassificacao=['comercial'=>'Comercial','piloto'=>'Cliente Piloto','fundador'=>'Cliente Fundador','parceiro'=>'Parceiro Estratégico','interno'=>'Uso Interno ROJEX.AI','demonstracao'=>'Demonstração','outro'=>'Outro']; $codigoClassificacao=(string)($assistenteEscritorio['classificacaoCliente']??'comercial'); $rotuloClassificacao=$rotulosClassificacao[$codigoClassificacao]??'Comercial'; if($codigoClassificacao==='outro'&&!empty($assistenteEscritorio['tipoClienteOutro'])){$rotuloClassificacao.=' — '.(string)$assistenteEscritorio['tipoClienteOutro'];} $whatsappResumo=preg_replace('/\D+/','',(string)($assistenteEscritorio['whatsapp']??'')); $whatsappResumoUrl=strlen($whatsappResumo)>=10?(str_starts_with($whatsappResumo,'55')?'':'55').$whatsappResumo:''; ?>
   <div class="row g-3">
-   <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Escritório</h6><strong><?=htmlspecialchars((string)($assistenteEscritorio['nomeFantasia']??'-'))?></strong><br><?=htmlspecialchars((string)($assistenteEscritorio['razaoSocial']??'-'))?><br><small><?=htmlspecialchars((string)($assistenteEscritorio['documento']??'-'))?> · <?=htmlspecialchars((string)($assistenteEscritorio['email']??'-'))?></small><hr><code><?=htmlspecialchars((string)($assistenteEscritorio['tenant']??'-'))?></code><br><?=htmlspecialchars((string)($assistenteEscritorio['subdominio']??'-'))?>.rojex.ai</div></div></div>
-   <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Plano e licença</h6><strong><?=htmlspecialchars((string)($pSnap['nome']??'-'))?></strong> · <?=htmlspecialchars((string)($assistentePlano['periodicidade']??'-'))?><div class="table-responsive mt-3"><table class="table table-sm mb-2"><tbody><tr><td>Valor base</td><td class="text-end">R$ <?=number_format($valorBase,2,',','.')?></td></tr><tr><td>Desconto por módulos removidos</td><td class="text-end text-success">- R$ <?=number_format($descontoModulos,2,',','.')?></td></tr><tr><td>Módulos extras</td><td class="text-end">+ R$ <?=number_format((float)($assistenteComercial['valor_extras']??0),2,',','.')?></td></tr><tr><td>Ajuste comercial</td><td class="text-end">R$ <?=number_format((float)($assistenteComercial['ajuste_manual']??0),2,',','.')?></td></tr><tr class="fw-bold border-top"><td>Valor contratado</td><td class="text-end fs-5">R$ <?=number_format($valorFinal,2,',','.')?></td></tr></tbody></table></div><?php if($economia>0): ?><span class="badge bg-success">Economia: R$ <?=number_format($economia,2,',','.')?></span><?php endif; ?><div class="small mt-2">Trial: <?=(int)($assistenteLicenca['trial_dias']??0)?> dias · Usuários: <?=(int)($pSnap['limite_usuarios_padrao']??0)?> · Armazenamento: <?=(int)($pSnap['limite_armazenamento_gb_padrao']??0)?> GB</div><hr><code><?=htmlspecialchars((string)($assistenteLicenca['chave']??'-'))?></code></div></div></div>
+   <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Escritório</h6><strong><?=htmlspecialchars((string)($assistenteEscritorio['nomeFantasia']??'-'))?></strong><br><?=htmlspecialchars((string)($assistenteEscritorio['razaoSocial']??'-'))?><br><small><?=htmlspecialchars((string)($assistenteEscritorio['documento']??'-'))?> · <?=htmlspecialchars((string)($assistenteEscritorio['email']??'-'))?></small><br><small class="text-muted">WhatsApp:</small> <?=htmlspecialchars((string)($assistenteEscritorio['whatsapp']??'-'),ENT_QUOTES,'UTF-8')?><?php if($whatsappResumoUrl!==''): ?> <a class="btn btn-sm btn-success ms-1" href="https://wa.me/<?=htmlspecialchars($whatsappResumoUrl,ENT_QUOTES,'UTF-8')?>" target="_blank" rel="noopener noreferrer"><i class="bi bi-whatsapp"></i> Abrir WhatsApp</a><?php endif; ?><hr><code><?=htmlspecialchars((string)($assistenteEscritorio['tenant']??'-'))?></code><br><?=htmlspecialchars((string)($assistenteEscritorio['subdominio']??'-'))?>.rojex.ai<hr><small class="text-muted">Endereço:</small> <?=htmlspecialchars((string)($assistenteEscritorio['endereco']??'-'))?>, <?=htmlspecialchars((string)($assistenteEscritorio['numero']??'-'))?><br><small class="text-muted">CEP:</small> <?=htmlspecialchars((string)($assistenteEscritorio['cep']??'-'))?> · <?=htmlspecialchars((string)($assistenteEscritorio['bairro']??'-'))?><br><small class="text-muted">Classificação:</small> <?=htmlspecialchars($rotuloClassificacao,ENT_QUOTES,'UTF-8')?><br><?php if(!empty($assistenteEscritorio['condicoesEspeciais'])): ?><small class="text-muted">Condição:</small> <?=htmlspecialchars((string)($assistenteEscritorio['condicoesEspeciais']??''))?><?php endif; ?></div></div></div>
+   <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Plano e licença</h6><strong><?=htmlspecialchars((string)($pSnap['nome']??'-'))?></strong> · <?=htmlspecialchars((string)($assistentePlano['periodicidade']??'-'))?><div class="table-responsive mt-3"><table class="table table-sm mb-2"><tbody><tr><td>Valor base</td><td class="text-end">R$ <?=number_format($valorBase,2,',','.')?></td></tr><tr><td>Desconto por módulos removidos</td><td class="text-end text-success">- R$ <?=number_format($descontoModulos,2,',','.')?></td></tr><tr><td>Módulos extras</td><td class="text-end">+ R$ <?=number_format((float)($assistenteComercial['valor_extras']??0),2,',','.')?></td></tr><tr><td>Benefício comercial</td><td class="text-end"><?=htmlspecialchars((string)($assistenteComercial['beneficio_tipo']??'nenhum'))?></td></tr><tr><td>Desconto do benefício</td><td class="text-end text-success">- R$ <?=number_format((float)($assistenteComercial['beneficio_valor']??0),2,',','.')?></td></tr><tr><td>Ajuste comercial</td><td class="text-end">R$ <?=number_format((float)($assistenteComercial['ajuste_manual']??0),2,',','.')?></td></tr><tr class="fw-bold border-top"><td>Valor contratado</td><td class="text-end fs-5">R$ <?=number_format($valorFinal,2,',','.')?></td></tr></tbody></table></div><?php if($economia>0): ?><span class="badge bg-success">Economia: R$ <?=number_format($economia,2,',','.')?></span><?php endif; ?>
+   <?php if(($assistenteComercial['beneficio_tipo']??'nenhum')!=='nenhum'): ?>
+    <div class="alert alert-success py-2 mt-2 mb-2">
+     <strong>Motivo:</strong> <?=htmlspecialchars((string)($assistenteComercial['beneficio_motivo']??''),ENT_QUOTES,'UTF-8')?><br>
+     <?php if(!empty($assistenteComercial['cobra_hospedagem'])): ?><span class="badge bg-secondary">Hospedagem cobrada separadamente</span><?php endif; ?>
+     <?php if(!empty($assistenteComercial['cobra_api_ia'])): ?><span class="badge bg-secondary">APIs de IA cobradas conforme consumo</span><?php endif; ?>
+     <?php if(!empty($assistenteComercial['mensalidade_isenta'])): ?><span class="badge bg-success">Mensalidade isenta</span><?php endif; ?>
+    </div>
+   <?php endif; ?>
+   <div class="small mt-2">Trial: <?=(int)($assistenteLicenca['trial_dias']??0)?> dias · Usuários: <?=(int)($pSnap['limite_usuarios_padrao']??0)?> · Armazenamento: <?=(int)($pSnap['limite_armazenamento_gb_padrao']??0)?> GB</div><hr><code><?=htmlspecialchars((string)($assistenteLicenca['chave']??'-'))?></code></div></div></div>
    <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Módulos contratados</h6><span class="badge bg-primary"><?=count($assistenteModulosSelecionados)?> incluído(s)</span> <span class="badge bg-secondary"><?=count($modulosRemovidos)?> removido(s)</span><div class="small mt-3"><?php foreach($modulosDoPlanoAssistente as $m) if(in_array((int)$m['id'],$assistenteModulosSelecionados,true)) echo '<span class="badge bg-white text-dark border me-1 mb-1">'.htmlspecialchars($m['nome']).'</span>'; ?></div><?php if($modulosRemovidos): ?><hr><small class="text-muted d-block mb-1">Removidos:</small><?php foreach($modulosRemovidos as $mr): ?><span class="badge bg-light text-muted border me-1 mb-1"><?=htmlspecialchars((string)($mr['nome']??'Módulo'))?><?php if((float)($mr['valor_ajuste']??0)>0): ?> · -R$ <?=number_format((float)$mr['valor_ajuste'],2,',','.')?><?php endif; ?></span><?php endforeach; ?><?php endif; ?></div></div></div>
    <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Administrador</h6><strong><?=htmlspecialchars((string)($assistenteAdmin['nome']??'-'))?></strong><br><?=htmlspecialchars((string)($assistenteAdmin['login']??'-'))?><br><small><?=htmlspecialchars((string)($assistenteAdmin['email']??'-'))?> · <?=htmlspecialchars((string)($assistenteAdmin['fuso']??'-'))?></small><hr><small class="text-muted">A senha permanece protegida por hash na sessão e será gravada somente no provisionamento definitivo.</small></div></div></div>
   </div>
   <div class="alert alert-success mt-4"><i class="bi bi-shield-check me-1"></i><strong>Provisionamento transacional disponível.</strong> Todos os dados serão revalidados e criados em uma única transação. Qualquer falha executará rollback completo.</div>
-  <form method="post" class="d-flex justify-content-between" onsubmit="return confirm('Confirmar o provisionamento definitivo deste escritório? Esta ação criará o tenant, a licença e o administrador.');"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_provisionar"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=5"><i class="bi bi-arrow-left"></i> Corrigir administrador</a><button class="btn btn-success"><i class="bi bi-rocket-takeoff me-1"></i> Provisionar escritório</button></form>
+   <form method="post" id="formProvisionamentoFinal" onsubmit="return rojexValidarAceiteFinal();"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_provisionar"><div class="card border-primary mb-4"><div class="card-header bg-primary text-white"><i class="bi bi-shield-check me-1"></i>Aceite operacional</div><div class="card-body"><div class="row g-3"><div class="col-md-5"><label class="form-label">Modo de aceite *</label><select name="assistente_aceite_modo" id="assistenteAceiteModo" class="form-select" required><option value="">Selecione</option><option value="cliente_direto">Aceite direto pelo representante do cliente</option><option value="master_assistido">Aceite assistido e registrado pelo MASTER</option></select></div><div class="col-md-7"><label class="form-label">Representante responsável *</label><input type="text" name="assistente_representante" id="assistenteRepresentante" class="form-control" maxlength="140" required></div><div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" name="assistente_aceite_operacional" id="assistenteAceiteOperacional" value="1" required><label class="form-check-label" for="assistenteAceiteOperacional">Confirmo que os dados foram revisados e que existe autorização para iniciar a implantação.</label></div></div><div class="col-12" id="assistenteGrupoAceiteMaster" style="display:none;"><div class="form-check border rounded p-3 bg-light"><input class="form-check-input ms-0 me-2" type="checkbox" name="assistente_aceite_assistido" id="assistenteAceiteAssistido" value="1"><label class="form-check-label" for="assistenteAceiteAssistido">Declaro que possuo autorização expressa do representante do cliente para registrar este aceite assistido pelo MASTER.</label></div></div></div></div></div><div class="d-flex justify-content-between"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=5"><i class="bi bi-arrow-left"></i> Corrigir administrador</a><button class="btn btn-success"><i class="bi bi-rocket-takeoff me-1"></i> Provisionar escritório</button></div></form>
   <?php endif; ?>
  </div>
 </div>
@@ -11689,4 +12217,204 @@ function prepararAcaoIndividual(acao, tabela, id) {
         ? confirm('Excluir este item permanentemente? Esta ação não pode ser desfeita.')
         : confirm('Restaurar este item ao módulo de origem?');
 }
+
+function rojexSomenteNumeros(valor) {
+    return String(valor || '').replace(/\D/g, '');
+}
+
+function rojexMascaraDocumento(valor) {
+    const numeros = rojexSomenteNumeros(valor).slice(0, 14);
+
+    if (numeros.length <= 11) {
+        return numeros
+            .replace(/^(\d{3})(\d)/, '$1.$2')
+            .replace(/^(\d{3})\.(\d{3})(\d)/, '$1.$2.$3')
+            .replace(/\.(\d{3})(\d)/, '.$1-$2');
+    }
+
+    return numeros
+        .replace(/^(\d{2})(\d)/, '$1.$2')
+        .replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3')
+        .replace(/\.(\d{3})(\d)/, '.$1/$2')
+        .replace(/(\d{4})(\d)/, '$1-$2');
+}
+
+function rojexMascaraTelefone(valor) {
+    const numeros = rojexSomenteNumeros(valor).slice(0, 11);
+
+    if (numeros.length <= 10) {
+        return numeros
+            .replace(/^(\d{2})(\d)/, '($1) $2')
+            .replace(/(\d{4})(\d)/, '$1-$2');
+    }
+
+    return numeros
+        .replace(/^(\d{2})(\d)/, '($1) $2')
+        .replace(/(\d{5})(\d)/, '$1-$2');
+}
+
+function rojexMascaraCep(valor) {
+    const numeros = rojexSomenteNumeros(valor).slice(0, 8);
+    return numeros.replace(/^(\d{5})(\d)/, '$1-$2');
+}
+
+function rojexAplicarMascara(input, mascara) {
+    if (!input) {
+        return;
+    }
+
+    input.value = mascara(input.value);
+
+    input.addEventListener('input', function () {
+        this.value = mascara(this.value);
+    });
+}
+
+function rojexAtualizarClassificacaoComercial() {
+    const tipo = document.getElementById('assistenteClassificacaoCliente')?.value || '';
+    const grupoOutro = document.getElementById('assistenteGrupoTipoOutro');
+    const campoOutro = document.getElementById('assistenteTipoClienteOutro');
+    const mostrar = tipo === 'outro';
+    if (grupoOutro) grupoOutro.style.display = mostrar ? '' : 'none';
+    if (campoOutro) {
+        campoOutro.required = mostrar;
+        if (!mostrar) campoOutro.value = '';
+    }
+}
+
+function rojexAtualizarBotaoWhatsappAssistente() {
+    const input = document.getElementById('assistenteWhatsapp');
+    const botao = document.getElementById('assistenteAbrirWhatsapp');
+    if (!input || !botao) return;
+    let numero = rojexSomenteNumeros(input.value || '');
+    if (numero.length >= 10) {
+        if (!numero.startsWith('55')) numero = '55' + numero;
+        botao.href = 'https://wa.me/' + numero;
+        botao.classList.remove('disabled');
+        botao.setAttribute('aria-disabled', 'false');
+    } else {
+        botao.href = '#';
+        botao.classList.add('disabled');
+        botao.setAttribute('aria-disabled', 'true');
+    }
+}
+
+
+function rojexAtualizarBeneficioComercial() {
+    const tipo = document.getElementById('assistenteBeneficioTipo')?.value || 'nenhum';
+    const grupoPercentual = document.getElementById('grupoBeneficioPercentual');
+    const grupoValorFixo = document.getElementById('grupoBeneficioValorFixo');
+    const grupoFim = document.getElementById('grupoBeneficioFim');
+    const motivo = document.getElementById('assistenteBeneficioMotivo');
+    const fim = document.getElementById('assistenteBeneficioFim');
+
+    const aceitaPercentual = ['desconto_percentual', 'cliente_fundador', 'parceiro_estrategico'].includes(tipo);
+    const aceitaValorFixo = ['desconto_fixo', 'cliente_fundador', 'parceiro_estrategico'].includes(tipo);
+    const temporaria = tipo === 'isencao_temporaria';
+    const possuiBeneficio = tipo !== 'nenhum';
+
+    if (grupoPercentual) grupoPercentual.style.display = aceitaPercentual ? '' : 'none';
+    if (grupoValorFixo) grupoValorFixo.style.display = aceitaValorFixo ? '' : 'none';
+    if (grupoFim) grupoFim.style.display = temporaria ? '' : 'none';
+    if (motivo) motivo.required = possuiBeneficio;
+    if (fim) fim.required = temporaria;
+}
+
+function rojexAtualizarAceiteFinal() {
+    const modo = document.getElementById('assistenteAceiteModo')?.value || '';
+    const grupo = document.getElementById('assistenteGrupoAceiteMaster');
+    const checkbox = document.getElementById('assistenteAceiteAssistido');
+    const assistido = modo === 'master_assistido';
+    if (grupo) grupo.style.display = assistido ? '' : 'none';
+    if (checkbox) {
+        checkbox.required = assistido;
+        if (!assistido) checkbox.checked = false;
+    }
+}
+
+function rojexValidarAceiteFinal() {
+    const modo = document.getElementById('assistenteAceiteModo')?.value || '';
+    const representante = document.getElementById('assistenteRepresentante')?.value?.trim() || '';
+    const aceite = document.getElementById('assistenteAceiteOperacional')?.checked;
+    const assistido = document.getElementById('assistenteAceiteAssistido')?.checked;
+    if (!modo || !representante || !aceite) {
+        alert('Preencha o modo de aceite, o representante e confirme a autorização de implantação.');
+        return false;
+    }
+    if (modo === 'master_assistido' && !assistido) {
+        alert('Confirme a autorização expressa para o aceite assistido pelo MASTER.');
+        return false;
+    }
+    return confirm('Confirmar o provisionamento definitivo? Esta ação criará o tenant, a licença, a assinatura, os módulos e o administrador, além de registrar o aceite operacional.');
+}
+
+async function rojexBuscarEnderecoPorCep() {
+    const inputCep = document.getElementById('assistenteCep');
+    if (!inputCep) {
+        return;
+    }
+
+    const cep = rojexSomenteNumeros(inputCep.value || '').slice(0, 8);
+    if (cep.length !== 8) {
+        return;
+    }
+
+    try {
+        const resposta = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+        if (!resposta.ok) {
+            throw new Error('Falha ao buscar CEP');
+        }
+
+        const dados = await resposta.json();
+        if (dados.erro) {
+            throw new Error('CEP não encontrado');
+        }
+
+        const endereco = document.getElementById('assistenteEndereco');
+        const bairro = document.getElementById('assistenteBairro');
+        const cidade = document.getElementById('assistenteCidade');
+        const uf = document.getElementById('assistenteUf');
+
+        if (endereco) endereco.value = dados.logradouro || '';
+        if (bairro) bairro.value = dados.bairro || '';
+        if (cidade) cidade.value = dados.localidade || '';
+        if (uf) uf.value = dados.uf || '';
+    } catch (erro) {
+        console.warn('Busca de CEP indisponível:', erro);
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    rojexAplicarMascara(
+        document.getElementById('assistenteDocumento'),
+        rojexMascaraDocumento
+    );
+
+    rojexAplicarMascara(
+        document.getElementById('assistenteTelefone'),
+        rojexMascaraTelefone
+    );
+
+    rojexAplicarMascara(
+        document.getElementById('assistenteWhatsapp'),
+        rojexMascaraTelefone
+    );
+
+    rojexAplicarMascara(
+        document.getElementById('assistenteCep'),
+        rojexMascaraCep
+    );
+
+    rojexAtualizarClassificacaoComercial();
+    document.getElementById('assistenteClassificacaoCliente')?.addEventListener('change', rojexAtualizarClassificacaoComercial);
+    rojexAtualizarBotaoWhatsappAssistente();
+    document.getElementById('assistenteWhatsapp')?.addEventListener('input', rojexAtualizarBotaoWhatsappAssistente);
+    rojexAtualizarBeneficioComercial();
+    document.getElementById('assistenteBeneficioTipo')?.addEventListener('change', rojexAtualizarBeneficioComercial);
+
+    rojexAtualizarAceiteFinal();
+    document.getElementById('assistenteAceiteModo')?.addEventListener('change', rojexAtualizarAceiteFinal);
+    document.getElementById('buscarCepAssistente')?.addEventListener('click', rojexBuscarEnderecoPorCep);
+
+});
 </script>

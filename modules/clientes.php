@@ -38,6 +38,19 @@ function apenasDigitos(?string $valor): string {
     return preg_replace('/\D+/', '', (string)$valor);
 }
 
+function whatsappUrl(?string $numero): ?string {
+    $digitos = apenasDigitos($numero);
+    if (!in_array(strlen($digitos), [10, 11], true)) {
+        return null;
+    }
+
+    if (!str_starts_with($digitos, '55')) {
+        $digitos = '55' . $digitos;
+    }
+
+    return 'https://wa.me/' . $digitos;
+}
+
 /*
  * A estrutura Multi-Tenant da tabela clientes é mantida por migração SQL.
  * DDL e backfills não são executados durante requisições HTTP.
@@ -439,7 +452,22 @@ $csrf = gerarTokenCsrf();
             <div class="row g-3 mb-4">
                 <div class="col-md-4"><label class="form-label">Telefone</label><input type="text" name="telefone" class="form-control telefone" value="<?= h($f['telefone']) ?>"></div>
                 <div class="col-md-4"><label class="form-label">Celular</label><input type="text" name="celular" class="form-control telefone" value="<?= h($f['celular']) ?>"></div>
-                <div class="col-md-4"><label class="form-label">WhatsApp</label><input type="text" name="whatsapp" class="form-control telefone" value="<?= h($f['whatsapp']) ?>"></div>
+                <div class="col-md-4">
+                    <label class="form-label">WhatsApp</label>
+                    <div class="input-group">
+                        <input type="text" name="whatsapp" id="whatsappCliente" class="form-control telefone" value="<?= h($f['whatsapp']) ?>">
+                        <a
+                            id="btnWhatsappCliente"
+                            class="btn btn-success <?= whatsappUrl($f['whatsapp']) ? '' : 'disabled' ?>"
+                            href="<?= h(whatsappUrl($f['whatsapp']) ?? '#') ?>"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Abrir conversa no WhatsApp"
+                            aria-label="Abrir conversa no WhatsApp"
+                        ><i class="bi bi-whatsapp"></i></a>
+                    </div>
+                    <div class="form-text">O botão apenas abre o WhatsApp; nenhuma mensagem é enviada automaticamente.</div>
+                </div>
                 <div class="col-md-6"><label class="form-label">E-mail</label><input type="email" name="email" class="form-control" value="<?= h($f['email']) ?>" maxlength="120"></div>
                 <div class="col-md-6"><label class="form-label">E-mail Secundário</label><input type="email" name="email_secundario" class="form-control" value="<?= h($f['email_secundario']) ?>" maxlength="120"></div>
             </div>
@@ -618,6 +646,10 @@ $queryBase = http_build_query(['mod' => 'clientes', 'busca' => $busca, 'status' 
                         <td><?= h(trim(($row['cidade'] ?: '') . '/' . ($row['estado'] ?: ''), '/')) ?: '-' ?></td>
                         <td><span class="badge bg-<?= $badge ?>"><?= h($row['status']) ?></span></td>
                         <td class="text-end text-nowrap">
+                            <?php $urlWhatsappLista = whatsappUrl((string)($row['whatsapp'] ?? '')); ?>
+                            <?php if ($urlWhatsappLista): ?>
+                                <a href="<?= h($urlWhatsappLista) ?>" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-success" title="Conversar no WhatsApp"><i class="bi bi-whatsapp"></i></a>
+                            <?php endif; ?>
                             <a href="?mod=clientes&acao=editar&id=<?= urlencode($row['id']) ?>" class="btn btn-sm btn-warning"><i class="bi bi-pencil"></i></a>
                             <form method="POST" class="d-inline" onsubmit="return confirm('Deseja mover este cliente para a lixeira?')">
                                 <input type="hidden" name="csrf_token" value="<?= h($csrf) ?>">
@@ -662,6 +694,25 @@ document.addEventListener('DOMContentLoaded', function () {
         input.setAttribute('inputmode', 'numeric');
         input.addEventListener('input', () => maskPhone(input));
     });
+
+
+    const whatsappInput = document.getElementById('whatsappCliente');
+    const whatsappButton = document.getElementById('btnWhatsappCliente');
+    const atualizarBotaoWhatsapp = function () {
+        if (!whatsappInput || !whatsappButton) return;
+        const numero = whatsappInput.value.replace(/\D/g, '');
+        const valido = numero.length === 10 || numero.length === 11;
+        whatsappButton.classList.toggle('disabled', !valido);
+        whatsappButton.setAttribute('aria-disabled', valido ? 'false' : 'true');
+        whatsappButton.href = valido ? `https://wa.me/55${numero}` : '#';
+    };
+    if (whatsappInput && whatsappButton) {
+        whatsappInput.addEventListener('input', atualizarBotaoWhatsapp);
+        whatsappButton.addEventListener('click', function (event) {
+            if (this.classList.contains('disabled')) event.preventDefault();
+        });
+        atualizarBotaoWhatsapp();
+    }
 
     const doc = document.getElementById('cpf_cnpj');
     if (doc) {

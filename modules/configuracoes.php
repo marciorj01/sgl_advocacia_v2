@@ -5733,7 +5733,16 @@ if ($acao_cfg === 'assistente_novo_escritorio_gerar_contrato') {
             (int)($_SESSION['user_id'] ?? 0),
             (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'MASTER')
         );
-        $servicoContrato->enfileirarConvite($contratoCriado, $representanteContrato, $emailContrato);
+        $emailFilaId = $servicoContrato->enfileirarConvite($contratoCriado, $representanteContrato, $emailContrato);
+
+        // Tenta enviar imediatamente sem comprometer a criação do contrato.
+        // Em caso de indisponibilidade do SMTP, o item permanece na fila para o cron.
+        $resultadoEmail = ['enviados' => 0, 'falhas' => 0];
+        try {
+            $resultadoEmail = EmailService::fromProject($conn)->processarFila(1);
+        } catch (Throwable $emailErro) {
+            error_log('[ROJEX EMAIL CONTRATO] ' . $emailErro->getMessage());
+        }
         $dadosAssistente['contrato'] = [
             'id' => (int)$contratoCriado['contrato_id'],
             'status' => 'aguardando_aceite',
@@ -5743,7 +5752,10 @@ if ($acao_cfg === 'assistente_novo_escritorio_gerar_contrato') {
             'representante_email' => $emailContrato,
         ];
         $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
-        sgl_log($conn, 'Gerou contrato digital SaaS', 'contratos_saas', (string)$contratoCriado['contrato_id'], 'Contrato enviado para aceite eletrônico.');
+        $statusEnvio = ((int)($resultadoEmail['enviados'] ?? 0) > 0)
+            ? 'Convite enviado por e-mail.'
+            : 'Convite registrado na fila de e-mail #' . (int)$emailFilaId . '.';
+        sgl_log($conn, 'Gerou contrato digital SaaS', 'contratos_saas', (string)$contratoCriado['contrato_id'], $statusEnvio);
         rojex_redirect_assistente(6, 'sucesso', 'Contrato gerado e colocado na fila de e-mail. O provisionamento será liberado após o aceite.');
     } catch (Throwable $e) {
         error_log('[ROJEX CONTRATO] ' . $e->getMessage());

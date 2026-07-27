@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/../bootstrap/env.php';
 /**
  * Configuração central da aplicação ROJEX.AI.
  * Sprint 003.1 — Identidade oficial do sistema.

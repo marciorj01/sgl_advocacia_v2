@@ -32,7 +32,17 @@ if (!defined('APP_BASE_PATH')) {
 }
 
 if (!defined('APP_BASE_URL')) {
-    define('APP_BASE_URL', '/sgl_advocacia');
+    $appBaseUrl = '';
+
+    if (defined('ROJEX_APP_URL') && (string) ROJEX_APP_URL !== '') {
+        $appPath = parse_url((string) ROJEX_APP_URL, PHP_URL_PATH);
+        $appBaseUrl = is_string($appPath) ? rtrim($appPath, '/') : '';
+    } else {
+        $scriptName = str_replace('\\', '/', (string) ($_SERVER['SCRIPT_NAME'] ?? ''));
+        $appBaseUrl = rtrim(dirname($scriptName), '/.');
+    }
+
+    define('APP_BASE_URL', $appBaseUrl === '/' ? '' : $appBaseUrl);
 }
 
 if (!defined('APP_LOGO')) {

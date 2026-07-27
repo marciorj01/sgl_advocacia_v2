@@ -228,7 +228,7 @@ if (!defined('DB_NAME')) {
         'DB_NAME',
         (string)rojex_env(
             ['ROJEX_DB_NAME', 'SGL_DB_NAME'],
-            $ambienteLocal ? 'rojex_ai_validacao' : 'ALTERE_BANCO_HOSTINGER'
+            $ambienteLocal ? 'rojex_ai_producao' : 'ALTERE_BANCO_HOSTINGER'
         )
     );
 }
@@ -444,6 +444,12 @@ function conectar(): mysqli
             'Serviço de dados indisponível',
             'Não foi possível concluir a conexão com o banco de dados. ' .
             'Tente novamente em instantes.',
+            $e
+        );
+
+        throw new RuntimeException(
+            'Não foi possível concluir a conexão com o banco de dados.',
+            0,
             $e
         );
     }

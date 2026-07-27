@@ -1,0 +1,2 @@
+<?php declare(strict_types=1); ?>
+<!doctype html><html lang="pt-BR"><body style="font-family:Arial,sans-serif;color:#1f2937;line-height:1.5"><h2>Bem-vindo à ROJEX.AI</h2><p>Olá, <?=htmlspecialchars((string)$nome,ENT_QUOTES,'UTF-8')?>.</p><p>O escritório foi provisionado com sucesso.</p><p>Acesse: <a href="<?=htmlspecialchars((string)$url,ENT_QUOTES,'UTF-8')?>"><?=htmlspecialchars((string)$url,ENT_QUOTES,'UTF-8')?></a></p><p>Por segurança, nenhuma senha é enviada por e-mail.</p></body></html>

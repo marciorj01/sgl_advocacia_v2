@@ -7,6 +7,9 @@
 
 $conn = conectar();
 require_once __DIR__ . '/../config/integracoes.php';
+if (is_file(__DIR__ . '/../services/ContratoSaasService.php')) {
+    require_once __DIR__ . '/../services/ContratoSaasService.php';
+}
 /* Estrutura e saneamentos do banco são executados exclusivamente por migrações SQL.
  * Nenhum DDL ou backfill é disparado durante a requisição HTTP. */
 $upload_dir = __DIR__ . '/../assets/img/';
@@ -5577,14 +5580,47 @@ if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
     }
 
     if ($etapaAssistente === 4) {
-        $trialDias = max(7, min(30, (int)($_POST['assistente_trial_dias'] ?? 15)));
+        $aplicarTrial = !empty($_POST['assistente_aplicar_trial']);
+        $trialDias = 0;
         $inicio = date('Y-m-d');
-        $fimTrial = date('Y-m-d', strtotime('+' . $trialDias . ' days'));
-        try { $chave = 'ROJEX-' . strtoupper(bin2hex(random_bytes(12))); }
-        catch (Throwable $e) { $chave = 'ROJEX-' . strtoupper(substr(hash('sha256', uniqid('', true)), 0, 24)); }
-        $dadosAssistente['licenca'] = ['chave'=>$chave,'trial_dias'=>$trialDias,'inicio'=>$inicio,'fim_trial'=>$fimTrial];
+        $fimTrial = null;
+
+        if ($aplicarTrial) {
+            $trialDiasInformado = (int)($_POST['assistente_trial_dias'] ?? 15);
+            if ($trialDiasInformado < 7 || $trialDiasInformado > 30) {
+                rojex_redirect_assistente(
+                    4,
+                    'erro',
+                    'Quando habilitado, o período de trial deve ter entre 7 e 30 dias.'
+                );
+            }
+
+            $trialDias = $trialDiasInformado;
+            $fimTrial = date('Y-m-d', strtotime('+' . $trialDias . ' days'));
+        }
+
+        try {
+            $chave = 'ROJEX-' . strtoupper(bin2hex(random_bytes(12)));
+        } catch (Throwable $e) {
+            $chave = 'ROJEX-' . strtoupper(substr(hash('sha256', uniqid('', true)), 0, 24));
+        }
+
+        $dadosAssistente['licenca'] = [
+            'chave' => $chave,
+            'aplicar_trial' => $aplicarTrial,
+            'trial_dias' => $trialDias,
+            'inicio' => $inicio,
+            'fim_trial' => $fimTrial,
+        ];
+
         $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
-        rojex_redirect_assistente(5, 'sucesso', 'Prévia da licença gerada.');
+        rojex_redirect_assistente(
+            5,
+            'sucesso',
+            $aplicarTrial
+                ? 'Prévia da licença com trial gerada.'
+                : 'Prévia da licença ativa, sem período de trial, gerada.'
+        );
     }
 
     if ($etapaAssistente === 5) {
@@ -5644,6 +5680,78 @@ if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
 
 
 // -----------------------------------------------------------------------------
+// Contrato Digital SaaS — RC2.11.2
+// Gera minuta imutável, token seguro e convite por e-mail antes do provisionamento.
+// -----------------------------------------------------------------------------
+if ($acao_cfg === 'assistente_novo_escritorio_gerar_contrato') {
+    if (!class_exists('ContratoSaasService')) {
+        rojex_redirect_assistente(6, 'erro', 'A camada de contrato digital ainda não foi instalada no projeto.');
+    }
+    $dadosAssistente = $_SESSION['rojex_novo_escritorio'] ?? [];
+    $escritorioContrato = (array)($dadosAssistente['escritorio'] ?? []);
+    $planoContrato = (array)($dadosAssistente['plano'] ?? []);
+    $licencaContrato = (array)($dadosAssistente['licenca'] ?? []);
+    $adminContrato = (array)($dadosAssistente['administrador'] ?? []);
+    $comercialContrato = (array)($dadosAssistente['comercial'] ?? []);
+    if (!$escritorioContrato || !$planoContrato || !$licencaContrato || !$adminContrato) {
+        rojex_redirect_assistente(1, 'erro', 'A sessão do assistente está incompleta. Revise o cadastro.');
+    }
+    $representanteContrato = sgl_limpar_texto((string)($_POST['contrato_representante_nome'] ?? $escritorioContrato['responsavel'] ?? ''), 180);
+    $emailContrato = strtolower(sgl_limpar_texto((string)($_POST['contrato_representante_email'] ?? $escritorioContrato['email'] ?? ''), 180));
+    $documentoRepresentante = preg_replace('/\D+/', '', (string)($_POST['contrato_representante_documento'] ?? $escritorioContrato['documento'] ?? ''));
+    $qualidadeRepresentante = sgl_limpar_texto((string)($_POST['contrato_representante_qualidade'] ?? 'Representante legal'), 120);
+    if ($representanteContrato === '' || !filter_var($emailContrato, FILTER_VALIDATE_EMAIL) || $documentoRepresentante === '' || $qualidadeRepresentante === '') {
+        rojex_redirect_assistente(6, 'erro', 'Informe representante, documento, qualidade e e-mail válidos para o contrato.');
+    }
+    try {
+        $snapshotContrato = [
+            'nome_fantasia' => (string)($escritorioContrato['nomeFantasia'] ?? ''),
+            'razao_social' => (string)($escritorioContrato['razaoSocial'] ?? ''),
+            'documento' => (string)($escritorioContrato['documento'] ?? ''),
+            'representante_nome' => $representanteContrato,
+            'representante_email' => $emailContrato,
+            'representante_documento' => $documentoRepresentante,
+            'representante_qualidade' => $qualidadeRepresentante,
+            'plano_id' => (int)($planoContrato['id'] ?? 0),
+            'plano_nome' => (string)($planoContrato['snapshot']['nome'] ?? $planoContrato['nome'] ?? ''),
+            'periodicidade' => (string)($planoContrato['periodicidade'] ?? 'mensal'),
+            'modulos' => array_values((array)($dadosAssistente['modulos'] ?? [])),
+            'valor_oficial' => (float)($comercialContrato['valor_antes_beneficio'] ?? $comercialContrato['valor_base'] ?? 0),
+            'beneficio_tipo' => (string)($comercialContrato['beneficio_tipo'] ?? 'nenhum'),
+            'beneficio_motivo' => (string)($comercialContrato['beneficio_motivo'] ?? ''),
+            'desconto' => (float)($comercialContrato['beneficio_valor'] ?? 0),
+            'valor_contratado' => (float)($comercialContrato['valor_final'] ?? 0),
+            'hospedagem_descricao' => !empty($comercialContrato['cobra_hospedagem']) ? 'cobrança separada' : 'incluída/isenta conforme condição comercial',
+            'api_ia_descricao' => !empty($comercialContrato['cobra_api_ia']) ? 'cobrança separada conforme consumo' : 'incluída/isenta conforme condição comercial',
+            'aplicar_trial' => !empty($licencaContrato['aplicar_trial']),
+            'trial_dias' => (int)($licencaContrato['trial_dias'] ?? 0),
+            'condicoes_especiais' => (string)($escritorioContrato['condicoesEspeciais'] ?? ''),
+        ];
+        $servicoContrato = new ContratoSaasService($conn);
+        $contratoCriado = $servicoContrato->criarContrato(
+            $snapshotContrato,
+            (int)($_SESSION['user_id'] ?? 0),
+            (string)($_SESSION['nome'] ?? $_SESSION['username'] ?? 'MASTER')
+        );
+        $servicoContrato->enfileirarConvite($contratoCriado, $representanteContrato, $emailContrato);
+        $dadosAssistente['contrato'] = [
+            'id' => (int)$contratoCriado['contrato_id'],
+            'status' => 'aguardando_aceite',
+            'versao' => (string)$contratoCriado['versao'],
+            'hash_sha256' => (string)$contratoCriado['hash_sha256'],
+            'representante_nome' => $representanteContrato,
+            'representante_email' => $emailContrato,
+        ];
+        $_SESSION['rojex_novo_escritorio'] = $dadosAssistente;
+        sgl_log($conn, 'Gerou contrato digital SaaS', 'contratos_saas', (string)$contratoCriado['contrato_id'], 'Contrato enviado para aceite eletrônico.');
+        rojex_redirect_assistente(6, 'sucesso', 'Contrato gerado e colocado na fila de e-mail. O provisionamento será liberado após o aceite.');
+    } catch (Throwable $e) {
+        error_log('[ROJEX CONTRATO] ' . $e->getMessage());
+        rojex_redirect_assistente(6, 'erro', 'Não foi possível gerar o contrato digital. Verifique a migração e a configuração de e-mail.');
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Provisionamento Enterprise Transacional — Sprint 4.5 / Etapa 3.4.4
 // Revalida todos os dados e executa criação atômica com rollback completo.
 // -----------------------------------------------------------------------------
@@ -5654,6 +5762,11 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
     $licencaSessao = (array)($dadosAssistente['licenca'] ?? []);
     $administrador = (array)($dadosAssistente['administrador'] ?? []);
     $modulosSelecionados = array_values(array_unique(array_map('intval', (array)($dadosAssistente['modulos'] ?? []))));
+    $contratoSessao = (array)($dadosAssistente['contrato'] ?? []);
+    $contratoId = max(0, (int)($contratoSessao['id'] ?? 0));
+    if (!class_exists('ContratoSaasService') || $contratoId <= 0 || !(new ContratoSaasService($conn))->contratoAceito($contratoId)) {
+        rojex_redirect_assistente(6, 'erro', 'O provisionamento permanece bloqueado até o aceite eletrônico válido do contrato.');
+    }
 
     if (!$escritorio || !$planoSessao || !$licencaSessao || !$administrador || empty($administrador['senha_hash'])) {
         rojex_redirect_assistente(1, 'erro', 'A sessão do assistente está incompleta. Revise o cadastro antes de provisionar.');
@@ -5703,48 +5816,23 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
     }
     $condicoesEspeciais = sgl_limpar_texto((string)($escritorio['condicoesEspeciais'] ?? ''), 500);
 
-    $aceiteModo = (string)($_POST['assistente_aceite_modo'] ?? '');
-    if (!in_array($aceiteModo, ['cliente_direto', 'master_assistido'], true)) {
-        rojex_redirect_assistente(6, 'erro', 'Selecione o modo de aceite operacional.');
-    }
-    $representante = sgl_limpar_texto((string)($_POST['assistente_representante'] ?? ''), 140);
-    $aceiteOperacional = !empty($_POST['assistente_aceite_operacional']);
-    $aceiteAssistido = !empty($_POST['assistente_aceite_assistido']);
-    $evidenciaAssistente = '';
+    $aceiteModo = 'cliente_direto';
+    $representante = sgl_limpar_texto((string)($contratoSessao['representante_nome'] ?? $responsavel), 140);
+    $aceiteOperacional = true;
+    $aceiteAssistido = false;
+    $evidenciaAssistente = (string)($contratoSessao['hash_sha256'] ?? '');
     $tenant = strtoupper(preg_replace('/[^A-Z0-9._-]/i', '', (string)($escritorio['tenant'] ?? '')));
     $subdominio = strtolower(preg_replace('/[^a-z0-9-]/i', '', (string)($escritorio['subdominio'] ?? '')));
     $planoId = max(0, (int)($planoSessao['id'] ?? 0));
     $periodicidade = (($planoSessao['periodicidade'] ?? '') === 'anual') ? 'anual' : 'mensal';
-    $trialDias = max(7, min(30, (int)($licencaSessao['trial_dias'] ?? 15)));
+    $aplicarTrial = !empty($licencaSessao['aplicar_trial']);
+    $trialDias = $aplicarTrial ? max(7, min(30, (int)($licencaSessao['trial_dias'] ?? 15))) : 0;
     $adminNome = sgl_limpar_texto((string)($administrador['nome'] ?? ''), 150);
     $adminLogin = strtolower(preg_replace('/[^a-z0-9._-]/i', '', (string)($administrador['login'] ?? '')));
     $adminEmail = strtolower(sgl_limpar_texto((string)($administrador['email'] ?? ''), 120));
     $adminSenhaHash = (string)($administrador['senha_hash'] ?? '');
     $adminIdioma = in_array((string)($administrador['idioma'] ?? 'pt-BR'), ['pt-BR','en-US','es-ES'], true) ? (string)$administrador['idioma'] : 'pt-BR';
     $adminFuso = sgl_limpar_texto((string)($administrador['fuso'] ?? 'America/Sao_Paulo'), 80);
-
-    if ($nomeFantasia === '' || $razaoSocial === '' || !in_array(strlen($documento), [11,14], true)
-        || !filter_var($emailEscritorio, FILTER_VALIDATE_EMAIL) || $tenant === '' || $subdominio === ''
-        || $planoId <= 0 || $adminNome === '' || $adminLogin === '' || !filter_var($adminEmail, FILTER_VALIDATE_EMAIL)
-        || !password_get_info($adminSenhaHash)['algo']) {
-        rojex_redirect_assistente(6, 'erro', 'Os dados finais não passaram na revalidação de segurança. Revise o assistente.');
-    }
-
-    if ($cep === '' || $endereco === '' || $numero === '' || $bairro === '' || $cidade === '' || $uf === '') {
-        rojex_redirect_assistente(6, 'erro', 'Endereço incompleto. Preencha CEP, logradouro, número, bairro, cidade e estado.');
-    }
-
-    if ($representante === '') {
-        rojex_redirect_assistente(6, 'erro', 'Informe o representante responsável pelo aceite.');
-    }
-
-    if (!$aceiteOperacional) {
-        rojex_redirect_assistente(6, 'erro', 'É necessário confirmar o aceite operacional.');
-    }
-
-    if ($aceiteModo === 'master_assistido' && !$aceiteAssistido) {
-        rojex_redirect_assistente(6, 'erro', 'A autorização expressa é obrigatória no aceite assistido pelo MASTER.');
-    }
 
     if ($evidenciaAssistente === '') {
         $evidenciaAssistente = hash(
@@ -5863,7 +5951,9 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
         $stmt->close();
 
         $inicio = date('Y-m-d');
-        $fimTrial = date('Y-m-d', strtotime('+' . $trialDias . ' days'));
+        $fimTrial = $aplicarTrial
+            ? date('Y-m-d', strtotime('+' . $trialDias . ' days'))
+            : null;
         $proximoVencimento = $fimTrial;
         $statusAssinatura = 'trial';
         $valorBase = (float)$comercialFinal['valor_base'];
@@ -5887,7 +5977,7 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
             $stmt->close();
         } while ($existeChave);
 
-        $statusLicenca = 'teste';
+        $statusLicenca = $aplicarTrial ? 'teste' : 'ativa';
         $limiteUsuarios = max(1, (int)($planoAtual['limite_usuarios_padrao'] ?? 1));
         $limiteArmazenamento = max(1, (int)($planoAtual['limite_armazenamento_gb_padrao'] ?? 1));
         $observacoesLicenca = json_encode([
@@ -5898,7 +5988,9 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
             'beneficio_tipo'=>(string)($comercialFinal['beneficio_tipo'] ?? 'nenhum'),
             'beneficio_valor'=>(float)($comercialFinal['beneficio_valor'] ?? 0),
             'beneficio_percentual'=>(float)($comercialFinal['beneficio_percentual'] ?? 0),
-            'trial_dias'=>$trialDias
+            'aplicar_trial'=>$aplicarTrial,
+            'trial_dias'=>$trialDias,
+            'fim_trial'=>$fimTrial
         ], JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
         $stmt = $conn->prepare("INSERT INTO licencas_saas (escritorio_id,chave_licenca,plano,status,limite_usuarios,limite_armazenamento_gb,ativada_em,renovacao_em,observacoes) VALUES (?,?,?,?,?,?,?,?,?)");
         $stmt->bind_param('isssiisss', $escritorioId, $chaveLicenca, $codigoPlano, $statusLicenca, $limiteUsuarios, $limiteArmazenamento, $inicio, $fimTrial, $observacoesLicenca);
@@ -5995,6 +6087,9 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
             'anuidade_isenta' => !empty($comercialFinal['anuidade_isenta']) ? '1' : '0',
             'cobra_hospedagem' => !empty($comercialFinal['cobra_hospedagem']) ? '1' : '0',
             'cobra_api_ia' => !empty($comercialFinal['cobra_api_ia']) ? '1' : '0',
+            'trial_aplicado' => $aplicarTrial ? '1' : '0',
+            'trial_dias' => (string)$trialDias,
+            'trial_fim' => $fimTrial ?? '',
             'licenca_chave' => $chaveLicenca,
         ];
         $stmtCfg = $conn->prepare("INSERT INTO escritorios_configuracoes_saas (escritorio_id,tenant_id,chave,valor) VALUES (?,?,?,?)");
@@ -6012,6 +6107,11 @@ if ($acao_cfg === 'assistente_novo_escritorio_provisionar') {
             '; Valor oficial: R$ ' . number_format((float)($comercialFinal['valor_antes_beneficio'] ?? $valorBase), 2, ',', '.') .
             '; Desconto comercial: R$ ' . number_format((float)($comercialFinal['beneficio_valor'] ?? 0), 2, ',', '.') .
             '; Valor contratado: R$ ' . number_format($valorContratado, 2, ',', '.'));
+
+        $stmtContrato = $conn->prepare("UPDATE contratos_saas SET escritorio_id=?,tenant_id=?,status='provisionado',provisionado_em=NOW() WHERE id=? AND status='aceito'");
+        $stmtContrato->bind_param('isi', $escritorioId, $tenant, $contratoId);
+        if (!$stmtContrato->execute() || $stmtContrato->affected_rows !== 1) { $stmtContrato->close(); throw new RuntimeException('Falha ao vincular o contrato aceito ao provisionamento.'); }
+        $stmtContrato->close();
 
         $conn->commit();
         unset($_SESSION['rojex_novo_escritorio']);
@@ -9968,7 +10068,34 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
   </form>
   <?php elseif($assistenteEtapa===4): $pSnap=$assistentePlano['snapshot']??[]; ?>
   <form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="4">
-   <div class="row g-3"><div class="col-md-4"><label class="form-label">Trial</label><input type="number" name="assistente_trial_dias" class="form-control" min="<?=max(7,(int)($pSnap['trial_dias_minimo']??7))?>" max="<?=min(30,(int)($pSnap['trial_dias_maximo']??30))?>" value="<?=(int)($assistenteLicenca['trial_dias']??$pSnap['trial_dias_padrao']??15)?>"></div><div class="col-md-4"><label class="form-label">Limite de usuários</label><div class="form-control bg-light"><?=(int)($pSnap['limite_usuarios_padrao']??0)?></div></div><div class="col-md-4"><label class="form-label">Armazenamento</label><div class="form-control bg-light"><?=(int)($pSnap['limite_armazenamento_gb_padrao']??0)?> GB</div></div></div>
+   <?php
+   $trialAplicadoAtual=!empty($assistenteLicenca['aplicar_trial']);
+   $trialDiasAtual=(int)($assistenteLicenca['trial_dias']??$pSnap['trial_dias_padrao']??15);
+   if($trialDiasAtual<7 || $trialDiasAtual>30){$trialDiasAtual=15;}
+   ?>
+   <div class="row g-3">
+    <div class="col-md-4">
+     <label class="form-label d-block">Período de trial</label>
+     <div class="form-check form-switch mt-2">
+      <input class="form-check-input" type="checkbox" name="assistente_aplicar_trial" id="assistenteAplicarTrial" value="1" <?=$trialAplicadoAtual?'checked':''?>>
+      <label class="form-check-label" for="assistenteAplicarTrial">Aplicar período de trial</label>
+     </div>
+     <small class="text-muted">Desmarcado: licença ativa imediatamente, sem data de trial.</small>
+    </div>
+    <div class="col-md-4" id="assistenteGrupoTrialDias">
+     <label class="form-label">Dias do trial</label>
+     <input type="number" name="assistente_trial_dias" id="assistenteTrialDias" class="form-control" min="7" max="30" value="<?=$trialDiasAtual?>">
+     <small class="text-muted">Informe de 7 a 30 dias.</small>
+    </div>
+    <div class="col-md-2">
+     <label class="form-label">Limite de usuários</label>
+     <div class="form-control bg-light"><?=(int)($pSnap['limite_usuarios_padrao']??0)?></div>
+    </div>
+    <div class="col-md-2">
+     <label class="form-label">Armazenamento</label>
+     <div class="form-control bg-light"><?=(int)($pSnap['limite_armazenamento_gb_padrao']??0)?> GB</div>
+    </div>
+   </div>
    <?php if(!empty($assistenteLicenca['chave'])): ?><div class="alert alert-success mt-4"><strong>Prévia da chave:</strong> <code><?=htmlspecialchars($assistenteLicenca['chave'])?></code><br><small>Será recriada e confirmada dentro da transação definitiva.</small></div><?php endif; ?>
    <div class="d-flex justify-content-between mt-4"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=3"><i class="bi bi-arrow-left"></i> Voltar</a><button class="btn btn-primary">Gerar prévia e continuar <i class="bi bi-arrow-right"></i></button></div>
   </form>
@@ -9990,12 +10117,27 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
      <?php if(!empty($assistenteComercial['mensalidade_isenta'])): ?><span class="badge bg-success">Mensalidade isenta</span><?php endif; ?>
     </div>
    <?php endif; ?>
-   <div class="small mt-2">Trial: <?=(int)($assistenteLicenca['trial_dias']??0)?> dias · Usuários: <?=(int)($pSnap['limite_usuarios_padrao']??0)?> · Armazenamento: <?=(int)($pSnap['limite_armazenamento_gb_padrao']??0)?> GB</div><hr><code><?=htmlspecialchars((string)($assistenteLicenca['chave']??'-'))?></code></div></div></div>
+   <div class="small mt-2">Trial: <?=!empty($assistenteLicenca['aplicar_trial']) ? ((int)($assistenteLicenca['trial_dias']??0).' dias') : 'não aplicado — licença ativa imediatamente'?> · Usuários: <?=(int)($pSnap['limite_usuarios_padrao']??0)?> · Armazenamento: <?=(int)($pSnap['limite_armazenamento_gb_padrao']??0)?> GB</div><hr><code><?=htmlspecialchars((string)($assistenteLicenca['chave']??'-'))?></code></div></div></div>
    <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Módulos contratados</h6><span class="badge bg-primary"><?=count($assistenteModulosSelecionados)?> incluído(s)</span> <span class="badge bg-secondary"><?=count($modulosRemovidos)?> removido(s)</span><div class="small mt-3"><?php foreach($modulosDoPlanoAssistente as $m) if(in_array((int)$m['id'],$assistenteModulosSelecionados,true)) echo '<span class="badge bg-white text-dark border me-1 mb-1">'.htmlspecialchars($m['nome']).'</span>'; ?></div><?php if($modulosRemovidos): ?><hr><small class="text-muted d-block mb-1">Removidos:</small><?php foreach($modulosRemovidos as $mr): ?><span class="badge bg-light text-muted border me-1 mb-1"><?=htmlspecialchars((string)($mr['nome']??'Módulo'))?><?php if((float)($mr['valor_ajuste']??0)>0): ?> · -R$ <?=number_format((float)$mr['valor_ajuste'],2,',','.')?><?php endif; ?></span><?php endforeach; ?><?php endif; ?></div></div></div>
    <div class="col-lg-6"><div class="card h-100 border-0 bg-light"><div class="card-body"><h6>Administrador</h6><strong><?=htmlspecialchars((string)($assistenteAdmin['nome']??'-'))?></strong><br><?=htmlspecialchars((string)($assistenteAdmin['login']??'-'))?><br><small><?=htmlspecialchars((string)($assistenteAdmin['email']??'-'))?> · <?=htmlspecialchars((string)($assistenteAdmin['fuso']??'-'))?></small><hr><small class="text-muted">A senha permanece protegida por hash na sessão e será gravada somente no provisionamento definitivo.</small></div></div></div>
   </div>
   <div class="alert alert-success mt-4"><i class="bi bi-shield-check me-1"></i><strong>Provisionamento transacional disponível.</strong> Todos os dados serão revalidados e criados em uma única transação. Qualquer falha executará rollback completo.</div>
-   <form method="post" id="formProvisionamentoFinal" onsubmit="return rojexValidarAceiteFinal();"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_provisionar"><div class="card border-primary mb-4"><div class="card-header bg-primary text-white"><i class="bi bi-shield-check me-1"></i>Aceite operacional</div><div class="card-body"><div class="row g-3"><div class="col-md-5"><label class="form-label">Modo de aceite *</label><select name="assistente_aceite_modo" id="assistenteAceiteModo" class="form-select" required><option value="">Selecione</option><option value="cliente_direto">Aceite direto pelo representante do cliente</option><option value="master_assistido">Aceite assistido e registrado pelo MASTER</option></select></div><div class="col-md-7"><label class="form-label">Representante responsável *</label><input type="text" name="assistente_representante" id="assistenteRepresentante" class="form-control" maxlength="140" required></div><div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" name="assistente_aceite_operacional" id="assistenteAceiteOperacional" value="1" required><label class="form-check-label" for="assistenteAceiteOperacional">Confirmo que os dados foram revisados e que existe autorização para iniciar a implantação.</label></div></div><div class="col-12" id="assistenteGrupoAceiteMaster" style="display:none;"><div class="form-check border rounded p-3 bg-light"><input class="form-check-input ms-0 me-2" type="checkbox" name="assistente_aceite_assistido" id="assistenteAceiteAssistido" value="1"><label class="form-check-label" for="assistenteAceiteAssistido">Declaro que possuo autorização expressa do representante do cliente para registrar este aceite assistido pelo MASTER.</label></div></div></div></div></div><div class="d-flex justify-content-between"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=5"><i class="bi bi-arrow-left"></i> Corrigir administrador</a><button class="btn btn-success"><i class="bi bi-rocket-takeoff me-1"></i> Provisionar escritório</button></div></form>
+   <?php
+   $contratoAssistente=(array)($assistenteDados['contrato']??[]);
+   $contratoIdAssistente=max(0,(int)($contratoAssistente['id']??0));
+   $contratoAceitoAssistente=false;
+   if($contratoIdAssistente>0 && class_exists('ContratoSaasService')){
+       try{$contratoAceitoAssistente=(new ContratoSaasService($conn))->contratoAceito($contratoIdAssistente);}catch(Throwable $e){}
+   }
+   ?>
+   <?php if(!$contratoIdAssistente): ?>
+   <form method="post"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_gerar_contrato"><div class="card border-primary mb-4"><div class="card-header bg-primary text-white"><i class="bi bi-file-earmark-lock me-1"></i>Contrato digital</div><div class="card-body"><div class="row g-3"><div class="col-md-6"><label class="form-label">Representante *</label><input type="text" name="contrato_representante_nome" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['responsavel']??''))?>" required></div><div class="col-md-6"><label class="form-label">E-mail *</label><input type="email" name="contrato_representante_email" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['email']??''))?>" required></div><div class="col-md-6"><label class="form-label">CPF/CNPJ *</label><input type="text" name="contrato_representante_documento" class="form-control" value="<?=htmlspecialchars((string)($assistenteEscritorio['documento']??''))?>" required></div><div class="col-md-6"><label class="form-label">Qualidade *</label><input type="text" name="contrato_representante_qualidade" class="form-control" value="Representante legal" required></div></div></div></div><div class="d-flex justify-content-between"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=5"><i class="bi bi-arrow-left"></i> Corrigir administrador</a><button class="btn btn-primary"><i class="bi bi-envelope-paper me-1"></i> Gerar e enviar contrato</button></div></form>
+   <?php elseif(!$contratoAceitoAssistente): ?>
+   <div class="alert alert-warning"><strong>Contrato aguardando aceite.</strong><br>Versão: <?=htmlspecialchars((string)($contratoAssistente['versao']??''))?><br>Representante: <?=htmlspecialchars((string)($contratoAssistente['representante_nome']??''))?>. O botão de provisionamento será liberado automaticamente após o aceite eletrônico.</div>
+   <?php else: ?>
+   <div class="alert alert-success"><strong>Contrato aceito.</strong> O provisionamento está liberado.</div>
+   <form method="post" id="formProvisionamentoFinal" onsubmit="return confirm('Confirmar o provisionamento definitivo após o aceite contratual?');"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_provisionar"><div class="d-flex justify-content-between"><a class="btn btn-outline-secondary" href="?mod=configuracoes&tab=novo_escritorio&etapa=5"><i class="bi bi-arrow-left"></i> Corrigir administrador</a><button class="btn btn-success"><i class="bi bi-rocket-takeoff me-1"></i> Provisionar escritório</button></div></form>
+   <?php endif; ?>
   <?php endif; ?>
  </div>
 </div>
@@ -12300,6 +12442,28 @@ function rojexAtualizarBotaoWhatsappAssistente() {
 }
 
 
+function rojexAtualizarTrialAssistente() {
+    const aplicar = document.getElementById('assistenteAplicarTrial');
+    const grupo = document.getElementById('assistenteGrupoTrialDias');
+    const dias = document.getElementById('assistenteTrialDias');
+
+    if (!aplicar || !grupo || !dias) {
+        return;
+    }
+
+    const ativo = aplicar.checked;
+    grupo.style.display = ativo ? '' : 'none';
+    dias.disabled = !ativo;
+    dias.required = ativo;
+
+    if (ativo) {
+        let valor = parseInt(dias.value || '15', 10);
+        if (!Number.isFinite(valor) || valor < 7 || valor > 30) {
+            dias.value = '15';
+        }
+    }
+}
+
 function rojexAtualizarBeneficioComercial() {
     const tipo = document.getElementById('assistenteBeneficioTipo')?.value || 'nenhum';
     const grupoPercentual = document.getElementById('grupoBeneficioPercentual');
@@ -12409,6 +12573,9 @@ document.addEventListener('DOMContentLoaded', function () {
     document.getElementById('assistenteClassificacaoCliente')?.addEventListener('change', rojexAtualizarClassificacaoComercial);
     rojexAtualizarBotaoWhatsappAssistente();
     document.getElementById('assistenteWhatsapp')?.addEventListener('input', rojexAtualizarBotaoWhatsappAssistente);
+    rojexAtualizarTrialAssistente();
+    document.getElementById('assistenteAplicarTrial')?.addEventListener('change', rojexAtualizarTrialAssistente);
+
     rojexAtualizarBeneficioComercial();
     document.getElementById('assistenteBeneficioTipo')?.addEventListener('change', rojexAtualizarBeneficioComercial);
 

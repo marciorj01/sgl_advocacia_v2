@@ -1,0 +1,2 @@
+<?php declare(strict_types=1); ?>
+<!doctype html><html lang="pt-BR"><body style="font-family:Arial,sans-serif;color:#1f2937;line-height:1.5"><h2>Contrato aceito</h2><p>Olá, <?=htmlspecialchars((string)$nome,ENT_QUOTES,'UTF-8')?>.</p><p>O aceite eletrônico do contrato ROJEX.AI foi registrado com sucesso em <?=htmlspecialchars((string)$aceito_em,ENT_QUOTES,'UTF-8')?>.</p><p>Hash SHA-256: <code><?=htmlspecialchars((string)$hash_sha256,ENT_QUOTES,'UTF-8')?></code></p></body></html>

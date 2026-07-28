@@ -858,7 +858,23 @@ $encontrados = $lista ? $lista->num_rows : 0;
                     <td><?= h(trim(($row['oab'] ?? '') . ' ' . ($row['oab_uf'] ?? '')) ?: '-') ?></td>
                     <td><?= h($row['cpf'] ?: '-') ?></td>
                     <td><?= h($row['especialidade'] ?: '-') ?></td>
-                    <td><?= h($row['telefone'] ?: '-') ?></td>
+                    <td class="text-nowrap">
+                        <?= h($row['telefone'] ?: '-') ?>
+                        <?php
+                            $numeroWhatsappLista = preg_replace('/\D+/', '', (string)($row['telefone'] ?? ''));
+                            $whatsappListaValido = in_array(strlen($numeroWhatsappLista), [10, 11], true);
+                        ?>
+                        <?php if ($whatsappListaValido): ?>
+                            <a
+                                href="https://wa.me/55<?= h($numeroWhatsappLista) ?>"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                class="btn btn-sm btn-success ms-2"
+                                title="Conversar no WhatsApp"
+                                aria-label="Conversar com <?= h($row['nome']) ?> no WhatsApp"
+                            ><i class="bi bi-whatsapp"></i></a>
+                        <?php endif; ?>
+                    </td>
                     <td>
                         <span class="badge bg-<?= $row['status'] === 'Ativo' ? 'success' : 'secondary' ?>">
                             <?= h($row['status']) ?>

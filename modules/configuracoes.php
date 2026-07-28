@@ -4865,7 +4865,7 @@ if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal
     try {
         $conn->begin_transaction();
         if ($reemitirConvite) {
-            $stmt = $conn->prepare("SELECT pc.id,pc.tenant_id,pc.escritorio_id,pc.cliente_id,pc.email,e.subdominio FROM portal_clientes_contas pc INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id WHERE pc.id=? AND pc.tenant_id=? AND pc.escritorio_id=? AND pc.status='CONVITE_PENDENTE' LIMIT 1 FOR UPDATE");
+            $stmt = $conn->prepare("SELECT pc.id,pc.tenant_id,pc.escritorio_id,pc.cliente_id,pc.email,e.subdominio,c.nome AS cliente_nome FROM portal_clientes_contas pc INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id INNER JOIN clientes c ON c.id=pc.cliente_id AND c.tenant_id=pc.tenant_id AND c.escritorio_id=pc.escritorio_id WHERE pc.id=? AND pc.tenant_id=? AND pc.escritorio_id=? AND pc.status='CONVITE_PENDENTE' LIMIT 1 FOR UPDATE");
             $stmt->bind_param('isi', $contaPortalId, $tenantPortal, $escritorioPortalId); $stmt->execute(); $contaPortal = $stmt->get_result()->fetch_assoc(); $stmt->close();
             if (!$contaPortal) throw new RuntimeException('Conta do Portal não encontrada.');
             $escritorioPortalId = (int)$contaPortal['escritorio_id']; $clientePortalId = (string)$contaPortal['cliente_id']; $emailPortal = (string)$contaPortal['email']; $tenantPortal = (string)$contaPortal['tenant_id'];
@@ -4900,6 +4900,15 @@ if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal
         $stmt->execute(); $stmt->close();
         $conn->commit();
 
+        $nomeClientePortal = trim((string)(
+            $reemitirConvite
+                ? ($contaPortal['cliente_nome'] ?? '')
+                : ($clientePortal['nome'] ?? '')
+        ));
+        if ($nomeClientePortal === '') {
+            $nomeClientePortal = 'Cliente';
+        }
+
         $scriptPortal = str_replace('\\', '/', (string)($_SERVER['SCRIPT_NAME'] ?? '/index.php'));
         $basePortal = rtrim(str_replace('\\', '/', dirname($scriptPortal)), '/.');
         $hostPortal = trim((string)($_SERVER['HTTP_HOST'] ?? ''));
@@ -4913,13 +4922,80 @@ if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal
         if (defined('ROJEX_APP_URL') && trim((string)ROJEX_APP_URL) !== '') {
             $baseConvitePortal = rtrim((string)ROJEX_APP_URL, '/');
         }
+        $urlConvitePortal = $baseConvitePortal . '/portal/primeiro_acesso.php?token=' . rawurlencode($tokenPortal) . '&tenant=' . rawurlencode($tenantPortal) . '&escritorio=' . rawurlencode((string)$escritorioPortalId);
+
+        $statusEmailPortal = 'O link foi gerado para cópia manual.';
+        $emailFilaPortalId = 0;
+        $emailPortalEnviado = false;
+
+        try {
+            if (!class_exists('EmailService')) {
+                throw new RuntimeException('Serviço de e-mail não carregado.');
+            }
+
+            $assuntoPortal = 'Convite de acesso ao Portal do Cliente — ROJEX.AI';
+            $nomeSeguroPortal = htmlspecialchars($nomeClientePortal, ENT_QUOTES, 'UTF-8');
+            $urlSeguraPortal = htmlspecialchars($urlConvitePortal, ENT_QUOTES, 'UTF-8');
+            $expiraSeguroPortal = htmlspecialchars(date('d/m/Y H:i', strtotime($expiraPortal)), ENT_QUOTES, 'UTF-8');
+
+            $htmlEmailPortal = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"></head>'
+                . '<body style="font-family:Arial,sans-serif;color:#1f2937;line-height:1.6">'
+                . '<div style="max-width:640px;margin:0 auto;padding:24px">'
+                . '<h2 style="color:#0d6efd">Portal do Cliente — ROJEX.AI</h2>'
+                . '<p>Olá, <strong>' . $nomeSeguroPortal . '</strong>.</p>'
+                . '<p>Seu escritório criou um acesso ao Portal do Cliente. Clique no botão abaixo para definir sua senha e concluir o primeiro acesso.</p>'
+                . '<p style="margin:28px 0"><a href="' . $urlSeguraPortal . '" style="background:#0d6efd;color:#fff;text-decoration:none;padding:12px 20px;border-radius:6px;display:inline-block">Criar minha senha</a></p>'
+                . '<p>Este convite é válido até <strong>' . $expiraSeguroPortal . '</strong> e poderá ser utilizado uma única vez.</p>'
+                . '<p style="font-size:13px;color:#6b7280">Caso o botão não funcione, copie e cole este endereço no navegador:<br>' . $urlSeguraPortal . '</p>'
+                . '<p style="font-size:13px;color:#6b7280">Se você não reconhece este convite, ignore esta mensagem.</p>'
+                . '</div></body></html>';
+
+            $textoEmailPortal = "Olá, {$nomeClientePortal}.\n\n"
+                . "Seu escritório criou um acesso ao Portal do Cliente ROJEX.AI.\n"
+                . "Defina sua senha pelo link abaixo:\n{$urlConvitePortal}\n\n"
+                . "Válido até " . date('d/m/Y H:i', strtotime($expiraPortal)) . ".\n";
+
+            $servicoEmailPortal = EmailService::fromProject($conn);
+            $emailFilaPortalId = $servicoEmailPortal->enfileirar(
+                'portal_cliente_convite',
+                $emailPortal,
+                $nomeClientePortal,
+                $assuntoPortal,
+                $htmlEmailPortal,
+                $textoEmailPortal,
+                'portal_clientes_contas',
+                (string)$contaPortalId
+            );
+
+            $resultadoEmailPortal = $servicoEmailPortal->processarFila(1);
+            $emailPortalEnviado = (int)($resultadoEmailPortal['enviados'] ?? 0) > 0;
+            $statusEmailPortal = $emailPortalEnviado
+                ? 'Convite enviado por e-mail.'
+                : 'Convite registrado na fila de e-mail #' . $emailFilaPortalId . '.';
+        } catch (Throwable $emailPortalErro) {
+            error_log('[ROJEX EMAIL PORTAL] ' . $emailPortalErro->getMessage());
+            $statusEmailPortal = 'O e-mail não pôde ser enviado agora; use o link exibido ou tente Novo convite.';
+        }
+
         $_SESSION['rojex_portal_convite'] = [
             'email' => $emailPortal,
             'expira_em' => $expiraPortal,
-            'url' => $baseConvitePortal . '/portal/primeiro_acesso.php?token=' . rawurlencode($tokenPortal) . '&tenant=' . rawurlencode($tenantPortal) . '&escritorio=' . rawurlencode((string)$escritorioPortalId),
+            'url' => $urlConvitePortal,
+            'email_status' => $statusEmailPortal,
         ];
-        sgl_log($conn, $reemitirConvite ? 'Reemitiu convite do Portal' : 'Criou conta do Portal', 'portal_clientes_contas', (string)$contaPortalId, 'Tenant: ' . $tenantPortal . '; Cliente: ' . $clientePortalId . '; permissões iniciais desativadas.');
-        sgl_redirect_cfg('portal', 'sucesso', $reemitirConvite ? 'Novo convite gerado com validade de 48 horas.' : 'Conta criada e convite seguro gerado. Nenhum conteúdo foi publicado.');
+        sgl_log(
+            $conn,
+            $reemitirConvite ? 'Reemitiu convite do Portal' : 'Criou conta do Portal',
+            'portal_clientes_contas',
+            (string)$contaPortalId,
+            'Tenant: ' . $tenantPortal . '; Cliente: ' . $clientePortalId . '; permissões iniciais desativadas. ' . $statusEmailPortal
+        );
+        sgl_redirect_cfg(
+            'portal',
+            'sucesso',
+            ($reemitirConvite ? 'Novo convite gerado com validade de 48 horas. ' : 'Conta criada e convite seguro gerado. ')
+            . $statusEmailPortal
+        );
     } catch (Throwable $e) {
         try { $conn->rollback(); } catch (Throwable $ignorado) {}
         sgl_redirect_cfg('portal', 'erro', $e->getCode() === 1062 ? 'Já existe uma conta para este cliente ou e-mail neste escritório.' : $e->getMessage());
@@ -10522,6 +10598,9 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
 <div class="alert alert-warning shadow-sm">
     <strong>Convite gerado — copie agora.</strong>
     <div class="small mb-2">E-mail: <?=htmlspecialchars((string)$portalConviteGerado['email'])?> · expira em <?=htmlspecialchars((string)$portalConviteGerado['expira_em'])?></div>
+    <?php if (!empty($portalConviteGerado['email_status'])): ?>
+        <div class="small mb-2 fw-semibold"><?=htmlspecialchars((string)$portalConviteGerado['email_status'])?></div>
+    <?php endif; ?>
     <div class="input-group"><input id="portalConviteUrl" class="form-control font-monospace" readonly value="<?=htmlspecialchars((string)$portalConviteGerado['url'])?>"><button type="button" class="btn btn-dark" onclick="navigator.clipboard.writeText(document.getElementById('portalConviteUrl').value)">Copiar link</button></div>
     <div class="form-text">O token não é armazenado em texto aberto e este link será exibido somente agora.</div>
 </div>

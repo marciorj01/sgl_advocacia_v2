@@ -525,8 +525,66 @@ $stmtCards->close();
 </div>
 
 <script>
-function mascaraMoeda(input){let v=input.value.replace(/\D/g,''); if(!v){input.value='';return;} v=(parseInt(v,10)/100).toFixed(2).replace('.',',').replace(/\B(?=(\d{3})+(?!\d))/g,'.'); input.value='R$ '+v;}
-function limparMoedaAntesDeSalvar(form){const c=form.querySelector('[name="valor_causa"]'); if(c)c.value=c.value.replace(/[R$\s.]/g,'').replace(',','.'); return true;}
+function rojexNormalizarMoedaBr(valor) {
+    const somenteDigitos = String(valor || '').replace(/\D/g, '');
+    if (somenteDigitos === '') return '';
+
+    return Number(somenteDigitos) / 100;
+}
+
+function rojexFormatarMoedaBr(input) {
+    if (!input) return;
+
+    const numero = rojexNormalizarMoedaBr(input.value);
+    if (numero === '') {
+        input.value = '';
+        return;
+    }
+
+    input.value = numero.toLocaleString('pt-BR', {
+        style: 'currency',
+        currency: 'BRL',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+}
+
+function limparMoedaAntesDeSalvar(form) {
+    const campo = form.querySelector('[name="valor_causa"]');
+    if (campo) {
+        const digitos = campo.value.replace(/\D/g, '');
+        campo.value = digitos === '' ? '0.00' : (Number(digitos) / 100).toFixed(2);
+    }
+    return true;
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    const campoValor = document.querySelector('[name="valor_causa"]');
+    if (!campoValor) return;
+
+    campoValor.setAttribute('inputmode', 'decimal');
+
+    campoValor.addEventListener('input', function () {
+        rojexFormatarMoedaBr(this);
+    });
+
+    campoValor.addEventListener('focus', function () {
+        if (this.value.trim() === '') {
+            this.value = 'R$ 0,00';
+        }
+    });
+
+    campoValor.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+        }
+    });
+
+    // Mantém valores carregados para edição no padrão brasileiro.
+    if (campoValor.value.trim() !== '') {
+        rojexFormatarMoedaBr(campoValor);
+    }
+});
 </script>
 
 <?php if ($acao === 'novo' || $acao === 'editar'): ?>
@@ -547,7 +605,20 @@ function limparMoedaAntesDeSalvar(form){const c=form.querySelector('[name="valor
                 <div class="col-md-4"><label class="form-label">Comarca</label><input type="text" name="comarca" class="form-control" value="<?= h($f['comarca']) ?>"></div>
                 <div class="col-md-4"><label class="form-label">Advogado Responsável</label><select name="advogado_id" class="form-select"><option value="">-- Selecione --</option><?php if($advogados): while($a=$advogados->fetch_assoc()): ?><option value="<?= h($a['id']) ?>" <?= $f['advogado_id']===$a['id']?'selected':'' ?>><?= h($a['nome']) ?></option><?php endwhile; endif; ?></select></div>
                 <div class="col-md-3"><label class="form-label">Data Distribuição</label><input type="date" name="data_distribuicao" class="form-control" value="<?= h($f['data_distribuicao']) ?>"></div>
-                <div class="col-md-3"><label class="form-label">Valor da Causa</label><input type="text" name="valor_causa" class="form-control" placeholder="R$ 0,00" value="<?= h($valor_form) ?>" oninput="mascaraMoeda(this)" inputmode="numeric"></div>
+                <div class="col-md-3">
+                    <label class="form-label">Valor da Causa</label>
+                    <input
+                        type="text"
+                        name="valor_causa"
+                        id="valorCausa"
+                        class="form-control"
+                        placeholder="R$ 0,00"
+                        value="<?= h($valor_form) ?>"
+                        inputmode="decimal"
+                        autocomplete="off"
+                    >
+                    <div class="form-text">A máscara é aplicada durante a digitação. Ex.: 1000000 será exibido como R$ 10.000,00.</div>
+                </div>
                 <div class="col-md-3"><label class="form-label">Próximo Prazo</label><input type="date" name="proximo_prazo" class="form-control" value="<?= h($f['proximo_prazo']) ?>"></div>
                 <div class="col-md-3"><label class="form-label">Status</label><select name="status" class="form-select"><?php foreach($statuses_proc as $st): ?><option <?= $f['status']===$st?'selected':'' ?>><?= h($st) ?></option><?php endforeach; ?></select></div>
                 <div class="col-12"><label class="form-label">Fase Atual</label><input type="text" name="fase_atual" class="form-control" value="<?= h($f['fase_atual']) ?>" placeholder="Ex.: Inicial, Instrução, Recurso, Execução..."></div>

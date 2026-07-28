@@ -139,6 +139,6 @@ $rotulosPermissoes = [
         </section>
     <?php endif; ?>
 
-    <section class="grid"><?php foreach($rotulosPermissoes as $chave=>$rotulo): $ativa=!empty($permissoes[$chave]);?><article class="module"><h3><?=rojexPortalIndexH($rotulo)?></h3><span class="badge <?=$ativa?'on':'off'?>"><?=$ativa?'Disponível':'Não disponível'?></span></article><?php endforeach;?></section>
+    <section class="grid"><?php foreach($rotulosPermissoes as $chave=>$rotulo): $ativa=!empty($permissoes[$chave]); $link=($ativa && in_array($chave,['ver_documentos','enviar_documentos'],true))?'documentos.php':'';?><article class="module"><h3><?=rojexPortalIndexH($rotulo)?></h3><span class="badge <?=$ativa?'on':'off'?>"><?=$ativa?'Disponível':'Não disponível'?></span><?php if($link!==''):?><p style="margin:14px 0 0"><a href="<?=rojexPortalIndexH($link)?>" style="display:inline-block;padding:9px 12px;border-radius:9px;background:#246ca8;color:#fff;text-decoration:none;font-weight:800;font-size:13px">Acessar documentos</a></p><?php endif;?></article><?php endforeach;?></section>
 </main><footer>Tecnologia ROJEX.AI · Portal Jurídico Multi-Tenant</footer>
 </body></html>

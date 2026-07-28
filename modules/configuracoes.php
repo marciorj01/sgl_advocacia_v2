@@ -5254,13 +5254,146 @@ if ($acao_cfg === 'salvar_configuracao_plano_modulos') {
 // Assistente Enterprise "Novo Escritório" — Sprint 4.5 / Etapa 3.4.2
 // Nesta etapa os dados permanecem somente em sessão. Nenhum tenant é provisionado.
 // -----------------------------------------------------------------------------
+/**
+ * Recupera uma contratação aceita e ainda não provisionada quando a sessão do
+ * assistente foi perdida. Nenhuma senha é persistida no contrato: o MASTER
+ * deverá informar novamente a senha inicial antes do provisionamento.
+ *
+ * A recuperação automática só ocorre quando existe exatamente um contrato
+ * elegível, evitando vincular silenciosamente uma contratação incorreta.
+ */
+function rojex_assistente_recuperar_contrato_aceito(mysqli $conn): ?array {
+    if (!sgl_tabela_existe($conn, 'contratos_saas')) {
+        return null;
+    }
+
+    try {
+        $resultado = $conn->query(
+            "SELECT id,status,versao,hash_sha256,snapshot_contratacao,
+                    representante_nome,representante_email,
+                    representante_documento,representante_qualidade
+               FROM contratos_saas
+              WHERE status='aceito'
+                AND (escritorio_id IS NULL OR escritorio_id=0)
+                AND provisionado_em IS NULL
+              ORDER BY aceito_em DESC,id DESC
+              LIMIT 2"
+        );
+        if (!$resultado) {
+            return null;
+        }
+
+        $contratos = [];
+        while ($linha = $resultado->fetch_assoc()) {
+            $contratos[] = $linha;
+        }
+        $resultado->free();
+
+        if (count($contratos) !== 1) {
+            return null;
+        }
+
+        $contrato = $contratos[0];
+        $snapshot = json_decode((string)($contrato['snapshot_contratacao'] ?? ''), true);
+        if (!is_array($snapshot)) {
+            $snapshot = [];
+        }
+
+        // Contratos criados após esta correção carregam um snapshot completo
+        // para retomada. Contratos anteriores usam os campos disponíveis.
+        $retomada = is_array($snapshot['assistente_retomada'] ?? null)
+            ? (array)$snapshot['assistente_retomada']
+            : [];
+
+        $escritorio = is_array($retomada['escritorio'] ?? null)
+            ? (array)$retomada['escritorio']
+            : [
+                'nomeFantasia' => (string)($snapshot['nome_fantasia'] ?? ''),
+                'razaoSocial' => (string)($snapshot['razao_social'] ?? ''),
+                'documento' => (string)($snapshot['documento'] ?? ''),
+                'responsavel' => (string)($snapshot['representante_nome'] ?? $contrato['representante_nome'] ?? ''),
+                'email' => (string)($snapshot['representante_email'] ?? $contrato['representante_email'] ?? ''),
+                'condicoesEspeciais' => (string)($snapshot['condicoes_especiais'] ?? ''),
+            ];
+
+        $plano = is_array($retomada['plano'] ?? null) ? (array)$retomada['plano'] : [];
+        $planoId = max(0, (int)($plano['id'] ?? $snapshot['plano_id'] ?? 0));
+        if ($planoId > 0 && empty($plano['snapshot']) && sgl_tabela_existe($conn, 'planos_saas')) {
+            $stmtPlano = $conn->prepare("SELECT * FROM planos_saas WHERE id=? LIMIT 1");
+            if ($stmtPlano) {
+                $stmtPlano->bind_param('i', $planoId);
+                $stmtPlano->execute();
+                $planoAtual = $stmtPlano->get_result()->fetch_assoc();
+                $stmtPlano->close();
+                if ($planoAtual) {
+                    $plano['id'] = $planoId;
+                    $plano['snapshot'] = $planoAtual;
+                }
+            }
+        }
+        if ($planoId > 0) {
+            $plano['id'] = $planoId;
+        }
+        $plano['periodicidade'] = (string)($plano['periodicidade'] ?? $snapshot['periodicidade'] ?? 'mensal');
+
+        $licenca = is_array($retomada['licenca'] ?? null)
+            ? (array)$retomada['licenca']
+            : [
+                'aplicar_trial' => !empty($snapshot['aplicar_trial']),
+                'trial_dias' => (int)($snapshot['trial_dias'] ?? 0),
+            ];
+
+        $administrador = is_array($retomada['administrador'] ?? null)
+            ? (array)$retomada['administrador']
+            : [
+                'nome' => (string)($contrato['representante_nome'] ?? ''),
+                'email' => (string)($contrato['representante_email'] ?? ''),
+                'idioma' => 'pt-BR',
+                'fuso' => 'America/Sao_Paulo',
+            ];
+        unset($administrador['senha_hash']);
+
+        return [
+            'escritorio' => $escritorio,
+            'plano' => $plano,
+            'licenca' => $licenca,
+            'administrador' => $administrador,
+            'modulos' => array_values(array_map('intval', (array)($retomada['modulos'] ?? $snapshot['modulos'] ?? []))),
+            'comercial' => is_array($retomada['comercial'] ?? null) ? (array)$retomada['comercial'] : [],
+            'contrato' => [
+                'id' => (int)$contrato['id'],
+                'status' => 'aceito',
+                'versao' => (string)($contrato['versao'] ?? ''),
+                'hash_sha256' => (string)($contrato['hash_sha256'] ?? ''),
+                'representante_nome' => (string)($contrato['representante_nome'] ?? ''),
+                'representante_email' => (string)($contrato['representante_email'] ?? ''),
+            ],
+            'retomada' => [
+                'contrato_aceito' => true,
+                'recuperado_em' => date('Y-m-d H:i:s'),
+                'senha_precisa_ser_reinformada' => true,
+            ],
+        ];
+    } catch (Throwable $e) {
+        error_log('[ROJEX RETOMADA CONTRATO] ' . $e->getMessage());
+        return null;
+    }
+}
+
 if (!isset($_SESSION['rojex_novo_escritorio']) || !is_array($_SESSION['rojex_novo_escritorio'])) {
     $_SESSION['rojex_novo_escritorio'] = [];
 }
 
+if (empty($_SESSION['rojex_novo_escritorio'])) {
+    $contratacaoRecuperada = rojex_assistente_recuperar_contrato_aceito($conn);
+    if (is_array($contratacaoRecuperada)) {
+        $_SESSION['rojex_novo_escritorio'] = $contratacaoRecuperada;
+    }
+}
+
 if ($acao_cfg === 'assistente_novo_escritorio_reiniciar') {
     unset($_SESSION['rojex_novo_escritorio']);
-    sgl_redirect_cfg('novo_escritorio', 'sucesso', 'Assistente reiniciado com segurança. Nenhum registro foi criado.');
+    sgl_redirect_cfg('novo_escritorio', 'sucesso', 'Dados temporários reiniciados. Contratos aceitos permanecem preservados e serão recuperados automaticamente.');
 }
 
 if ($acao_cfg === 'assistente_novo_escritorio_salvar') {
@@ -5726,6 +5859,16 @@ if ($acao_cfg === 'assistente_novo_escritorio_gerar_contrato') {
             'aplicar_trial' => !empty($licencaContrato['aplicar_trial']),
             'trial_dias' => (int)($licencaContrato['trial_dias'] ?? 0),
             'condicoes_especiais' => (string)($escritorioContrato['condicoesEspeciais'] ?? ''),
+            // Snapshot operacional para retomada após logout/expiração de sessão.
+            // A senha e seu hash nunca são gravados no contrato.
+            'assistente_retomada' => [
+                'escritorio' => $escritorioContrato,
+                'plano' => $planoContrato,
+                'licenca' => $licencaContrato,
+                'administrador' => array_diff_key($adminContrato, ['senha_hash' => true]),
+                'modulos' => array_values((array)($dadosAssistente['modulos'] ?? [])),
+                'comercial' => $comercialContrato,
+            ],
         ];
         $servicoContrato = new ContratoSaasService($conn);
         $contratoCriado = $servicoContrato->criarContrato(
@@ -9940,6 +10083,7 @@ $assistenteAdmin = $assistenteDados['administrador'] ?? [];
 $assistenteModulosSelecionados = array_map('intval', (array)($assistenteDados['modulos'] ?? []));
 $assistenteComercial = is_array($assistenteDados['comercial'] ?? null) ? $assistenteDados['comercial'] : [];
 $etapasAssistente = [1=>'Dados do Escritório',2=>'Plano Comercial',3=>'Personalização',4=>'Licença',5=>'Administrador',6=>'Resumo Final'];
+$assistenteRetomada = is_array($assistenteDados['retomada'] ?? null) ? (array)$assistenteDados['retomada'] : [];
 $planoSelecionadoId = (int)($assistentePlano['id'] ?? 0);
 $modulosDoPlanoAssistente = [];
 if ($planoSelecionadoId > 0 && sgl_tabela_existe($conn,'planos_modulos_saas')) {
@@ -9981,7 +10125,13 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
    <?php endforeach; ?>
   </div>
 
-  <?php if($assistenteEtapa===1): ?>
+  <?php if(!empty($assistenteRetomada['contrato_aceito'])): ?>
+<div class="alert alert-info border-0 shadow-sm mb-4">
+ <i class="bi bi-arrow-repeat me-1"></i><strong>Contratação retomada.</strong>
+ O contrato aceito foi recuperado do banco. Revise os dados e informe novamente a senha inicial do administrador na etapa 5; nenhum novo contrato será gerado.
+</div>
+<?php endif; ?>
+<?php if($assistenteEtapa===1): ?>
   <form method="post" class="row g-3" data-rojex-assistente-step="1"><input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="assistente_novo_escritorio_salvar"><input type="hidden" name="etapa_assistente" value="1">
    <div class="col-md-6"><label class="form-label">Nome Fantasia *</label><input name="assistente_nome_fantasia" class="form-control" required maxlength="180" value="<?=htmlspecialchars((string)($assistenteEscritorio['nomeFantasia']??''), ENT_QUOTES, 'UTF-8')?>"></div>
    <div class="col-md-6"><label class="form-label">Razão Social *</label><input name="assistente_razao_social" class="form-control" required maxlength="180" value="<?=htmlspecialchars((string)($assistenteEscritorio['razaoSocial']??''), ENT_QUOTES, 'UTF-8')?>"></div>

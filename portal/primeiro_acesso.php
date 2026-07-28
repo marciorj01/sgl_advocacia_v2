@@ -130,8 +130,30 @@ try {
                 if ($stmt->affected_rows !== 1) { $stmt->close(); throw new RuntimeException('O convite não pôde ser consumido com segurança.'); } $stmt->close();
                 $stmt = $conn->prepare("UPDATE portal_clientes_tokens SET revogado_em=NOW() WHERE conta_id=? AND tenant_id=? AND escritorio_id=? AND cliente_id=? AND id<>? AND tipo='CONVITE' AND utilizado_em IS NULL AND revogado_em IS NULL");
                 $stmt->bind_param('isisi', $contaId, $tenantId, $escritorioId, $clienteId, $tokenId); $stmt->execute(); $stmt->close();
-                $conn->commit(); $sucesso = true; $erro = '';
-                rojexPortalRotacionarCsrf();
+                $conn->commit();
+
+                // O convite termina aqui. A conta permanece ativa sem depender do token.
+                $contaAtiva = rojexPortalBuscarContaPorEmail(
+                    $conn,
+                    $tenantId,
+                    $escritorioId,
+                    (string)$convite['email']
+                );
+                if (!$contaAtiva) {
+                    throw new RuntimeException('A conta foi ativada, mas não pôde iniciar a sessão.');
+                }
+
+                rojexPortalRegistrarSessaoAutenticada($conn, $contaAtiva);
+                rojexPortalRegistrarTentativa(
+                    $conn,
+                    'SUCESSO',
+                    'PRIMEIRO_ACESSO_ATIVADO',
+                    $contaAtiva,
+                    (string)$convite['email']
+                );
+
+                header('Location: index.php', true, 302);
+                exit();
             } catch (Throwable $e) { $conn->rollback(); throw $e; }
         }
     }

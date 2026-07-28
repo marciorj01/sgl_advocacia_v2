@@ -4865,7 +4865,7 @@ if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal
     try {
         $conn->begin_transaction();
         if ($reemitirConvite) {
-            $stmt = $conn->prepare("SELECT pc.id,pc.tenant_id,pc.escritorio_id,pc.cliente_id,pc.email,e.subdominio,c.nome AS cliente_nome FROM portal_clientes_contas pc INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id INNER JOIN clientes c ON c.id=pc.cliente_id AND c.tenant_id=pc.tenant_id AND c.escritorio_id=pc.escritorio_id WHERE pc.id=? AND pc.tenant_id=? AND pc.escritorio_id=? AND pc.status='CONVITE_PENDENTE' LIMIT 1 FOR UPDATE");
+            $stmt = $conn->prepare("SELECT pc.id,pc.tenant_id,pc.escritorio_id,pc.cliente_id,pc.email,e.subdominio,c.nome AS cliente_nome,c.whatsapp AS cliente_whatsapp,c.celular AS cliente_celular,c.telefone AS cliente_telefone FROM portal_clientes_contas pc INNER JOIN escritorios_saas e ON e.id=pc.escritorio_id AND e.tenant_id=pc.tenant_id INNER JOIN clientes c ON c.id=pc.cliente_id AND c.tenant_id=pc.tenant_id AND c.escritorio_id=pc.escritorio_id WHERE pc.id=? AND pc.tenant_id=? AND pc.escritorio_id=? AND pc.status='CONVITE_PENDENTE' LIMIT 1 FOR UPDATE");
             $stmt->bind_param('isi', $contaPortalId, $tenantPortal, $escritorioPortalId); $stmt->execute(); $contaPortal = $stmt->get_result()->fetch_assoc(); $stmt->close();
             if (!$contaPortal) throw new RuntimeException('Conta do Portal não encontrada.');
             $escritorioPortalId = (int)$contaPortal['escritorio_id']; $clientePortalId = (string)$contaPortal['cliente_id']; $emailPortal = (string)$contaPortal['email']; $tenantPortal = (string)$contaPortal['tenant_id'];
@@ -4982,6 +4982,13 @@ if ($acao_cfg === 'criar_conta_portal' || $acao_cfg === 'reemitir_convite_portal
             'expira_em' => $expiraPortal,
             'url' => $urlConvitePortal,
             'email_status' => $statusEmailPortal,
+            'cliente_nome' => $nomeClientePortal,
+            'whatsapp' => (string)(
+                $reemitirConvite
+                    ? ($contaPortal['cliente_whatsapp'] ?? $contaPortal['cliente_celular'] ?? $contaPortal['cliente_telefone'] ?? '')
+                    : ($clientePortal['whatsapp'] ?? $clientePortal['celular'] ?? $clientePortal['telefone'] ?? '')
+            ),
+            'escritorio_nome' => (string)($portalEscritorioAtual['nome'] ?? 'Escritório'),
         ];
         sgl_log(
             $conn,
@@ -8794,7 +8801,7 @@ if ($portalPodeAcessar && sgl_tabela_existe($conn, 'portal_clientes_contas')) {
             $stmt->close();
             if ($portalEscritorioAtual) $portalEscritorios[] = $portalEscritorioAtual;
 
-            $stmt = $conn->prepare("SELECT c.id,c.tenant_id,c.escritorio_id,c.nome,c.email FROM clientes c LEFT JOIN portal_clientes_contas pc ON pc.cliente_id=c.id AND pc.tenant_id=c.tenant_id AND pc.escritorio_id=c.escritorio_id WHERE c.tenant_id=? AND c.escritorio_id=? AND c.deletado=0 AND c.status='Ativo' AND pc.id IS NULL ORDER BY c.nome");
+            $stmt = $conn->prepare("SELECT c.id,c.tenant_id,c.escritorio_id,c.nome,c.email,c.celular,c.whatsapp,c.telefone FROM clientes c LEFT JOIN portal_clientes_contas pc ON pc.cliente_id=c.id AND pc.tenant_id=c.tenant_id AND pc.escritorio_id=c.escritorio_id WHERE c.tenant_id=? AND c.escritorio_id=? AND c.deletado=0 AND c.status='Ativo' AND pc.id IS NULL ORDER BY c.nome");
             $stmt->bind_param('si', $tenantPortalSessao, $escritorioPortalSessao);
             $stmt->execute();
             $res = $stmt->get_result();
@@ -10601,7 +10608,34 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
     <?php if (!empty($portalConviteGerado['email_status'])): ?>
         <div class="small mb-2 fw-semibold"><?=htmlspecialchars((string)$portalConviteGerado['email_status'])?></div>
     <?php endif; ?>
-    <div class="input-group"><input id="portalConviteUrl" class="form-control font-monospace" readonly value="<?=htmlspecialchars((string)$portalConviteGerado['url'])?>"><button type="button" class="btn btn-dark" onclick="navigator.clipboard.writeText(document.getElementById('portalConviteUrl').value)">Copiar link</button></div>
+    <div class="input-group mb-2">
+        <input id="portalConviteUrl" class="form-control font-monospace" readonly value="<?=htmlspecialchars((string)$portalConviteGerado['url'])?>">
+        <button type="button" class="btn btn-dark" onclick="navigator.clipboard.writeText(document.getElementById('portalConviteUrl').value)">Copiar link</button>
+    </div>
+    <?php
+        $portalWhatsappNumero = preg_replace('/\D+/', '', (string)($portalConviteGerado['whatsapp'] ?? ''));
+        if (strlen($portalWhatsappNumero) === 10 || strlen($portalWhatsappNumero) === 11) {
+            $portalWhatsappNumero = '55' . $portalWhatsappNumero;
+        }
+        $portalTextoWhatsapp = "Olá, " . (string)($portalConviteGerado['cliente_nome'] ?? 'cliente') . ".\n\n"
+            . "O escritório " . (string)($portalConviteGerado['escritorio_nome'] ?? 'responsável') . " criou seu acesso ao Portal do Cliente ROJEX.AI.\n\n"
+            . "Use este link para definir sua primeira senha:\n" . (string)$portalConviteGerado['url'] . "\n\n"
+            . "O convite é pessoal, pode ser usado uma única vez e expira em 48 horas.";
+        $portalWhatsappUrl = $portalWhatsappNumero !== ''
+            ? 'https://wa.me/' . rawurlencode($portalWhatsappNumero) . '?text=' . rawurlencode($portalTextoWhatsapp)
+            : '';
+    ?>
+    <div class="d-flex flex-wrap gap-2">
+        <?php if ($portalWhatsappUrl !== ''): ?>
+            <a class="btn btn-success" target="_blank" rel="noopener noreferrer" href="<?=htmlspecialchars($portalWhatsappUrl)?>">
+                <i class="bi bi-whatsapp me-1"></i>Enviar pelo WhatsApp
+            </a>
+        <?php else: ?>
+            <button type="button" class="btn btn-outline-success" disabled title="Cadastre o WhatsApp ou celular do cliente">
+                <i class="bi bi-whatsapp me-1"></i>WhatsApp não cadastrado
+            </button>
+        <?php endif; ?>
+    </div>
     <div class="form-text">O token não é armazenado em texto aberto e este link será exibido somente agora.</div>
 </div>
 <?php endif; ?>
@@ -10635,7 +10669,11 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
         <form method="post" class="row g-3">
             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="criar_conta_portal">
             <div class="col-md-6"><label class="form-label">Escritório</label><input class="form-control" readonly value="<?=htmlspecialchars((string)$portalEscritorioAtual['nome'])?>"><div class="form-text">Contexto definido pela sessão; não pode ser alterado pelo navegador.</div></div>
-            <div class="col-md-6"><label class="form-label">Cliente sem conta no Portal</label><select name="portal_cliente_id" id="portalClienteConta" class="form-select" required><option value="">Selecione</option><?php foreach($portalClientes as $pc): ?><option value="<?=htmlspecialchars($pc['id'])?>" data-email="<?=htmlspecialchars((string)$pc['email'])?>"><?=htmlspecialchars($pc['nome'])?> — <?=htmlspecialchars($pc['id'])?></option><?php endforeach; ?></select><div class="form-text">Somente clientes ativos deste escritório que ainda não possuem conta.</div></div>
+            <div class="col-md-6"><label class="form-label">Cliente sem conta no Portal</label><select name="portal_cliente_id" id="portalClienteConta" class="form-select" required><option value="">Selecione</option><?php foreach($portalClientes as $pc): ?><option
+    value="<?=htmlspecialchars($pc['id'])?>"
+    data-email="<?=htmlspecialchars((string)$pc['email'])?>"
+    data-whatsapp="<?=htmlspecialchars((string)($pc['whatsapp'] ?: $pc['celular'] ?: $pc['telefone']))?>"
+><?=htmlspecialchars($pc['nome'])?> — <?=htmlspecialchars($pc['id'])?></option><?php endforeach; ?></select><div class="form-text">Somente clientes ativos deste escritório que ainda não possuem conta.</div></div>
             <div class="col-12"><label class="form-label">E-mail de acesso</label><input type="email" name="portal_email" id="portalEmailConta" class="form-control" maxlength="190" required></div>
             <div class="col-12"><div class="alert alert-light border small mb-0"><strong>Permissões iniciais:</strong> todas desativadas. A publicação de conteúdo será realizada apenas em etapa posterior e por ação expressa.</div></div>
             <div class="col-12"><button class="btn btn-success" onclick="return confirm('Criar a conta com todas as permissões desativadas e gerar convite válido por 48 horas?')"><i class="bi bi-envelope-check me-1"></i>Criar conta e convite</button></div>

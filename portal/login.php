@@ -222,6 +222,11 @@ function rojexPortalLoginAtrasoSeguro(int $nivel = 1): void
 $slug = rojexPortalLoginResolverSlug();
 $mensagemErro = '';
 $mensagemAviso = '';
+if (isset($_GET['logout']) && $_GET['logout'] === '1') {
+    $mensagemAviso = 'Sessão encerrada com segurança. Entre novamente quando desejar.';
+} elseif (isset($_GET['sessao']) && $_GET['sessao'] === 'expirada') {
+    $mensagemAviso = 'Sua sessão expirou por segurança. Entre novamente.';
+}
 $escritorio = null;
 $marca = [
     'nome' => 'Portal do Cliente',
@@ -249,7 +254,7 @@ try {
 
     if ($escritorio) {
         $marca = rojexPortalLoginCarregarMarca($conn, $escritorio);
-    } elseif ($slug === '') {
+    } elseif ($slug === '' && $mensagemAviso === '') {
         $mensagemAviso = 'Informe o endereco de acesso fornecido pelo seu escritorio.';
     } else {
         $mensagemAviso = 'Portal indisponivel para este endereco. Confirme o link com seu escritorio.';

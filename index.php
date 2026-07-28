@@ -242,6 +242,7 @@ $modulos_validos = [
     'financeiro',
     'recibos',
     'documentos',
+    'portal_documentos_clientes',
     'modelos',
     'configuracoes',
     'master_saas',
@@ -324,6 +325,7 @@ $titulos = [
     'financeiro' => 'Financeiro',
     'recibos' => 'Recibos',
     'documentos' => 'Documentos',
+    'portal_documentos_clientes' => 'Documentos dos Clientes',
     'modelos' => 'Modelos Jurídicos',
     'configuracoes' => 'Configurações',
     'master_saas' => 'MASTER SaaS',
@@ -740,14 +742,15 @@ function sgl_link_active(?string $atual, string $item): string {
                 </div>
 
                 <div class="sgl-menu-title">Jurídico</div>
-                <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuJuridico" aria-expanded="<?= sgl_menu_active($modulo, ['processos','agenda','documentos','modelos']) ? 'true' : 'false' ?>">
+                <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuJuridico" aria-expanded="<?= sgl_menu_active($modulo, ['processos','agenda','documentos','portal_documentos_clientes','modelos']) ? 'true' : 'false' ?>">
                     <i class="bi bi-briefcase"></i> Jurídico <i class="bi bi-chevron-down chev"></i>
                 </button>
-                <div class="collapse <?= sgl_menu_active($modulo, ['processos','agenda','documentos','modelos']) ?>" id="menuJuridico">
+                <div class="collapse <?= sgl_menu_active($modulo, ['processos','agenda','documentos','portal_documentos_clientes','modelos']) ?>" id="menuJuridico">
                     <div class="sgl-submenu">
                         <a href="?mod=processos" class="nav-link <?= sgl_link_active($modulo, 'processos') ?>"><i class="bi bi-folder2-open"></i> Processos</a>
                         <a href="?mod=agenda" class="nav-link <?= sgl_link_active($modulo, 'agenda') ?>"><i class="bi bi-calendar-event"></i> Agenda</a>
                         <a href="?mod=documentos" class="nav-link <?= sgl_link_active($modulo, 'documentos') ?>"><i class="bi bi-file-earmark-arrow-up"></i> Documentos</a>
+                        <a href="?mod=portal_documentos_clientes" class="nav-link <?= sgl_link_active($modulo, 'portal_documentos_clientes') ?>"><i class="bi bi-inbox"></i> Envios dos Clientes</a>
                         <?php if (rojexPodeAcessarModulo('modelos')): ?>
                             <a href="?mod=modelos" class="nav-link <?= sgl_link_active($modulo, 'modelos') ?>"><i class="bi bi-journal-text"></i> Modelos</a>
                         <?php endif; ?>

@@ -474,7 +474,16 @@ $csrf = gerarTokenCsrf();
 
             <h6 class="fw-bold text-muted mb-3"><i class="bi bi-geo-alt"></i> Endereço</h6>
             <div class="row g-3 mb-4">
-                <div class="col-md-3"><label class="form-label">CEP</label><input type="text" name="cep" class="form-control" id="cep" value="<?= h($f['cep']) ?>" maxlength="9"></div>
+                <div class="col-md-3">
+                    <label class="form-label">CEP</label>
+                    <div class="input-group">
+                        <input type="text" name="cep" class="form-control" id="cep" value="<?= h($f['cep']) ?>" maxlength="9">
+                        <button type="button" class="btn btn-outline-primary" id="btnBuscarCep" title="Buscar endereço pelo CEP">
+                            <i class="bi bi-search"></i> Buscar
+                        </button>
+                    </div>
+                    <div class="form-text" id="cepStatus" aria-live="polite"></div>
+                </div>
                 <div class="col-md-6"><label class="form-label">Logradouro</label><input type="text" name="logradouro" id="logradouro" class="form-control" value="<?= h($f['logradouro']) ?>" maxlength="150"></div>
                 <div class="col-md-3"><label class="form-label">Número</label><input type="text" name="numero" class="form-control" value="<?= h($f['numero']) ?>" maxlength="20"></div>
                 <div class="col-md-4"><label class="form-label">Complemento</label><input type="text" name="complemento" class="form-control" value="<?= h($f['complemento']) ?>" maxlength="80"></div>
@@ -728,27 +737,90 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     const cep = document.getElementById('cep');
+    const btnBuscarCep = document.getElementById('btnBuscarCep');
+    const cepStatus = document.getElementById('cepStatus');
+
+    const informarCep = function (mensagem, classe = 'text-muted') {
+        if (!cepStatus) return;
+        cepStatus.className = 'form-text ' + classe;
+        cepStatus.textContent = mensagem;
+    };
+
+    const buscarCep = async function () {
+        if (!cep) return;
+
+        const cleanCep = cep.value.replace(/\D/g, '');
+        if (cleanCep.length !== 8) {
+            informarCep('Informe um CEP com 8 dígitos.', 'text-danger');
+            cep.focus();
+            return;
+        }
+
+        if (btnBuscarCep) {
+            btnBuscarCep.disabled = true;
+            btnBuscarCep.innerHTML = '<span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>Buscando';
+        }
+        informarCep('Consultando CEP...', 'text-primary');
+
+        try {
+            const resposta = await fetch(`https://viacep.com.br/ws/${cleanCep}/json/`);
+            if (!resposta.ok) {
+                throw new Error('Falha na consulta do CEP.');
+            }
+
+            const dados = await resposta.json();
+            if (dados.erro) {
+                informarCep('CEP não encontrado. Confira os números informados.', 'text-danger');
+                return;
+            }
+
+            const logradouro = document.getElementById('logradouro');
+            const bairro = document.getElementById('bairro');
+            const cidade = document.getElementById('cidade');
+            const estado = document.getElementById('estado');
+
+            if (logradouro && dados.logradouro) logradouro.value = dados.logradouro;
+            if (bairro && dados.bairro) bairro.value = dados.bairro;
+            if (cidade && dados.localidade) cidade.value = dados.localidade;
+            if (estado && dados.uf) estado.value = dados.uf;
+
+            informarCep('Endereço localizado com sucesso.', 'text-success');
+
+            const numero = document.querySelector('input[name="numero"]');
+            if (numero) numero.focus();
+        } catch (erro) {
+            informarCep('Não foi possível consultar o CEP agora. Tente novamente.', 'text-danger');
+        } finally {
+            if (btnBuscarCep) {
+                btnBuscarCep.disabled = false;
+                btnBuscarCep.innerHTML = '<i class="bi bi-search"></i> Buscar';
+            }
+        }
+    };
+
     if (cep) {
         cep.addEventListener('input', function () {
             let v = this.value.replace(/\D/g, '').substring(0, 8);
             if (v.length > 5) v = v.replace(/^(\d{5})(\d{0,3})$/, '$1-$2');
             this.value = v;
+            informarCep('');
         });
+
         cep.addEventListener('blur', function () {
             const cleanCep = this.value.replace(/\D/g, '');
-            if (cleanCep.length !== 8) return;
-            fetch(`https://viacep.com.br/ws/${cleanCep}/json/`)
-                .then(res => res.json())
-                .then(dados => {
-                    if (!dados.erro) {
-                        document.getElementById('logradouro').value = dados.logradouro || '';
-                        document.getElementById('bairro').value = dados.bairro || '';
-                        document.getElementById('cidade').value = dados.localidade || '';
-                        document.getElementById('estado').value = dados.uf || '';
-                    }
-                })
-                .catch(() => {});
+            if (cleanCep.length === 8) buscarCep();
         });
+
+        cep.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                buscarCep();
+            }
+        });
+    }
+
+    if (btnBuscarCep) {
+        btnBuscarCep.addEventListener('click', buscarCep);
     }
 
     const busca = document.getElementById('buscaCliente');

@@ -560,6 +560,10 @@ if ($prazos7Dias > 0) {
 if ($compromissosHoje > 0) {
     $alertas[] = ['classe' => 'info', 'icone' => 'bi-calendar-check', 'texto' => $compromissosHoje . ' compromisso(s) na agenda de hoje.'];
 }
+
+$cijDisponivel = function_exists('rojexEscritorioPossuiModulo')
+    ? rojexEscritorioPossuiModulo('cij')
+    : false;
 ?>
 
 <div class="container-fluid dashboard-executivo">
@@ -572,6 +576,7 @@ if ($compromissosHoje > 0) {
     </div>
 
 
+    <?php if ($cijDisponivel): ?>
     <div class="card border-0 shadow-sm mb-4">
         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
             <span><i class="bi bi-stars me-2"></i>Central Inteligente ROJEX.AI</span>
@@ -624,10 +629,15 @@ if ($compromissosHoje > 0) {
             </div>
         </div>
     </div>
+    <?php endif; ?>
 
     <?php
-    $iaPergunta = trim((string)($_GET['ia_pergunta'] ?? ''));
-    $iaAcao = trim((string)($_GET['ia_acao'] ?? ''));
+    $iaPergunta = $cijDisponivel
+        ? trim((string)($_GET['ia_pergunta'] ?? ''))
+        : '';
+    $iaAcao = $cijDisponivel
+        ? trim((string)($_GET['ia_acao'] ?? ''))
+        : '';
     $iaResposta = '';
     $iaResultadosRapidos = [];
     $iaLinkCij = '?mod=cij';
@@ -663,6 +673,7 @@ if ($compromissosHoje > 0) {
     }
     ?>
 
+    <?php if ($cijDisponivel): ?>
     <div class="card border-0 shadow-sm mb-4">
         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
             <span><i class="bi bi-robot me-2"></i>IA Jurídica ROJEX.AI</span>
@@ -722,6 +733,7 @@ if ($compromissosHoje > 0) {
             </div>
         </div>
     </div>
+    <?php endif; ?>
 
 
     <div class="row g-3 mb-4">

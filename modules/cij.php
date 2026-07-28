@@ -8,6 +8,22 @@
  * Esta versão consulta dados internos do ROJEX.AI com segurança e exibe respostas orientativas.
  */
 
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/auth.php';
+
+if (
+    !function_exists('rojexContextoTenantValido')
+    || !function_exists('rojexTenantId')
+    || !function_exists('rojexEscritorioId')
+    || !function_exists('rojexModuloContratado')
+    || !rojexContextoTenantValido()
+    || !rojexModuloContratado('cij')
+) {
+    http_response_code(403);
+    echo '<div class="alert alert-danger">O Centro de Inteligência Jurídica não está disponível para este escritório.</div>';
+    exit;
+}
+
 $conn = conectar();
 
 $arquivoBaseConhecimento = __DIR__ . '/../config/base_conhecimento.php';

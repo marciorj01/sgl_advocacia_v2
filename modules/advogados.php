@@ -168,13 +168,72 @@ function gerarIdAdvogado(mysqli $conn): string {
     return 'ADV' . str_pad((string)$num, 3, '0', STR_PAD_LEFT);
 }
 
+function areasAtuacaoAdvogado(): array {
+    return [
+        'TODAS',
+        'Administrativo',
+        'Ambiental',
+        'Agrário',
+        'Aduaneiro',
+        'Arbitragem e Mediação',
+        'Bancário',
+        'Cível',
+        'Compliance',
+        'Constitucional',
+        'Consumidor',
+        'Contratual',
+        'Criminal',
+        'Desportivo',
+        'Digital',
+        'Eleitoral',
+        'Empresarial',
+        'Família e Sucessões',
+        'Imobiliário',
+        'Internacional',
+        'LGPD e Proteção de Dados',
+        'Marítimo',
+        'Médico e Saúde',
+        'Militar',
+        'Previdenciário',
+        'Propriedade Intelectual',
+        'Público',
+        'Societário',
+        'Trabalhista',
+        'Tributário',
+        'Outros',
+    ];
+}
+
+function normalizarEspecialidadesAdvogado(mixed $valor): string {
+    $areasPermitidas = areasAtuacaoAdvogado();
+    $selecionadas = is_array($valor)
+        ? $valor
+        : preg_split('/\s*,\s*/', trim((string)$valor), -1, PREG_SPLIT_NO_EMPTY);
+
+    $selecionadas = array_values(array_unique(array_filter(array_map(
+        static fn($item) => trim((string)$item),
+        $selecionadas ?: []
+    ))));
+
+    if (in_array('TODAS', $selecionadas, true)) {
+        return 'TODAS';
+    }
+
+    $selecionadas = array_values(array_filter(
+        $selecionadas,
+        static fn($item) => in_array($item, $areasPermitidas, true) && $item !== 'TODAS'
+    ));
+
+    return implode(', ', $selecionadas);
+}
+
 function camposAdvogado(array $d = []): array {
     return [
         'nome'          => trim($d['nome'] ?? ''),
         'cpf'           => trim($d['cpf'] ?? ''),
         'oab'           => strtoupper(trim($d['oab'] ?? '')),
         'oab_uf'        => strtoupper(substr(trim($d['oab_uf'] ?? ''), 0, 2)),
-        'especialidade' => trim($d['especialidade'] ?? ''),
+        'especialidade' => normalizarEspecialidadesAdvogado($d['especialidade'] ?? ''),
         'telefone'      => trim($d['telefone'] ?? ''),
         'email'         => trim($d['email'] ?? ''),
         'status'        => $d['status'] ?? 'Ativo',
@@ -514,13 +573,56 @@ $csrf = gerarTokenCsrf();
                     <input type="text" name="oab_uf" class="form-control text-uppercase" value="<?= h($f['oab_uf']) ?>" placeholder="PR" maxlength="2">
                 </div>
                 <div class="col-md-6">
-                    <label class="form-label">Especialidade / área de atuação</label>
-                    <input type="text" name="especialidade" class="form-control" value="<?= h($f['especialidade']) ?>" placeholder="Ex: Previdenciário, Cível, Trabalhista" maxlength="80">
+                    <label class="form-label">Especialidades / áreas de atuação</label>
+                    <?php
+                        $areasSelecionadas = array_filter(array_map(
+                            'trim',
+                            explode(',', (string)$f['especialidade'])
+                        ));
+                        if ((string)$f['especialidade'] === 'TODAS') {
+                            $areasSelecionadas = ['TODAS'];
+                        }
+                    ?>
+                    <div class="border rounded p-3 bg-light" id="areasAtuacaoAdvogado">
+                        <div class="row g-2">
+                            <?php foreach (areasAtuacaoAdvogado() as $area): ?>
+                                <?php $areaId = 'area_' . substr(md5($area), 0, 10); ?>
+                                <div class="col-sm-6 col-xl-4">
+                                    <div class="form-check">
+                                        <input
+                                            class="form-check-input js-area-advogado"
+                                            type="checkbox"
+                                            name="especialidade[]"
+                                            value="<?= h($area) ?>"
+                                            id="<?= h($areaId) ?>"
+                                            <?= in_array($area, $areasSelecionadas, true) ? 'checked' : '' ?>
+                                        >
+                                        <label class="form-check-label" for="<?= h($areaId) ?>"><?= h($area) ?></label>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                    <div class="form-text">
+                        Selecione uma ou mais áreas. Ao marcar <strong>TODAS</strong>, as demais opções serão desmarcadas.
+                    </div>
                 </div>
 
                 <div class="col-md-4">
                     <label class="form-label">Telefone / WhatsApp</label>
-                    <input type="text" name="telefone" class="form-control js-phone" value="<?= h($f['telefone']) ?>" placeholder="(41) 99999-9999" maxlength="15">
+                    <div class="input-group">
+                        <input type="text" name="telefone" id="telefoneAdvogado" class="form-control js-phone" value="<?= h($f['telefone']) ?>" placeholder="(41) 99999-9999" maxlength="15">
+                        <a
+                            id="btnWhatsappAdvogado"
+                            class="btn btn-success"
+                            href="#"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Abrir conversa no WhatsApp"
+                            aria-label="Abrir conversa no WhatsApp"
+                        ><i class="bi bi-whatsapp"></i></a>
+                    </div>
+                    <div class="form-text">O botão apenas abre o WhatsApp; nenhuma mensagem é enviada automaticamente.</div>
                 </div>
                 <div class="col-md-5">
                     <label class="form-label">E-mail profissional</label>
@@ -619,27 +721,7 @@ $novosMes = adv_scalar(
     $tenantId
 );
 
-$especialidadesPadrao = [
-    'Administrativo',
-    'Ambiental',
-    'Bancário',
-    'Cível',
-    'Consumidor',
-    'Contratual',
-    'Criminal',
-    'Digital / LGPD',
-    'Eleitoral',
-    'Empresarial',
-    'Família e Sucessões',
-    'Imobiliário',
-    'Médico e Saúde',
-    'Previdenciário',
-    'Propriedade Intelectual',
-    'Público',
-    'Tributário',
-    'Trabalhista',
-    'Outros'
-];
+$especialidadesPadrao = areasAtuacaoAdvogado();
 
 $especialidadesCadastradas = [];
 $stmtEspecialidades = $conn->prepare(
@@ -812,6 +894,30 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     });
 
+    const telefoneAdvogado = document.getElementById('telefoneAdvogado');
+    const btnWhatsappAdvogado = document.getElementById('btnWhatsappAdvogado');
+
+    const atualizarWhatsappAdvogado = function () {
+        if (!telefoneAdvogado || !btnWhatsappAdvogado) return;
+
+        let numero = telefoneAdvogado.value.replace(/\D/g, '');
+        const valido = numero.length === 10 || numero.length === 11;
+
+        btnWhatsappAdvogado.classList.toggle('disabled', !valido);
+        btnWhatsappAdvogado.setAttribute('aria-disabled', valido ? 'false' : 'true');
+        btnWhatsappAdvogado.href = valido ? `https://wa.me/55${numero}` : '#';
+    };
+
+    if (telefoneAdvogado && btnWhatsappAdvogado) {
+        telefoneAdvogado.addEventListener('input', atualizarWhatsappAdvogado);
+        btnWhatsappAdvogado.addEventListener('click', function (event) {
+            if (this.classList.contains('disabled')) {
+                event.preventDefault();
+            }
+        });
+        atualizarWhatsappAdvogado();
+    }
+
     document.querySelectorAll('.js-cpf').forEach(function (input) {
         input.setAttribute('inputmode', 'numeric');
         input.addEventListener('input', function (e) {
@@ -822,6 +928,28 @@ document.addEventListener('DOMContentLoaded', function () {
             e.target.value = v;
         });
     });
+
+    const areasAdvogado = Array.from(document.querySelectorAll('.js-area-advogado'));
+    if (areasAdvogado.length > 0) {
+        const opcaoTodas = areasAdvogado.find(function (input) {
+            return input.value === 'TODAS';
+        });
+
+        areasAdvogado.forEach(function (input) {
+            input.addEventListener('change', function () {
+                if (this.value === 'TODAS' && this.checked) {
+                    areasAdvogado.forEach(function (outra) {
+                        if (outra !== input) outra.checked = false;
+                    });
+                    return;
+                }
+
+                if (this.checked && opcaoTodas) {
+                    opcaoTodas.checked = false;
+                }
+            });
+        });
+    }
 
     document.querySelectorAll('input[name="oab_uf"]').forEach(function (input) {
         input.addEventListener('input', function (e) {

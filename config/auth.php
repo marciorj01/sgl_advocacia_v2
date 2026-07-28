@@ -1153,6 +1153,142 @@ if (!function_exists('rojexContextoTenantValido')) {
     }
 }
 
+if (!function_exists('rojexColunaExiste')) {
+    function rojexColunaExiste(mysqli $conn, string $tabela, string $coluna): bool
+    {
+        $tabela = trim($tabela);
+        $coluna = trim($coluna);
+
+        if ($tabela === '' || $coluna === '') {
+            return false;
+        }
+
+        if (!preg_match('/^[a-zA-Z0-9_]+$/', $tabela) || !preg_match('/^[a-zA-Z0-9_]+$/', $coluna)) {
+            return false;
+        }
+
+        try {
+            $stmt = $conn->prepare(
+                'SELECT COUNT(*) AS total
+                   FROM information_schema.COLUMNS
+                  WHERE TABLE_SCHEMA = DATABASE()
+                    AND TABLE_NAME = ?
+                    AND COLUMN_NAME = ?'
+            );
+            if (!$stmt) {
+                return false;
+            }
+
+            $stmt->bind_param('ss', $tabela, $coluna);
+            $stmt->execute();
+            $row = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+
+            return ((int)($row['total'] ?? 0)) > 0;
+        } catch (Throwable $e) {
+            error_log('[ROJEX AUTORIZAÇÃO COLUNA] ' . $e->getMessage());
+            return false;
+        }
+    }
+}
+
+if (!function_exists('rojexEscritorioPossuiModulo')) {
+    function rojexEscritorioPossuiModulo(string $codigo): bool
+    {
+        $codigo = trim($codigo);
+        if ($codigo === '') {
+            return false;
+        }
+
+        if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
+            return false;
+        }
+
+        if (
+            !function_exists('rojexContextoTenantValido')
+            || !function_exists('rojexTenantId')
+            || !function_exists('rojexEscritorioId')
+            || !rojexContextoTenantValido()
+        ) {
+            return false;
+        }
+
+        $tenantId = trim((string)rojexTenantId());
+        $escritorioId = rojexEscritorioId();
+
+        if ($tenantId === '' || $escritorioId === null) {
+            return false;
+        }
+
+        try {
+            $conn = conectar();
+            if (!$conn instanceof mysqli) {
+                return false;
+            }
+
+            $sql = "SELECT 1
+                      FROM escritorios_saas e
+                      INNER JOIN escritorios_modulos_saas em
+                              ON em.escritorio_id = e.id
+                             AND em.ativo = 1
+                      INNER JOIN modulos_saas m
+                              ON m.id = em.modulo_id
+                             AND m.ativo = 1
+                     WHERE e.id = ?
+                       AND e.tenant_id = ?
+                       AND m.codigo = ?
+                     LIMIT 1";
+
+            if (rojexColunaExiste($conn, 'modulos_saas', 'status_lancamento')) {
+                $sql = "SELECT 1
+                          FROM escritorios_saas e
+                          INNER JOIN escritorios_modulos_saas em
+                                  ON em.escritorio_id = e.id
+                                 AND em.ativo = 1
+                          INNER JOIN modulos_saas m
+                                  ON m.id = em.modulo_id
+                                 AND m.ativo = 1
+                                 AND m.status_lancamento = 'producao'
+                         WHERE e.id = ?
+                           AND e.tenant_id = ?
+                           AND m.codigo = ?
+                         LIMIT 1";
+            }
+
+            $stmt = $conn->prepare($sql);
+            if (!$stmt) {
+                $conn->close();
+                return false;
+            }
+
+            $stmt->bind_param('iss', $escritorioId, $tenantId, $codigo);
+            $stmt->execute();
+            $resultado = $stmt->get_result()->fetch_assoc();
+            $stmt->close();
+            $conn->close();
+
+            return !empty($resultado);
+        } catch (Throwable $e) {
+            error_log('[ROJEX AUTORIZAÇÃO MODULO] ' . $e->getMessage());
+            return false;
+        }
+    }
+}
+
+
+/**
+ * Engine Oficial de Módulos SaaS.
+ * Mantém a função anterior por compatibilidade.
+ */
+if (!function_exists('rojexModuloContratado')) {
+    function rojexModuloContratado(string $codigo): bool
+    {
+        return function_exists('rojexEscritorioPossuiModulo')
+            && rojexEscritorioPossuiModulo($codigo);
+    }
+}
+
+
 if (!function_exists('rojexExigirContextoTenant')) {
     function rojexExigirContextoTenant(): void
     {

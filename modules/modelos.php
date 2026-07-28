@@ -3,13 +3,26 @@
  * ROJEX.AI ERP Jurídico Enterprise - Fase 4.1
  * Biblioteca Jurídica Profissional: modelos, variáveis, favoritos, versionamento e geração.
  */
-$conn = conectar();
+require_once __DIR__ . '/../config/auth.php';
 require_once __DIR__ . '/../config/integracoes.php';
 
-if (!function_exists('rojexContextoTenantValido') || !rojexContextoTenantValido()) {
-    $conn->close();
-    throw new RuntimeException('Contexto Multi-Tenant inválido para o módulo Modelos Jurídicos.');
+/*
+ * Segunda barreira de autorização do módulo.
+ * O menu e a rota principal já são protegidos pelo index.php, mas este arquivo
+ * também valida a contratação para impedir inclusão indevida ou acesso indireto.
+ */
+if (
+    !function_exists('rojexContextoTenantValido')
+    || !function_exists('rojexModuloContratado')
+    || !rojexContextoTenantValido()
+    || !rojexModuloContratado('modelos')
+) {
+    http_response_code(403);
+    echo '<div class="alert alert-danger">O módulo Modelos Jurídicos não está disponível para este escritório.</div>';
+    return;
 }
+
+$conn = conectar();
 
 $tenantId = function_exists('rojexTenantId')
     ? trim((string)rojexTenantId())

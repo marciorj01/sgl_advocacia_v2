@@ -4727,6 +4727,87 @@ if ($acao_cfg === 'excluir_plano_saas') {
 // Portal do Cliente — Sprint 4.7.4
 // Ativação por escritório, conta isolada e convite de uso único.
 // -----------------------------------------------------------------------------
+// O administrador do próprio escritório pode ativar o Portal no seu tenant.
+// O escritório e o tenant são sempre obtidos da sessão; nenhum identificador
+// enviado pelo navegador é aceito nesta operação.
+if ($acao_cfg === 'ativar_portal_proprio') {
+    rojexExigirAcao('tenant.portal.convite.criar');
+
+    $tenantPortal = trim((string)rojexTenantId());
+    $escritorioPortalId = (int)rojexEscritorioId();
+
+    if ($tenantPortal === '' || $escritorioPortalId <= 0) {
+        sgl_redirect_cfg('portal', 'erro', 'Contexto Multi-Tenant inválido para ativar o Portal.');
+    }
+
+    try {
+        $conn->begin_transaction();
+
+        $stmt = $conn->prepare(
+            "SELECT id, tenant_id, nome, status
+               FROM escritorios_saas
+              WHERE id = ? AND tenant_id = ?
+              LIMIT 1 FOR UPDATE"
+        );
+        $stmt->bind_param('is', $escritorioPortalId, $tenantPortal);
+        $stmt->execute();
+        $escritorioPortal = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+
+        if (!$escritorioPortal) {
+            throw new RuntimeException('Escritório não localizado no contexto da sessão.');
+        }
+        if ((string)$escritorioPortal['status'] !== 'ativo') {
+            throw new RuntimeException('O escritório precisa estar ativo antes de liberar o Portal do Cliente.');
+        }
+
+        $stmt = $conn->prepare(
+            "SELECT id
+               FROM modulos_saas
+              WHERE codigo = 'portal_cliente'
+                AND ativo = 1
+                AND status_lancamento = 'producao'
+              LIMIT 1"
+        );
+        $stmt->execute();
+        $moduloPortalId = (int)($stmt->get_result()->fetch_assoc()['id'] ?? 0);
+        $stmt->close();
+
+        if ($moduloPortalId <= 0) {
+            throw new RuntimeException('O módulo Portal do Cliente não está disponível em produção.');
+        }
+
+        $origemPortal = 'tenant';
+        $stmt = $conn->prepare(
+            "INSERT INTO escritorios_modulos_saas
+                (escritorio_id, modulo_id, origem, ativo, valor_ajuste)
+             VALUES (?, ?, ?, 1, 0)
+             ON DUPLICATE KEY UPDATE
+                origem = VALUES(origem),
+                ativo = 1,
+                atualizado_em = CURRENT_TIMESTAMP"
+        );
+        $stmt->bind_param('iis', $escritorioPortalId, $moduloPortalId, $origemPortal);
+        $stmt->execute();
+        $stmt->close();
+
+        $conn->commit();
+
+        sgl_log(
+            $conn,
+            'Ativou o próprio Portal do Cliente',
+            'escritorios_modulos_saas',
+            (string)$escritorioPortalId,
+            'Tenant: ' . $tenantPortal . ' | Ativação realizada pelo administrador do escritório.'
+        );
+
+        sgl_redirect_cfg('portal', 'sucesso', 'Portal do Cliente ativado. Agora você pode criar contas e enviar convites.');
+    } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $ignorado) {}
+        sgl_redirect_cfg('portal', 'erro', $e->getMessage());
+    }
+}
+
 if ($acao_cfg === 'ativar_portal_escritorio') {
     rojexExigirAcao('plataforma.portal.habilitar');
 
@@ -10429,7 +10510,7 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
 
 <?php if ($tab_ativa === 'portal'): ?>
 <div class="alert alert-primary border-0 shadow-sm">
-    <strong><i class="bi bi-person-workspace me-1"></i> Portal do Cliente — ativação controlada</strong>
+    <strong><i class="bi bi-person-workspace me-1"></i> Portal do Cliente — gestão pelo escritório</strong>
     <?php if ($portalPodeSupervisionar): ?>
         <div class="small">Visão global de supervisão do MASTER. A operação de convites e contas pertence aos administradores de cada escritório.</div>
     <?php else: ?>
@@ -10460,7 +10541,17 @@ if ($planoSelecionadoId > 0 && !empty($assistentePlano['snapshot'])) {
     <?php if ($portalPodeCriar): ?>
     <div class="col-xl-7"><div class="card shadow-sm border-0 h-100"><div class="card-header bg-primary text-white">Criar conta e convite</div><div class="card-body">
         <?php if (!$portalEscritorioAtual || empty($portalEscritorioAtual['portal_ativo'])): ?>
-            <div class="alert alert-warning mb-0">O Portal ainda não foi habilitado pelo MASTER para este escritório.</div>
+            <div class="alert alert-warning">
+                <strong>Portal ainda não ativado.</strong>
+                <div class="small mt-1">O administrador deste escritório pode ativá-lo agora. Nenhum conteúdo será publicado automaticamente.</div>
+            </div>
+            <form method="post">
+                <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>">
+                <input type="hidden" name="acao_cfg" value="ativar_portal_proprio">
+                <button class="btn btn-primary" onclick="return confirm('Ativar o Portal do Cliente para este escritório? Nenhum conteúdo será publicado automaticamente.')">
+                    <i class="bi bi-check-circle me-1"></i>Ativar Portal do Cliente
+                </button>
+            </form>
         <?php else: ?>
         <form method="post" class="row g-3">
             <input type="hidden" name="csrf_token" value="<?=htmlspecialchars($csrf)?>"><input type="hidden" name="acao_cfg" value="criar_conta_portal">

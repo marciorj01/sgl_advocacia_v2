@@ -149,9 +149,38 @@ if (!function_exists('rojexModulosPlataformaPorPerfil')) {
     }
 }
 
+if (!function_exists('rojexMapaModulosSaas')) {
+    function rojexMapaModulosSaas(): array
+    {
+        return [
+            'cij' => 'cij',
+            'modelos' => 'modelos',
+        ];
+    }
+}
+
+if (!function_exists('rojexCodigoModuloSaas')) {
+    function rojexCodigoModuloSaas(string $modulo): ?string
+    {
+        $mapa = rojexMapaModulosSaas();
+        return isset($mapa[$modulo]) ? (string)$mapa[$modulo] : null;
+    }
+}
+
 if (!function_exists('rojexPodeAcessarModulo')) {
     function rojexPodeAcessarModulo(string $modulo): bool
     {
+        $codigoSaas = rojexCodigoModuloSaas($modulo);
+
+        if ($codigoSaas !== null) {
+            return function_exists('rojexModuloContratado')
+                ? rojexModuloContratado($codigoSaas)
+                : (
+                    function_exists('rojexEscritorioPossuiModulo')
+                    && rojexEscritorioPossuiModulo($codigoSaas)
+                );
+        }
+
         if (function_exists('rojexModoPlataforma') && rojexModoPlataforma()) {
             return rojexEhUsuarioPlataforma()
                 && in_array($modulo, rojexModulosPlataformaPorPerfil(), true);
@@ -271,6 +300,12 @@ if (!in_array($moduloInformado, $modulos_validos, true)) {
         && rojexEhMasterSaas()
     ) {
         unset($_SESSION['rojex_aviso_autorizacao']);
+    } elseif ($moduloInformado === 'cij') {
+        $_SESSION['rojex_aviso_autorizacao'] =
+            'O Centro de Inteligência Jurídica não está disponível para este escritório.';
+    } elseif ($moduloInformado === 'modelos') {
+        $_SESSION['rojex_aviso_autorizacao'] =
+            'O módulo Modelos Jurídicos não está disponível para este escritório.';
     } else {
         $_SESSION['rojex_aviso_autorizacao'] =
             'Você não possui permissão para acessar o módulo solicitado.';
@@ -689,7 +724,9 @@ function sgl_link_active(?string $atual, string $item): string {
             <?php else: ?>
                 <a href="?mod=dashboard" class="nav-link <?= sgl_link_active($modulo, 'dashboard') ?>"><i class="bi bi-speedometer2"></i> Dashboard</a>
                 <a href="?mod=busca" class="nav-link <?= sgl_link_active($modulo, 'busca') ?>"><i class="bi bi-search"></i> Busca Global</a>
-                <a href="?mod=cij" class="nav-link <?= sgl_link_active($modulo, 'cij') ?>"><i class="bi bi-cpu"></i> Centro de Inteligência Jurídica</a>
+                <?php if (rojexPodeAcessarModulo('cij')): ?>
+                    <a href="?mod=cij" class="nav-link <?= sgl_link_active($modulo, 'cij') ?>"><i class="bi bi-cpu"></i> Centro de Inteligência Jurídica</a>
+                <?php endif; ?>
 
                 <div class="sgl-menu-title">Cadastros</div>
                 <button class="sgl-group-toggle" data-bs-toggle="collapse" data-bs-target="#menuCadastros" aria-expanded="<?= sgl_menu_active($modulo, ['advogados','clientes']) ? 'true' : 'false' ?>">
@@ -711,7 +748,9 @@ function sgl_link_active(?string $atual, string $item): string {
                         <a href="?mod=processos" class="nav-link <?= sgl_link_active($modulo, 'processos') ?>"><i class="bi bi-folder2-open"></i> Processos</a>
                         <a href="?mod=agenda" class="nav-link <?= sgl_link_active($modulo, 'agenda') ?>"><i class="bi bi-calendar-event"></i> Agenda</a>
                         <a href="?mod=documentos" class="nav-link <?= sgl_link_active($modulo, 'documentos') ?>"><i class="bi bi-file-earmark-arrow-up"></i> Documentos</a>
-                        <a href="?mod=modelos" class="nav-link <?= sgl_link_active($modulo, 'modelos') ?>"><i class="bi bi-journal-text"></i> Modelos</a>
+                        <?php if (rojexPodeAcessarModulo('modelos')): ?>
+                            <a href="?mod=modelos" class="nav-link <?= sgl_link_active($modulo, 'modelos') ?>"><i class="bi bi-journal-text"></i> Modelos</a>
+                        <?php endif; ?>
                     </div>
                 </div>
 
